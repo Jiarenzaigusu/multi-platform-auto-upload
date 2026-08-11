@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.venv-agent-build/
+venv/
+build/
+dist/
+webapp/frontend/node_modules/
+webapp/frontend/dist/
+
+# Runtime data and credentials
+cookies/
+data/
+logs/
+photos/
+runtime/
+
+# Databases / local state
+db/database.db
+*.sqlite
+*.sqlite3
+
+# System / IDE
+.DS_Store
+deploy/windows/mpau.local.ps1
+deploy/windows/output/
+Thumbs.db
+.vscode/
+.idea/
+
+# Local agent/workspace metadata
+.pi/
+
+# Large media files
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.flv
+*.wmv
+*.webm

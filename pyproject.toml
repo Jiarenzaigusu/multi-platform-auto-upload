@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multi-platform-auto-upload"
+version = "0.1.0"
+description = "Internal multi-user Web publishing console for Tmall and JD"
+readme = "README.zh-CN.md"
+requires-python = ">=3.10,<3.13"
+license = "MIT"
+dependencies = [
+  "argon2-cffi>=23.1,<26",
+  "certifi>=2024.8.30,<2027",
+  "loguru==0.7.3",
+  "patchright==1.58.2",
+  "pydantic>=2.9,<3",
+]
+
+[project.scripts]
+mpau-web = "webapp.api.main:run"
+mpau-agent = "local_agent.main:run"
+mpau-agent-desktop = "local_agent.desktop:run"
+
+[project.optional-dependencies]
+web = [
+  "fastapi>=0.115,<1",
+  "openpyxl>=3.1,<4",
+  "python-multipart>=0.0.9,<1",
+  "uvicorn[standard]>=0.30,<1",
+]
+desktop = [
+  "pillow>=10,<13",
+  "pystray>=0.19,<1",
+]
+build = [
+  "pyinstaller>=6.10,<7",
+]
+test = [
+  "httpx>=0.27,<1",
+  "pytest>=8,<9",
+]
+
+[tool.uv]
+package = true
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["local_agent*", "uploader*", "utils*", "webapp*"]
+
+[tool.setuptools.package-data]
+utils = ["stealth.min.js"]
+webapp = ["frontend/dist/**", "templates/*.xlsx"]

@@ -1,0 +1,34 @@
+name: Build Windows Agent
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "agent-v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Inno Setup
+        shell: powershell
+        run: choco install innosetup --yes --no-progress
+
+      - name: Build self-contained installer
+        shell: powershell
+        run: .\deploy\windows\build-mpau-agent.ps1
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: MPAU-Agent-Setup
+          path: |
+            deploy/windows/output/MPAU-Agent-Setup.exe
+            deploy/windows/output/MPAU-Agent-Setup.exe.sha256
+          if-no-files-found: error
