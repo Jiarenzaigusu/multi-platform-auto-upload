@@ -1,20 +1,27 @@
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 import { apiRequest, apiUrl } from '../api-client.js'
 
+const props = defineProps({
+  platform: {
+    type: String,
+    required: true,
+    validator: (value) => value === 'windows' || value === 'macos',
+  },
+})
 const emit = defineEmits(['close'])
 const pairingCode = ref('')
 const expiresAt = ref('')
 const busy = ref(false)
 const error = ref('')
 const copied = ref(false)
-const isMac = /Macintosh|Mac OS X/i.test(navigator.userAgent)
-const platformName = isMac ? 'Mac' : 'Windows'
-const installerName = isMac ? 'MPAU-Agent-macOS-arm64.dmg' : 'MPAU-Agent-Setup.exe'
-const installerUrl = isMac
+const isMac = computed(() => props.platform === 'macos')
+const platformName = computed(() => isMac.value ? 'Mac' : 'Windows')
+const installerName = computed(() => isMac.value ? 'MPAU-Agent-macOS-arm64.dmg' : 'MPAU-Agent-Setup.exe')
+const installerUrl = computed(() => isMac.value
   ? '/downloads/MPAU-Agent-macOS-arm64.dmg'
-  : '/downloads/MPAU-Agent-Setup.exe'
+  : '/downloads/MPAU-Agent-Setup.exe')
 
 const expiryLabel = () => {
   const value = new Date(expiresAt.value)

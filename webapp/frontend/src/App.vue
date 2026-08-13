@@ -9,7 +9,7 @@ import UserManagementView from './features/users/UserManagementView.vue'
 
 const apiBase = import.meta.env.VITE_API_BASE_URL || ''
 const currentUser = ref(null)
-const showAgentSetup = ref(false)
+const agentSetupPlatform = ref('')
 configureApiClient({ baseUrl: apiBase, onUnauthorized: endAuthenticatedSession })
 
 // === 发布草稿持久化（localStorage 文本 + IndexedDB 视频） ===
@@ -895,7 +895,11 @@ onBeforeUnmount(() => {
 <template>
   <AuthGate v-if="!currentUser" @authenticated="beginAuthenticatedSession" />
   <main v-else class="shell">
-    <AgentSetupDialog v-if="showAgentSetup" @close="showAgentSetup = false" />
+    <AgentSetupDialog
+      v-if="agentSetupPlatform"
+      :platform="agentSetupPlatform"
+      @close="agentSetupPlatform = ''"
+    />
     <aside class="rail">
       <div class="brand">
         <span class="brand-mark">M</span>
@@ -944,7 +948,8 @@ onBeforeUnmount(() => {
         </div>
         <div class="session-actions">
           <span><strong>{{ currentUser.display_name }}</strong><small>{{ currentUser.username }} · {{ currentUser.role }}</small></span>
-          <button class="refresh" type="button" @click="showAgentSetup = true">Windows 助手</button>
+          <button class="refresh agent-windows" type="button" @click="agentSetupPlatform = 'windows'">Windows 助手</button>
+          <button class="refresh agent-macos" type="button" @click="agentSetupPlatform = 'macos'">Mac 助手</button>
           <button v-if="!['ai-copy', 'llm-adapter', 'users'].includes(activeView)" class="refresh" @click="refreshDashboard">刷新状态</button>
           <button class="refresh logout" type="button" @click="logout">退出</button>
         </div>
