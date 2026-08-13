@@ -77,6 +77,7 @@ def create_agent_router(
     workspace_for_user: Callable[[str], UserWorkspace],
     auth_service: AuthService,
     installer_path: Path | None = None,
+    mac_installer_path: Path | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/agent", tags=["local-agent"])
 
@@ -204,8 +205,16 @@ def create_agent_router(
             }
         return manager.agent_status() | {
             "installer": {
-                "available": bool(installer_path and installer_path.is_file()),
-                "download_url": "/downloads/MPAU-Agent-Setup.exe",
+                "windows": {
+                    "available": bool(installer_path and installer_path.is_file()),
+                    "download_url": "/downloads/MPAU-Agent-Setup.exe",
+                },
+                "macos_arm64": {
+                    "available": bool(
+                        mac_installer_path and mac_installer_path.is_file()
+                    ),
+                    "download_url": "/downloads/MPAU-Agent-macOS-arm64.dmg",
+                },
             }
         }
 

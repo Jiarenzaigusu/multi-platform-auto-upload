@@ -1,0 +1,29 @@
+name: Build macOS Agent
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "agent-v*"
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build Apple Silicon disk image
+        run: ./deploy/macos/build-mpau-agent.sh
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: MPAU-Agent-macOS-arm64
+          path: |
+            deploy/macos/output/MPAU-Agent-macOS-arm64.dmg
+            deploy/macos/output/MPAU-Agent-macOS-arm64.dmg.sha256
+          if-no-files-found: error

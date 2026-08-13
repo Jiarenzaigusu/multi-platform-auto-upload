@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 .venv/
 .venv-agent-build/
+.venv-agent-build-macos/
 venv/
 build/
 dist/
@@ -26,6 +27,7 @@ db/database.db
 .DS_Store
 deploy/windows/mpau.local.ps1
 deploy/windows/output/
+deploy/macos/output/
 Thumbs.db
 .vscode/
 .idea/

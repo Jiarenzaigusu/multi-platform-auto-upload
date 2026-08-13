@@ -6,7 +6,7 @@ import sys
 import threading
 import time
 
-from local_agent.autostart import open_url, set_windows_autostart
+from local_agent.autostart import open_url, set_autostart
 from local_agent.client import AgentApiClient, AgentApiError
 from local_agent.credentials import AgentConnectionStore, StoredConnection
 from local_agent.main import LocalAgentApplication, _server_url
@@ -14,6 +14,10 @@ from local_agent.paths import default_data_root
 
 
 _WINDOWS_MUTEX = None
+
+
+def _platform_name() -> str:
+    return "Mac" if sys.platform == "darwin" else "Windows"
 
 
 def _acquire_single_instance() -> bool:
@@ -53,7 +57,10 @@ def _pairing_dialog(
     ).pack(anchor="w", padx=36, pady=(34, 8))
     tk.Label(
         root,
-        text="在网页的“本地执行助手”面板生成配对码，然后填到这里。\n配对一次后会随 Windows 登录自动连接，不再需要输入密码。",
+        text=(
+            "在网页的“本地执行助手”面板生成配对码，然后填到这里。\n"
+            f"配对一次后会随{_platform_name()}登录自动连接，不再需要输入密码。"
+        ),
         justify="left",
         font=("Microsoft YaHei UI", 10),
         bg="#f3f0e8",
@@ -119,7 +126,7 @@ def _pairing_dialog(
         button.configure(state="normal", text="完成配对")
 
     def pairing_succeeded() -> None:
-        set_windows_autostart(True)
+        set_autostart(True)
         messagebox.showinfo("配对成功", "本地执行助手已连接，以后只需打开发布台网页。")
         root.destroy()
 
@@ -175,7 +182,7 @@ def _run_tray(
         except AgentApiError:
             pass
         store.clear()
-        set_windows_autostart(False)
+        set_autostart(False)
         quit_agent(icon)
 
     user_label = connection.user.get("display_name") or connection.user.get("username")
@@ -239,7 +246,7 @@ def _run_status_window(
 
 
 def _connect_when_available(application: LocalAgentApplication) -> bool:
-    """Keep an autostarted helper alive while Windows is waiting for the network."""
+    """Keep an autostarted helper alive while the local network is unavailable."""
     while True:
         try:
             application.connect()

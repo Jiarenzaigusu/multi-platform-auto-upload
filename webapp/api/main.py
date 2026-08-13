@@ -77,6 +77,7 @@ class WebSettings:
     user_workers: int = 1
     global_browser_tasks: int = 10
     agent_installer_path: Path | None = None
+    mac_agent_installer_path: Path | None = None
     session_seconds: int = 12 * 60 * 60
     secure_cookies: bool = False
     allowed_hosts: tuple[str, ...] = ("127.0.0.1", "localhost", "testserver")
@@ -137,6 +138,12 @@ class WebSettings:
                 os.getenv(
                     "MPAU_AGENT_INSTALLER_PATH",
                     str(BASE_DIR / "deploy/windows/output/MPAU-Agent-Setup.exe"),
+                )
+            ).expanduser().resolve(),
+            mac_agent_installer_path=Path(
+                os.getenv(
+                    "MPAU_MAC_AGENT_INSTALLER_PATH",
+                    str(BASE_DIR / "deploy/macos/output/MPAU-Agent-macOS-arm64.dmg"),
                 )
             ).expanduser().resolve(),
             session_seconds=positive_int("MPAU_SESSION_SECONDS", 12 * 60 * 60),
@@ -554,6 +561,20 @@ def create_app(
             installer,
             media_type="application/vnd.microsoft.portable-executable",
             filename="MPAU-Agent-Setup.exe",
+        )
+
+    @app.get("/downloads/MPAU-Agent-macOS-arm64.dmg")
+    def download_macos_agent_installer(_user=Depends(require_user)) -> FileResponse:
+        installer = settings.mac_agent_installer_path
+        if installer is None or not installer.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail="管理员尚未上传 macOS 本地执行助手安装包",
+            )
+        return FileResponse(
+            installer,
+            media_type="application/x-apple-diskimage",
+            filename="MPAU-Agent-macOS-arm64.dmg",
         )
 
     @app.post("/api/accounts/{platform}/{account}/login", status_code=202)
@@ -1018,6 +1039,7 @@ def create_app(
             workspace_registry.get,
             auth_service,
             settings.agent_installer_path,
+            settings.mac_agent_installer_path,
         )
     )
 

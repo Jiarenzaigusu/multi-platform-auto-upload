@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, patch
 from local_agent.client import AgentApiError
 from local_agent.credentials import AgentConnectionStore
 from local_agent.desktop import _connect_when_available
+from local_agent import autostart
 from local_agent.main import LocalAgentApplication
 from local_agent.runner import AgentJobRunner
 from uploader.errors import PublishResultUncertainError
@@ -229,6 +230,13 @@ class AgentConnectionStoreTests(unittest.TestCase):
 
             store.clear()
             self.assertIsNone(store.load())
+
+
+class AgentAutostartTests(unittest.TestCase):
+    def test_development_autostart_uses_desktop_module(self):
+        with patch.object(autostart.sys, "frozen", False, create=True):
+            arguments = autostart.autostart_arguments()
+        self.assertEqual(arguments[-3:], ["-m", "local_agent.desktop", "--background"])
 
 
 class LocalAgentApplicationTests(unittest.TestCase):

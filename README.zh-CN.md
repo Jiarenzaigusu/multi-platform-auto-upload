@@ -60,13 +60,13 @@ mpau-web
 
 ## 用户电脑安装本地执行助手
 
-普通用户不需要 Python、项目代码、虚拟环境或命令行。管理员先在 Windows 构建机生成完整安装包：
+普通用户不需要 Python、项目代码、虚拟环境或命令行。管理员可在 Windows 构建机生成 Windows 安装包：
 
 ```powershell
 .\deploy\windows\build-mpau-agent.ps1
 ```
 
-生成的 `deploy\windows\output\MPAU-Agent-Setup.exe` 放到云服务器默认路径，或通过 `MPAU_AGENT_INSTALLER_PATH` 指定。用户登录网页后下载并安装一次，在网页生成配对码并输入助手窗口。设备令牌由 Windows DPAPI 加密，助手随当前 Windows 用户登录自动启动，不保存应用密码。
+生成的 `deploy\windows\output\MPAU-Agent-Setup.exe` 放到云服务器默认路径，或通过 `MPAU_AGENT_INSTALLER_PATH` 指定。Apple Silicon Mac 可在 macOS 上执行 `./deploy/macos/build-mpau-agent.sh`，生成 `deploy/macos/output/MPAU-Agent-macOS-arm64.dmg`，并通过 `MPAU_MAC_AGENT_INSTALLER_PATH` 指定网页下载路径。用户登录网页后下载并安装一次，在网页生成配对码并输入助手窗口。Windows 使用 DPAPI、macOS 使用 Keychain 保存设备令牌，助手会随各自系统的当前用户登录自动启动，不保存应用密码。
 
 以后用户只打开云服务器域名；普通功能全部由云端响应，只有平台登录、Cookie 校验和发布任务会自动在用户电脑打开 Edge。Cookie、浏览器会话和平台日志默认保存在 `%LOCALAPPDATA%\MPAU-Agent\users\<user_uuid>\`。
 

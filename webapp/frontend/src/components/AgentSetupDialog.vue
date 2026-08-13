@@ -9,6 +9,12 @@ const expiresAt = ref('')
 const busy = ref(false)
 const error = ref('')
 const copied = ref(false)
+const isMac = /Macintosh|Mac OS X/i.test(navigator.userAgent)
+const platformName = isMac ? 'Mac' : 'Windows'
+const installerName = isMac ? 'MPAU-Agent-macOS-arm64.dmg' : 'MPAU-Agent-Setup.exe'
+const installerUrl = isMac
+  ? '/downloads/MPAU-Agent-macOS-arm64.dmg'
+  : '/downloads/MPAU-Agent-Setup.exe'
 
 const expiryLabel = () => {
   const value = new Date(expiresAt.value)
@@ -48,13 +54,14 @@ async function copyCode() {
     <section class="agent-dialog" aria-labelledby="agent-setup-title" role="dialog" aria-modal="true">
       <button class="agent-dialog-close" aria-label="关闭" type="button" @click="emit('close')">×</button>
       <p>LOCAL EXECUTION ASSISTANT</p>
-      <h2 id="agent-setup-title">安装并配对 Windows 助手</h2>
+      <h2 id="agent-setup-title">安装并配对 {{ platformName }} 助手</h2>
       <ol>
-        <li>在 Windows 电脑下载并运行安装包。</li>
+        <li>在 {{ platformName }} 电脑下载并安装助手。</li>
+        <li v-if="isMac">打开 DMG 后，将“MPAU Agent”拖入“Applications”文件夹，再从应用程序打开它。</li>
         <li>打开“MPAU 本地执行助手”，填入发布台地址和下方配对码。</li>
-        <li>配对完成后助手自动保持连接；登录平台和上传任务会在该 Windows 电脑的 Edge 中执行。</li>
+        <li>配对完成后助手自动保持连接；登录平台和上传任务会在该电脑的 Edge 中执行。</li>
       </ol>
-      <a class="agent-download" :href="apiUrl('/downloads/MPAU-Agent-Setup.exe')">下载 MPAU-Agent-Setup.exe</a>
+      <a class="agent-download" :href="apiUrl(installerUrl)">下载 {{ installerName }}</a>
       <button class="agent-code-button" :disabled="busy" type="button" @click="generateCode">
         {{ busy ? '正在生成…' : pairingCode ? '重新生成一次性配对码' : '生成一次性配对码' }}
       </button>
@@ -63,7 +70,7 @@ async function copyCode() {
         <small>{{ copied ? '已复制到剪贴板' : `${expiryLabel()} · 点击复制` }}</small>
       </button>
       <p v-if="error" class="agent-dialog-error" role="alert">{{ error }}</p>
-      <p class="agent-dialog-note">发布台地址填写当前网页地址，例如 <code>https://publish.example.com</code>。生产环境必须使用 HTTPS；本机开发时可使用 <code>http://127.0.0.1:8788</code>。</p>
+      <p class="agent-dialog-note">发布台地址填写当前网页地址，例如 <code>https://publish.example.com</code>。生产环境必须使用 HTTPS；本机开发时可使用 <code>http://127.0.0.1:8788</code>。<span v-if="isMac">首次打开未签名应用时，在 Finder 中按住 Control 点击“MPAU Agent”，选择“打开”即可确认运行。</span></p>
     </section>
   </div>
 </template>

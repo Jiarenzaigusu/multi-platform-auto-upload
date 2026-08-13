@@ -30,7 +30,7 @@ mpau-agent ── HTTPS ──┘                    （不启动 Edge）
 ### 2.1 助手配对与连接
 
 1. 用户登录发布台网页；
-2. 首次使用时下载并安装 `MPAU-Agent-Setup.exe`，不需要 Python、项目代码或命令行；
+2. 首次使用时下载并安装与本机匹配的助手：Windows 下载 `MPAU-Agent-Setup.exe`，Apple Silicon Mac 下载 `MPAU-Agent-macOS-arm64.dmg`；不需要 Python、项目代码或命令行；
 3. 用户在网页生成 5 分钟有效的一次性配对码，并输入本地助手窗口；
 4. 助手用配对码换取只允许访问代理接口的设备令牌，Windows 上通过当前用户 DPAPI 加密保存；
 5. 助手写入当前 Windows 用户登录启动项，以后自动连接；
