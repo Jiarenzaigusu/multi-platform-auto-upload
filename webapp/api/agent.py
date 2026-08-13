@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from webapp.auth import AuthService
 from webapp.auth.models import AuthenticatedAgent
 from webapp.auth.service import AuthenticationError
+from webapp.api.models import SUPPORTED_COVER_IMAGE_EXTENSIONS
 from webapp.workspaces.service import UserWorkspace
 
 _AGENT_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
@@ -54,6 +55,7 @@ def _validate_agent_id(agent_id: str) -> str:
 def _agent_job_response(job: dict[str, Any]) -> dict[str, Any]:
     payload = dict(job.get("payload") or {})
     payload.pop("video_path", None)
+    cover_image_path = payload.pop("cover_image_path", None)
     response = {
         key: value
         for key, value in job.items()
@@ -62,6 +64,11 @@ def _agent_job_response(job: dict[str, Any]) -> dict[str, Any]:
     response["payload"] = payload
     if job["kind"] == "publish":
         response["video_download_url"] = f"/api/agent/jobs/{job['id']}/video"
+        if cover_image_path:
+            payload["cover_image_filename"] = Path(cover_image_path).name
+            response["cover_image_download_url"] = (
+                f"/api/agent/jobs/{job['id']}/cover-image"
+            )
     return response
 
 
@@ -282,6 +289,45 @@ def create_agent_router(
             raise HTTPException(status_code=404, detail="任务视频不存在")
         filename = Path(job["payload"].get("original_filename") or path.name).name
         return FileResponse(path, media_type="application/octet-stream", filename=filename)
+
+    @router.get("/jobs/{job_id}/cover-image")
+    def download_cover_image(
+        job_id: str,
+        agent_id: str,
+        request: Request,
+    ) -> FileResponse:
+        authenticated = authenticated_agent(request)
+        workspace = workspace_for_user(authenticated.user.id)
+        manager = remote_manager(request)
+        selected_agent = bound_agent_id(request, agent_id)
+        try:
+            job = manager.get_claimed_job(job_id, selected_agent)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="任务不存在") from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if job["kind"] != "publish" or job["platform"] != "tmall":
+            raise HTTPException(status_code=409, detail="该任务没有天猫封面图片")
+        raw_cover_path = job["payload"].get("cover_image_path")
+        if not raw_cover_path:
+            raise HTTPException(status_code=404, detail="任务没有自定义封面图片")
+        path = Path(raw_cover_path).resolve()
+        video_path = Path(job["payload"]["video_path"]).resolve()
+        upload_root = workspace.paths.uploads.resolve()
+        if (
+            not path.is_relative_to(upload_root)
+            or path.parent != video_path.parent
+            or path.suffix.lower() not in SUPPORTED_COVER_IMAGE_EXTENSIONS
+            or not path.is_file()
+        ):
+            raise HTTPException(status_code=404, detail="任务封面图片不存在")
+        return FileResponse(
+            path,
+            media_type="application/octet-stream",
+            filename=path.name,
+        )
 
     @router.post("/jobs/{job_id}/complete")
     def complete(

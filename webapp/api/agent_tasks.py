@@ -102,11 +102,6 @@ class AgentTaskManager:
                     self.delete_job_artifacts(pruned_job["id"])
                 self._cleanup_orphaned_uploads(self.store.list_jobs(limit=None))
                 cleanup_old_files(
-                    self.paths.screenshots,
-                    older_than_days=30,
-                    suffixes={".png", ".jpg", ".jpeg"},
-                )
-                cleanup_old_files(
                     self.paths.media,
                     older_than_days=1,
                     suffixes={".upload"},
@@ -154,6 +149,9 @@ class AgentTaskManager:
         for request, source_row in requests:
             payload = asdict(request)
             payload["video_path"] = str(request.video_path)
+            payload["cover_image_path"] = (
+                str(request.cover_image_path) if request.cover_image_path else None
+            )
             payload["schedule"] = request.schedule.isoformat() if request.schedule else None
             payload["tags"] = list(request.tags)
             definitions.append(

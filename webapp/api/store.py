@@ -446,6 +446,27 @@ class JobStore:
             self._write(state)
             return dict(deleted)
 
+    def delete_jobs(self, job_ids: list[str]) -> tuple[list[str], list[tuple[str, str]]]:
+        """Delete multiple completed task records in one workspace-locked update."""
+        deleted: list[str] = []
+        skipped: list[tuple[str, str]] = []
+        with self._lock:
+            state = self._read()
+            jobs = state["jobs"]
+            for job_id in job_ids:
+                job = jobs.get(job_id)
+                if not job:
+                    skipped.append((job_id, "任务不存在"))
+                    continue
+                if job["status"] not in TERMINAL_STATUSES:
+                    skipped.append((job_id, "仅已完成或失败的任务可以删除"))
+                    continue
+                jobs.pop(job_id)
+                deleted.append(job_id)
+            if deleted:
+                self._write(state)
+        return deleted, skipped
+
     def update_job(self, job_id: str, **changes: Any) -> dict[str, Any]:
         with self._lock:
             state = self._read()

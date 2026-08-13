@@ -158,11 +158,6 @@ class TaskManager:
                     self.delete_job_artifacts(pruned_job["id"])
                 self._cleanup_orphaned_uploads(self.store.list_jobs(limit=None))
                 cleanup_old_files(
-                    self.paths.screenshots,
-                    older_than_days=30,
-                    suffixes={".png", ".jpg", ".jpeg"},
-                )
-                cleanup_old_files(
                     self.paths.media,
                     older_than_days=1,
                     suffixes={".upload"},
@@ -223,6 +218,9 @@ class TaskManager:
         for request, source_row in requests:
             payload = asdict(request)
             payload["video_path"] = str(request.video_path)
+            payload["cover_image_path"] = (
+                str(request.cover_image_path) if request.cover_image_path else None
+            )
             payload["schedule"] = request.schedule.isoformat() if request.schedule else None
             payload["tags"] = list(request.tags)
             definitions.append(
@@ -400,6 +398,18 @@ class TaskManager:
         if log_path:
             log_path.unlink(missing_ok=True)
 
+    def delete_jobs_artifacts(self, job_ids: list[str]) -> None:
+        """Delete per-job logs for a batch task deletion request."""
+        first_error: OSError | None = None
+        for job_id in job_ids:
+            try:
+                self.delete_job_artifacts(job_id)
+            except OSError as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+
     def close_account_session(self, platform: str, account: str) -> None:
         if not self.browser_runtime or platform not in {"tmall", "jd"}:
             return
@@ -522,7 +532,7 @@ class TaskManager:
                 self.store.update_job(
                     job_id,
                     status="failed",
-                    message="任务失败，请查看任务日志或失败截图",
+                    message="任务失败，请查看任务日志",
                     error=str(exc),
                     finished_at=utc_now(),
                 )
@@ -755,6 +765,11 @@ class TaskManager:
             request = TmallVideoUploadRequest(
                 account_name=account,
                 video_file=video_path,
+                cover_image_file=(
+                    Path(payload["cover_image_path"])
+                    if payload.get("cover_image_path")
+                    else None
+                ),
                 title=payload["title"],
                 description=payload["description"],
                 tags=payload["tags"],

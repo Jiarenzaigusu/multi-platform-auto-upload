@@ -55,11 +55,6 @@ class AgentJobRunner:
             user_id, paths.platform_logs
         )
         cleanup_old_files(paths.job_logs, older_than_days=30, suffixes={".log"})
-        cleanup_old_files(
-            paths.screenshots,
-            older_than_days=30,
-            suffixes={".png", ".jpg", ".jpeg"},
-        )
         cleanup_old_directories(paths.uploads, older_than_days=1)
         self._job_sink_ids: dict[str, int] = {}
         self._task_guard = threading.RLock()
@@ -69,13 +64,21 @@ class AgentJobRunner:
         self._cancel_requested: set[str] = set()
 
     def submit(
-        self, job: dict[str, Any], video_path: Path | None
+        self,
+        job: dict[str, Any],
+        video_path: Path | None,
+        cover_image_path: Path | None = None,
     ) -> Future[dict[str, Any]]:
         self._attach_job_log(job)
-        return self.runtime.submit(self._run_contextualized(job, video_path))
+        return self.runtime.submit(
+            self._run_contextualized(job, video_path, cover_image_path)
+        )
 
     async def _run_contextualized(
-        self, job: dict[str, Any], video_path: Path | None
+        self,
+        job: dict[str, Any],
+        video_path: Path | None,
+        cover_image_path: Path | None,
     ) -> dict[str, Any]:
         job_id = job["id"]
         task = asyncio.current_task()
@@ -89,7 +92,7 @@ class AgentJobRunner:
             task.cancel()
         try:
             with logger.contextualize(job_id=job_id, user_id=self.user_id):
-                return await self._run_job(job, video_path)
+                return await self._run_job(job, video_path, cover_image_path)
         finally:
             with self._task_guard:
                 self._running_tasks.pop(job_id, None)
@@ -109,7 +112,10 @@ class AgentJobRunner:
             loop.call_soon_threadsafe(task.cancel)
 
     async def _run_job(
-        self, job: dict[str, Any], video_path: Path | None
+        self,
+        job: dict[str, Any],
+        video_path: Path | None,
+        cover_image_path: Path | None = None,
     ) -> dict[str, Any]:
         platform = job["platform"]
         account = job["account"]
@@ -209,6 +215,7 @@ class AgentJobRunner:
             request = TmallVideoUploadRequest(
                 account_name=account,
                 video_file=video_path,
+                cover_image_file=cover_image_path,
                 title=payload["title"],
                 description=payload["description"],
                 tags=list(payload["tags"]),

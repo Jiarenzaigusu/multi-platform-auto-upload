@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import BackgroundTasks, HTTPException, UploadFile
 from loguru import logger
@@ -139,6 +139,45 @@ class PublishRequestValidationTests(unittest.TestCase):
 
         self.assertEqual(request.tags, ("女鞋", "夏季穿搭"))
         self.assertFalse(request.dry_run)
+
+    def test_tmall_accepts_optional_cover_image_only(self):
+        cover = Path(self.temp_dir.name) / "cover.png"
+        cover.write_bytes(b"image")
+
+        request = validate_publish_request(
+            platform="tmall",
+            account="shop1",
+            video_path=self.video,
+            cover_image_path=cover,
+            original_filename="demo.mp4",
+            title="夏季女鞋测评",
+        )
+
+        self.assertEqual(request.cover_image_path, cover.resolve())
+
+        with self.assertRaisesRegex(ValidationError, "仅天猫光合"):
+            validate_publish_request(
+                platform="jd",
+                account="shop1",
+                video_path=self.video,
+                cover_image_path=cover,
+                original_filename="demo.mp4",
+                title="京东视频标题示例",
+            )
+
+    def test_tmall_rejects_unsupported_cover_image(self):
+        cover = Path(self.temp_dir.name) / "cover.gif"
+        cover.write_bytes(b"image")
+
+        with self.assertRaisesRegex(ValidationError, "JPG、PNG 或 WebP"):
+            validate_publish_request(
+                platform="tmall",
+                account="shop1",
+                video_path=self.video,
+                cover_image_path=cover,
+                original_filename="demo.mp4",
+                title="夏季女鞋测评",
+            )
 
     def test_jd_rejects_description_and_invalid_title_length(self):
         with self.assertRaisesRegex(ValidationError, "独立文案"):
@@ -289,6 +328,80 @@ class PublishRequestValidationTests(unittest.TestCase):
         self.assertEqual(_two_character_chunks("默契"), ("默契",))
         self.assertEqual(_two_character_chunks("夏日好物"), ("夏日", "好物"))
         self.assertEqual(_two_character_chunks("abcde"), ("ab", "cd", "e"))
+
+    def test_tmall_custom_cover_uses_the_reference_image_library_flow(self):
+        cover = Path(self.temp_dir.name) / "20260811-093942.jpeg"
+        cover.write_bytes(b"cover")
+        uploader = object.__new__(TmallVideo)
+        uploader.cover_image_path = str(cover)
+
+        def locator():
+            item = MagicMock()
+            item.wait_for = AsyncMock()
+            item.click = AsyncMock()
+            return item
+
+        def query(item):
+            result = MagicMock()
+            result.first = item
+            result.last = item
+            return result
+
+        edit = locator()
+        smart_cover_loading = locator()
+        cover_upload = locator()
+        cover_dialog = locator()
+        cover_dialog.get_by_text.return_value = query(cover_upload)
+        opened_overlays = MagicMock()
+        opened_overlays.count = AsyncMock(side_effect=[0, 0, 1])
+        opened_overlays.nth.return_value = cover_dialog
+
+        frame = MagicMock()
+        frame.locator.side_effect = lambda selector: (
+            query(edit)
+            if selector == '[data-autolog-container="coverOperate_edit"]'
+            else opened_overlays
+        )
+        frame.get_by_text.return_value = query(smart_cover_loading)
+
+        selected_control = MagicMock()
+        selected_control.is_checked = AsyncMock(return_value=True)
+        picker_frame = MagicMock()
+        picker_frame.url = "https://example.test/sucai-selector-ng"
+        picker_frame.evaluate = AsyncMock(
+            side_effect=[[], {"found": True, "hasControl": True, "checked": True}]
+        )
+        picker_frame.locator.return_value = selected_control
+        page = MagicMock()
+        page.frames = [MagicMock(url="https://example.test/main"), picker_frame]
+
+        with (
+            patch(
+                "uploader.tmall_uploader.main.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+            patch(
+                "uploader.tmall_uploader.main._upload_picker_file",
+                new=AsyncMock(),
+            ) as upload_picker_file,
+            patch(
+                "uploader.tmall_uploader.main._select_square_cover_ratio_and_continue",
+                new=AsyncMock(),
+            ) as select_square_cover,
+            patch(
+                "uploader.tmall_uploader.main._click_visible_frame_button",
+                new=AsyncMock(),
+            ) as click_visible_button,
+        ):
+            asyncio.run(uploader._set_custom_cover(frame, page))
+
+        edit.click.assert_awaited_once_with(timeout=10000)
+        cover_upload.click.assert_awaited_once_with()
+        upload_picker_file.assert_awaited_once_with(page, picker_frame, cover)
+        select_square_cover.assert_awaited_once_with(page)
+        self.assertEqual(click_visible_button.await_count, 3)
+        cover_dialog.wait_for.assert_awaited_once_with(state="hidden", timeout=10000)
+        frame.get_by_text.assert_called_once_with("智能封面图生成中", exact=False)
 
     def test_unknown_tmall_navigation_is_not_publish_confirmation(self):
         class Body:
@@ -892,7 +1005,7 @@ class TmallBatchWorkbookTests(unittest.TestCase):
 
     def test_valid_rows_map_to_tmall_publish_requests(self):
         content = self.build_workbook(
-            [["photos/demo.mp4", "夏季女鞋穿搭", "轻盈舒适", "女鞋，夏季穿搭", "12345，67890", "夏日上新", ""]]
+            [[str(self.video), "夏季女鞋穿搭", "轻盈舒适", "女鞋，夏季穿搭", "12345，67890", "夏日上新", ""]]
         )
 
         rows = parse_tmall_batch_workbook(
@@ -900,7 +1013,6 @@ class TmallBatchWorkbookTests(unittest.TestCase):
             account="shop1",
             dry_run=True,
             headed=True,
-            base_dir=self.base_dir,
         )
 
         self.assertEqual(len(rows), 1)
@@ -914,7 +1026,7 @@ class TmallBatchWorkbookTests(unittest.TestCase):
         workbook = Workbook()
         worksheet = workbook.active
         worksheet.append(["视频路径", "标题", "创作者声明"])
-        worksheet.append(["photos/demo.mp4", "夏季女鞋穿搭", "内容含营销广告"])
+        worksheet.append([str(self.video), "夏季女鞋穿搭", "内容含营销广告"])
         output = BytesIO()
         workbook.save(output)
         workbook.close()
@@ -924,7 +1036,6 @@ class TmallBatchWorkbookTests(unittest.TestCase):
             account="shop1",
             dry_run=True,
             headed=True,
-            base_dir=self.base_dir,
         )
 
         self.assertEqual(rows[0].request.creator_declaration, "内容含营销广告")
@@ -933,7 +1044,7 @@ class TmallBatchWorkbookTests(unittest.TestCase):
         workbook = Workbook()
         worksheet = workbook.active
         worksheet.append(["视频路径", "标题", "音乐名称", "创作者声明"])
-        worksheet.append(["photos/demo.mp4", "夏季女鞋穿搭", "默契", "内容无需标注"])
+        worksheet.append([str(self.video), "夏季女鞋穿搭", "默契", "内容无需标注"])
         output = BytesIO()
         workbook.save(output)
         workbook.close()
@@ -943,18 +1054,17 @@ class TmallBatchWorkbookTests(unittest.TestCase):
             account="shop1",
             dry_run=True,
             headed=True,
-            base_dir=self.base_dir,
         )
 
         self.assertEqual(rows[0].request.music_name, "默契")
 
     def test_packaged_template_includes_the_optional_music_column(self):
-        template = Path(__file__).resolve().parents[1] / "webapp/templates/tmall_batch_template.xlsx"
-        workbook = load_workbook(template)
+        from webapp.api.batch_templates import build_batch_template
+        workbook = load_workbook(BytesIO(build_batch_template("tmall")))
         try:
             worksheet = workbook.active
             self.assertEqual(
-                [worksheet.cell(4, column).value for column in range(1, 10)],
+                [worksheet.cell(1, column).value for column in range(1, 10)],
                 [
                     "视频路径",
                     "标题",
@@ -967,11 +1077,11 @@ class TmallBatchWorkbookTests(unittest.TestCase):
                     "创作者声明",
                 ],
             )
-            self.assertEqual(worksheet["G5"].value, "默契")
-            self.assertIn("A1:I1", {str(item) for item in worksheet.merged_cells.ranges})
+            self.assertEqual(worksheet["G2"].value, "默契")
+            self.assertFalse(list(worksheet.merged_cells.ranges))
             validations = worksheet.data_validations.dataValidation
             self.assertEqual(len(validations), 1)
-            self.assertEqual(str(validations[0].sqref), "I5:I204")
+            self.assertEqual(str(validations[0].sqref), "I2:I201")
         finally:
             workbook.close()
 
@@ -979,7 +1089,7 @@ class TmallBatchWorkbookTests(unittest.TestCase):
         workbook = Workbook()
         worksheet = workbook.active
         worksheet.append(["视频路径", "标题", "创作者声明"])
-        worksheet.append(["photos/demo.mp4", "夏季女鞋穿搭", ""])
+        worksheet.append([str(self.video), "夏季女鞋穿搭", ""])
         output = BytesIO()
         workbook.save(output)
         workbook.close()
@@ -990,7 +1100,6 @@ class TmallBatchWorkbookTests(unittest.TestCase):
                 account="shop1",
                 dry_run=True,
                 headed=True,
-                base_dir=self.base_dir,
             )
 
         self.assertEqual(context.exception.errors[0].row, 2)
@@ -1003,7 +1112,7 @@ class TmallBatchWorkbookTests(unittest.TestCase):
         worksheet.append(["店铺账号在网页中选择"])
         worksheet.append([])
         worksheet.append(["视频路径", "标题", "文案", "标签", "商品ID", "活动话题", "定时发布", "创作者声明"])
-        worksheet.append(["photos/demo.mp4", "夏季女鞋穿搭", "", "", "", "", "", "内容无需标注"])
+        worksheet.append([str(self.video), "夏季女鞋穿搭", "", "", "", "", "", "内容无需标注"])
         content = BytesIO()
         workbook.save(content)
         workbook.close()
@@ -1013,13 +1122,12 @@ class TmallBatchWorkbookTests(unittest.TestCase):
             account="shop1",
             dry_run=True,
             headed=True,
-            base_dir=self.base_dir,
         )
 
         self.assertEqual(rows[0].row_number, 5)
 
     def test_invalid_rows_report_excel_row_without_creating_requests(self):
-        content = self.build_workbook([["photos/missing.mp4", "", "", "", "", "", ""]])
+        content = self.build_workbook([[str(self.base_dir / "missing.mp4"), "", "", "", "", "", ""]])
 
         with self.assertRaises(BatchValidationError) as context:
             parse_tmall_batch_workbook(
@@ -1027,16 +1135,13 @@ class TmallBatchWorkbookTests(unittest.TestCase):
                 account="shop1",
                 dry_run=False,
                 headed=True,
-                base_dir=self.base_dir,
             )
 
         self.assertEqual(context.exception.errors[0].row, 2)
-        self.assertIn("视频文件不存在", context.exception.errors[0].message)
+        self.assertIn("标题不能为空", context.exception.errors[0].message)
 
     def test_parent_directory_escape_is_reported_as_a_row_error(self):
-        content = self.build_workbook(
-            [["../outside.mp4", "夏季女鞋穿搭", "", "", "", "", ""]]
-        )
+        content = self.build_workbook([["demo.mp4", "夏季女鞋穿搭", "", "", "", "", ""]])
 
         with self.assertRaises(BatchValidationError) as context:
             parse_tmall_batch_workbook(
@@ -1044,11 +1149,10 @@ class TmallBatchWorkbookTests(unittest.TestCase):
                 account="shop1",
                 dry_run=True,
                 headed=True,
-                base_dir=self.base_dir,
             )
 
         self.assertEqual(context.exception.errors[0].row, 2)
-        self.assertIn("不能超出当前用户素材目录", context.exception.errors[0].message)
+        self.assertIn("视频路径必须填写本机绝对路径", context.exception.errors[0].message)
 
 
 class JdBatchWorkbookTests(unittest.TestCase):
@@ -1075,7 +1179,7 @@ class JdBatchWorkbookTests(unittest.TestCase):
 
     def test_valid_rows_map_to_jd_publish_requests(self):
         content = self.build_workbook(
-            [["photos/demo.mp4", "京东视频标题示例", "12345", "", "是"]]
+            [[str(self.video), "京东视频标题示例", "12345", "", "是"]]
         )
 
         rows = parse_jd_batch_workbook(
@@ -1083,7 +1187,6 @@ class JdBatchWorkbookTests(unittest.TestCase):
             account="shop1",
             dry_run=True,
             headed=True,
-            base_dir=self.base_dir,
         )
 
         self.assertEqual(len(rows), 1)
@@ -1097,7 +1200,7 @@ class JdBatchWorkbookTests(unittest.TestCase):
         workbook = Workbook()
         worksheet = workbook.active
         worksheet.append(["视频路径", "标题", "创作者声明"])
-        worksheet.append(["photos/demo.mp4", "京东视频标题示例", "含AI生成内容"])
+        worksheet.append([str(self.video), "京东视频标题示例", "含AI生成内容"])
         output = BytesIO()
         workbook.save(output)
         workbook.close()
@@ -1107,7 +1210,6 @@ class JdBatchWorkbookTests(unittest.TestCase):
             account="shop1",
             dry_run=True,
             headed=True,
-            base_dir=self.base_dir,
         )
 
         self.assertEqual(rows[0].request.creator_declaration, "含AI生成内容")
@@ -1116,7 +1218,7 @@ class JdBatchWorkbookTests(unittest.TestCase):
         workbook = Workbook()
         worksheet = workbook.active
         worksheet.append(["视频路径", "标题", "创作者声明"])
-        worksheet.append(["photos/demo.mp4", "京东视频标题示例", ""])
+        worksheet.append([str(self.video), "京东视频标题示例", ""])
         output = BytesIO()
         workbook.save(output)
         workbook.close()
@@ -1127,7 +1229,6 @@ class JdBatchWorkbookTests(unittest.TestCase):
                 account="shop1",
                 dry_run=True,
                 headed=True,
-                base_dir=self.base_dir,
             )
 
         self.assertEqual(context.exception.errors[0].row, 2)
@@ -1135,7 +1236,7 @@ class JdBatchWorkbookTests(unittest.TestCase):
 
     def test_invalid_original_value_reports_its_excel_column(self):
         content = self.build_workbook(
-            [["photos/demo.mp4", "京东视频标题示例", "", "", "不确定"]]
+            [[str(self.video), "京东视频标题示例", "", "", "不确定"]]
         )
 
         with self.assertRaises(BatchValidationError) as context:
@@ -1144,7 +1245,6 @@ class JdBatchWorkbookTests(unittest.TestCase):
                 account="shop1",
                 dry_run=False,
                 headed=True,
-                base_dir=self.base_dir,
             )
 
         self.assertEqual(context.exception.errors[0].row, 2)
@@ -1163,8 +1263,8 @@ class TmallBatchApiTests(unittest.TestCase):
             workbook = Workbook()
             worksheet = workbook.active
             worksheet.append(["视频路径", "标题", "文案", "标签", "商品ID", "活动话题", "定时发布", "创作者声明"])
-            worksheet.append([video.name, "夏季女鞋穿搭", "轻盈舒适", "女鞋,夏季穿搭", "12345", "", "", "内容无需标注"])
-            worksheet.append([video.name, "夏季通勤穿搭", "舒适百搭", "通勤", "", "", "", "内容无需标注"])
+            worksheet.append([str(video), "夏季女鞋穿搭", "轻盈舒适", "女鞋,夏季穿搭", "12345", "", "", "内容无需标注"])
+            worksheet.append([str(video), "夏季通勤穿搭", "舒适百搭", "通勤", "", "", "", "内容无需标注"])
             content = BytesIO()
             workbook.save(content)
             workbook.close()
@@ -1214,8 +1314,8 @@ class TmallBatchApiTests(unittest.TestCase):
             workbook = Workbook()
             worksheet = workbook.active
             worksheet.append(["视频路径", "标题", "创作者声明"])
-            worksheet.append([video.name, "有效标题", "内容无需标注"])
-            worksheet.append(["missing.mp4", "无效视频", "内容无需标注"])
+            worksheet.append([str(video), "有效标题", "内容无需标注"])
+            worksheet.append([str(root / "missing.mp4"), "无效视频", "内容无需标注"])
             content = BytesIO()
             workbook.save(content)
             workbook.close()
@@ -1240,9 +1340,8 @@ class TmallBatchApiTests(unittest.TestCase):
                 )
                 body = json.loads(response.body)
 
-                self.assertEqual(response.status_code, 422)
-                self.assertEqual(body["errors"][0]["row"], 3)
-                self.assertEqual(store.list_jobs(), [])
+                self.assertEqual(response.status_code, 202)
+                self.assertEqual(body["created_count"], 2)
             finally:
                 manager.shutdown()
 
@@ -1259,8 +1358,8 @@ class JdBatchApiTests(unittest.TestCase):
             workbook = Workbook()
             worksheet = workbook.active
             worksheet.append(["视频路径", "标题", "商品ID", "定时发布", "自主原创", "创作者声明"])
-            worksheet.append([video.name, "京东视频标题示例", "12345", "", "是", "内容无需标注"])
-            worksheet.append([video.name, "京东夏日好物推荐", "", "", "否", "内容无需标注"])
+            worksheet.append([str(video), "京东视频标题示例", "12345", "", "是", "内容无需标注"])
+            worksheet.append([str(video), "京东夏日好物推荐", "", "", "否", "内容无需标注"])
             content = BytesIO()
             workbook.save(content)
             workbook.close()
@@ -1311,8 +1410,8 @@ class JdBatchApiTests(unittest.TestCase):
             workbook = Workbook()
             worksheet = workbook.active
             worksheet.append(["视频路径", "标题", "自主原创", "创作者声明"])
-            worksheet.append([video.name, "京东视频标题示例", "否", "内容无需标注"])
-            worksheet.append([video.name, "京东夏日好物推荐", "未知", "内容无需标注"])
+            worksheet.append([str(video), "京东视频标题示例", "否", "内容无需标注"])
+            worksheet.append([str(video), "京东夏日好物推荐", "未知", "内容无需标注"])
             content = BytesIO()
             workbook.save(content)
             workbook.close()
@@ -1510,12 +1609,16 @@ class ApiEndpointTests(unittest.TestCase):
                 route.endpoint for route in app.routes if route.path == "/api/jobs/publish"
             )
             upload = UploadFile(filename="demo.mp4", file=BytesIO(b"video"))
+            cover_upload = UploadFile(
+                filename="cover.png", file=BytesIO(b"cover")
+            )
             try:
                 response = asyncio.run(
                     endpoint(
                         platform="tmall",
                         account="shop1",
                         video=upload,
+                        cover_image=cover_upload,
                         title="夏季女鞋测评",
                         description="",
                         tags="",
@@ -1535,8 +1638,12 @@ class ApiEndpointTests(unittest.TestCase):
                 job = store.list_jobs(limit=None)[0]
                 self.assertEqual(job["payload"]["music_name"], "默契")
                 video_path = Path(job["payload"]["video_path"])
+                cover_path = Path(job["payload"]["cover_image_path"])
                 self.assertEqual(video_path.parent.stat().st_mode & 0o777, 0o700)
                 self.assertEqual(video_path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(cover_path.parent, video_path.parent)
+                self.assertEqual(cover_path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(cover_path.read_bytes(), b"cover")
             finally:
                 release.set()
                 manager.wait_for_account_idle("tmall", "shop1", timeout=2)
@@ -1798,9 +1905,46 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(uploader_type.call_args.kwargs["account_file"], str(account_file))
         self.assertEqual(uploader_type.call_args.kwargs["goods_id"], "12345,67890")
         self.assertEqual(uploader_type.call_args.kwargs["music_name"], "默契")
+        self.assertNotIn("screenshot_dir", uploader_type.call_args.kwargs)
+
+    def test_tmall_publish_adapter_passes_optional_cover_to_uploader(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        paths = AppDataPaths.create(Path(temp_dir.name) / "data").for_user(
+            TEST_USER_ID
+        )
+        request = TmallVideoUploadRequest(
+            account_name="shop1",
+            video_file=Path("/tmp/demo.mp4"),
+            cover_image_file=Path("/tmp/cover.png"),
+            title="夏季女鞋测评",
+            description="轻便好穿",
+            tags=[],
+        )
+        account_file = Path("/tmp/tmall_shop1.json")
+        leased_session = object()
+
+        class Lease:
+            async def __aenter__(self):
+                return leased_session
+
+            async def __aexit__(self, _exc_type, _exc, _traceback):
+                return False
+
+        class Pool:
+            def lease(self, _path, *, headless):
+                return Lease()
+
+        with patch(
+            "webapp.api.platforms.resolve_account_file", return_value=account_file
+        ), patch(
+            "webapp.api.platforms.tmall_setup", new=AsyncMock(return_value=True)
+        ), patch("webapp.api.platforms.TmallVideo") as uploader_type:
+            uploader_type.return_value.upload_in_session = AsyncMock()
+            asyncio.run(upload_tmall_video(request, paths=paths, session_pool=Pool()))
+
         self.assertEqual(
-            uploader_type.call_args.kwargs["screenshot_dir"],
-            paths.screenshots / "tmall",
+            uploader_type.call_args.kwargs["cover_image_path"], "/tmp/cover.png"
         )
 
     def test_jd_publish_adapter_calls_pooled_uploader(self):
@@ -1844,10 +1988,7 @@ class PlatformAdapterTests(unittest.TestCase):
         self.assertEqual(result, {})
         uploader_type.return_value.upload_in_session.assert_awaited_once_with(leased_session)
         self.assertEqual(uploader_type.call_args.kwargs["account_file"], str(account_file))
-        self.assertEqual(
-            uploader_type.call_args.kwargs["screenshot_dir"],
-            paths.screenshots / "jd",
-        )
+        self.assertNotIn("screenshot_dir", uploader_type.call_args.kwargs)
 
 
 class LocalSecurityMiddlewareTests(unittest.TestCase):

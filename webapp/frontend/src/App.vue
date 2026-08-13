@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { apiRequest as request, apiUrl, configureApiClient } from './api-client.js'
+import AgentSetupDialog from './components/AgentSetupDialog.vue'
 import AuthGate from './components/AuthGate.vue'
 import AiCopyView from './features/ai-copy/AiCopyView.vue'
 import LlmAdapterView from './features/llm-adapter/LlmAdapterView.vue'
@@ -8,6 +9,7 @@ import UserManagementView from './features/users/UserManagementView.vue'
 
 const apiBase = import.meta.env.VITE_API_BASE_URL || ''
 const currentUser = ref(null)
+const showAgentSetup = ref(false)
 configureApiClient({ baseUrl: apiBase, onUnauthorized: endAuthenticatedSession })
 
 // === 发布草稿持久化（localStorage 文本 + IndexedDB 视频） ===
@@ -15,6 +17,7 @@ const DRAFT_DB_NAME = 'mpau_publish_drafts'
 const DRAFT_DB_VERSION = 1
 const DRAFT_VIDEO_STORE = 'videos'
 const DRAFT_VIDEO_MAX_BYTES = 100 * 1024 * 1024
+const MAX_COVER_IMAGE_BYTES = 20 * 1024 * 1024
 const creatorDeclarationOptions = [
   '内容无需标注',
   '内容含营销广告',
@@ -272,20 +275,17 @@ async function clearPublishDraft() {
 const jobs = ref([])
 const jobSummary = ref({ total: 0, statuses: {} })
 const jobsOffset = ref(0)
+const selectedJobIds = ref([])
+const batchDeleting = ref(false)
 const jobsPageSize = 500
 const accounts = ref([])
-const agentStatus = ref({ execution_mode: 'local_agent', online: false, agents: [] })
-const pairingCode = ref('')
-const pairingExpiresAt = ref('')
-const pairingBusy = ref(false)
-const pairingError = ref('')
 const activeView = ref('publish')
 const selectedJob = ref(null)
 const jobLogs = ref([])
 const videoInput = ref(null)
+const coverImageInput = ref(null)
 const scheduleInput = ref(null)
 const batchWorkbookInput = ref(null)
-const batchMediaInput = ref(null)
 const submitting = ref(false)
 const publishError = ref('')
 const batchSubmitting = ref(false)
@@ -294,10 +294,6 @@ const notice = ref('')
 const noticeType = ref('info')
 const batchErrors = ref([])
 const batchResult = ref(null)
-const mediaFiles = ref([])
-const selectedMediaUploads = ref([])
-const mediaUploading = ref(false)
-const mediaError = ref('')
 let refreshTimer
 let noticeTimer
 let dashboardRefreshPromise = null
@@ -308,6 +304,7 @@ const form = reactive({
   platform: 'tmall',
   account: '',
   video: null,
+  coverImage: null,
   title: '',
   description: '',
   tags: '',
@@ -352,13 +349,6 @@ const batchForm = reactive({
 const isTmall = computed(() => form.platform === 'tmall')
 const isTmallBatch = computed(() => batchForm.platform === 'tmall')
 const isAdmin = computed(() => currentUser.value?.role === 'admin')
-const localAgentOnline = computed(() => Boolean(agentStatus.value.online))
-const agentInstallerAvailable = computed(() => Boolean(agentStatus.value.installer?.available))
-const pairingExpiryLabel = computed(() => {
-  if (!pairingExpiresAt.value) return ''
-  const value = new Date(pairingExpiresAt.value)
-  return Number.isNaN(value.getTime()) ? '' : value.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-})
 const platformLabel = (platform) => (platform === 'tmall' ? '天猫光合' : '京东京麦')
 const batchPlatformLabel = computed(() => platformLabel(batchForm.platform))
 const jobLabel = (kind) => ({ publish: '发布', login: '登录', check: '校验', delete_account: '删除本地账号' }[kind] || kind)
@@ -434,10 +424,6 @@ watch(() => batchForm.platform, () => {
   clearBatchWorkbook()
 })
 
-watch(activeView, (view) => {
-  if (view === 'batch') refreshMediaFiles()
-})
-
 watch(form, () => {
   if (isRestoringDraft.value) return
   persistFormDraft()
@@ -454,30 +440,6 @@ function showNotice(message, type = 'info') {
     notice.value = ''
     noticeTimer = null
   }, NOTICE_DISMISS_MS)
-}
-
-async function generatePairingCode() {
-  pairingBusy.value = true
-  pairingError.value = ''
-  try {
-    const result = await request('/api/agent/pairing-code', { method: 'POST' })
-    pairingCode.value = result.pairing_code
-    pairingExpiresAt.value = result.expires_at
-  } catch (error) {
-    pairingError.value = error.message
-  } finally {
-    pairingBusy.value = false
-  }
-}
-
-async function copyPairingCode() {
-  if (!pairingCode.value) return
-  try {
-    await navigator.clipboard.writeText(pairingCode.value)
-    showNotice('配对码已复制', 'success')
-  } catch (error) {
-    showNotice('无法自动复制，请手动输入配对码', 'error')
-  }
 }
 
 function importAiCopyToWorkbench(draft) {
@@ -500,10 +462,9 @@ async function refreshDashboard() {
   dashboardRefreshPromise = (async () => {
     try {
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const [jobsResult, accountsResult, agentResult] = await Promise.all([
+        const [jobsResult, accountsResult] = await Promise.all([
           request(`/api/jobs?limit=${jobsPageSize}&offset=${jobsOffset.value}`),
           request('/api/accounts'),
-          request('/api/agent/status'),
         ])
         if (currentUser.value?.id !== userId) return
         if (jobsResult.total > 0 && jobsOffset.value >= jobsResult.total) {
@@ -516,12 +477,7 @@ async function refreshDashboard() {
           statuses: jobsResult.status_counts || {},
         }
         accounts.value = accountsResult.accounts
-        agentStatus.value = agentResult
-        if (agentResult.online) {
-          pairingCode.value = ''
-          pairingExpiresAt.value = ''
-          pairingError.value = ''
-        }
+        syncJobSelection()
         if (selectedJob.value) await loadJob(selectedJob.value.id, false)
         break
       }
@@ -550,7 +506,7 @@ async function loadJob(jobId, openPanel = true) {
 
 async function deleteJob(job) {
   if (!canDeleteJob(job)) return
-  if (!window.confirm(`确定删除“${jobLabel(job.kind)} · ${job.account}”任务记录及其独立日志吗？此操作不会删除 Cookie、截图或平台总日志。`)) return
+  if (!window.confirm(`确定删除“${jobLabel(job.kind)} · ${job.account}”任务记录及其独立日志吗？此操作不会删除 Cookie 或平台总日志。`)) return
 
   try {
     await request(`/api/jobs/${job.id}`, { method: 'DELETE' })
@@ -565,13 +521,57 @@ async function deleteJob(job) {
   }
 }
 
+function toggleJobSelection(job) {
+  if (!canDeleteJob(job)) return
+  const index = selectedJobIds.value.indexOf(job.id)
+  if (index >= 0) selectedJobIds.value.splice(index, 1)
+  else selectedJobIds.value.push(job.id)
+}
+
+function toggleSelectAllJobs() {
+  const deletableIds = jobs.value.filter(canDeleteJob).map((job) => job.id)
+  selectedJobIds.value = selectedJobIds.value.length === deletableIds.length
+    ? []
+    : deletableIds
+}
+
+function syncJobSelection() {
+  const deletableIds = new Set(jobs.value.filter(canDeleteJob).map((job) => job.id))
+  selectedJobIds.value = selectedJobIds.value.filter((id) => deletableIds.has(id))
+}
+
+async function batchDeleteJobs() {
+  const targets = jobs.value.filter((job) => selectedJobIds.value.includes(job.id))
+  if (!targets.length || batchDeleting.value) return
+  if (!window.confirm(`确定删除已选中的 ${targets.length} 条任务记录及其独立日志吗？此操作不会删除 Cookie 或平台总日志。`)) return
+  batchDeleting.value = true
+  try {
+    const result = await request('/api/jobs/batch-delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_ids: targets.map((job) => job.id) }),
+    })
+    const deletedIds = new Set(result.deleted || [])
+    if (selectedJob.value && deletedIds.has(selectedJob.value.id)) {
+      selectedJob.value = null
+      jobLogs.value = []
+    }
+    selectedJobIds.value = []
+    const skipped = result.skipped || []
+    if (deletedIds.size && skipped.length) showNotice(`已删除 ${deletedIds.size} 条；跳过 ${skipped.length} 条（仅已完成或失败的任务可删除）`, 'success')
+    else if (deletedIds.size) showNotice(`已删除 ${deletedIds.size} 条任务记录`, 'success')
+    else if (skipped.length) showNotice('所选任务均不能删除（仅已完成或失败的任务可删除）', 'error')
+    await refreshDashboard()
+  } catch (error) {
+    showNotice(error.message, 'error')
+  } finally {
+    batchDeleting.value = false
+  }
+}
+
 async function cancelJobAndDeleteAccount(job) {
   if (!canCancelJob(job)) return
-  if (!localAgentOnline.value) {
-    showNotice('本地执行代理未在线，无法安全中断本机浏览器或删除 Cookie', 'error')
-    return
-  }
-  if (!window.confirm(`确定中断“${jobLabel(job.kind)} · ${job.account}”任务，并在浏览器退出后删除该店铺的 Cookie 和账号建议吗？历史任务、截图和平台日志会保留。`)) return
+  if (!window.confirm(`确定中断“${jobLabel(job.kind)} · ${job.account}”任务，并在浏览器退出后删除该店铺的 Cookie 和账号建议吗？历史任务和平台日志会保留。`)) return
 
   try {
     const result = await request(`/api/jobs/${job.id}/cancel-and-delete-account`, { method: 'POST' })
@@ -588,12 +588,8 @@ async function deleteAccount(platform = form.platform, account = form.account) {
     showNotice('请先填写店铺账号标识', 'error')
     return
   }
-  if (!localAgentOnline.value) {
-    showNotice('请先安装并打开本地执行助手，再删除本地 Cookie', 'error')
-    return
-  }
   const label = platformLabel(platform)
-  if (!window.confirm(`确定删除“${label} · ${account}”的 Cookie 和账号建议吗？任务记录、截图和平台日志不会删除。`)) return
+  if (!window.confirm(`确定删除“${label} · ${account}”的 Cookie 和账号建议吗？任务记录和平台日志不会删除。`)) return
 
   try {
     const result = await request(`/api/accounts/${platform}/${encodeURIComponent(account)}`, { method: 'DELETE' })
@@ -623,6 +619,12 @@ async function onFileChange(event) {
   draftRestoredVideoName.value = ''
 }
 
+function onCoverImageChange(event) {
+  const file = event.target.files?.[0] || null
+  form.coverImage = file
+  publishError.value = ''
+}
+
 function clearVideo() {
   form.video = null
   if (videoInput.value) videoInput.value.value = ''
@@ -630,8 +632,14 @@ function clearVideo() {
   draftRestoredVideoName.value = ''
 }
 
+function clearCoverImage() {
+  form.coverImage = null
+  if (coverImageInput.value) coverImageInput.value.value = ''
+}
+
 function clearPublishContent() {
   clearVideo()
+  clearCoverImage()
   for (const platform of ['tmall', 'jd']) {
     Object.assign(platformDrafts[platform], createEmptyPlatformDraft())
   }
@@ -661,60 +669,6 @@ function clearBatchWorkbook() {
   if (batchWorkbookInput.value) batchWorkbookInput.value.value = ''
 }
 
-/** Refresh the current user's server-side batch video library. */
-async function refreshMediaFiles() {
-  mediaError.value = ''
-  try {
-    const result = await request('/api/media')
-    mediaFiles.value = result.files || []
-  } catch (requestError) {
-    mediaError.value = requestError.message
-  }
-}
-
-/** Keep the browser selection in memory until the user confirms the upload. */
-function onBatchMediaChange(event) {
-  selectedMediaUploads.value = Array.from(event.target.files || [])
-  mediaError.value = ''
-}
-
-/** Upload selected videos into only the authenticated user's media directory. */
-async function uploadBatchMedia() {
-  if (!selectedMediaUploads.value.length) {
-    mediaError.value = '请先选择一个或多个批量发布视频。'
-    return
-  }
-  mediaUploading.value = true
-  mediaError.value = ''
-  const data = new FormData()
-  for (const file of selectedMediaUploads.value) data.append('files', file)
-  try {
-    const result = await request('/api/media', { method: 'POST', body: data })
-    mediaFiles.value = result.files || []
-    selectedMediaUploads.value = []
-    if (batchMediaInput.value) batchMediaInput.value.value = ''
-    showNotice('批量视频已上传到你的独立素材目录', 'success')
-  } catch (requestError) {
-    mediaError.value = requestError.message
-  } finally {
-    mediaUploading.value = false
-  }
-}
-
-/** Remove an unused media file after explicit user confirmation. */
-async function deleteMediaFile(file) {
-  if (!window.confirm(`确定删除批量素材“${file.name}”吗？`)) return
-  mediaError.value = ''
-  try {
-    await request(`/api/media/${encodeURIComponent(file.name)}`, { method: 'DELETE' })
-    await refreshMediaFiles()
-  } catch (requestError) {
-    mediaError.value = requestError.message
-  }
-}
-
-const formatFileSize = (bytes) => `${(bytes / 1024 / 1024).toFixed(1)} MB`
-
 function openSchedulePicker() {
   const input = scheduleInput.value
   if (!input) return
@@ -728,16 +682,16 @@ function openSchedulePicker() {
 
 async function submitPublish() {
   publishError.value = ''
-  if (!localAgentOnline.value) {
-    publishError.value = '本地执行助手未在线。请先安装并打开助手，再创建发布任务。'
-    return
-  }
   if (!form.account.trim()) {
     publishError.value = '请先选择或填写店铺账号标识'
     return
   }
   if (!form.video) {
     publishError.value = '请先重新选择一个视频文件'
+    return
+  }
+  if (isTmall.value && form.coverImage && form.coverImage.size > MAX_COVER_IMAGE_BYTES) {
+    publishError.value = '封面图片不能超过 20 MiB'
     return
   }
   if (!form.title.trim()) {
@@ -773,6 +727,7 @@ async function submitPublish() {
   data.append('platform', form.platform)
   data.append('account', form.account)
   data.append('video', form.video)
+  if (isTmall.value && form.coverImage) data.append('cover_image', form.coverImage)
   data.append('title', form.title)
   data.append('description', isTmall.value ? form.description : '')
   data.append('tags', isTmall.value ? form.tags : '')
@@ -800,10 +755,6 @@ async function submitPublish() {
 
 async function submitBatch() {
   batchSubmitError.value = ''
-  if (!localAgentOnline.value) {
-    batchSubmitError.value = '本地执行助手未在线。请先安装并打开助手。'
-    return
-  }
   if (!batchForm.account.trim()) {
     batchSubmitError.value = `请先选择或填写${batchPlatformLabel.value}店铺账号标识`
     return
@@ -842,10 +793,6 @@ async function accountAction(action, platform = form.platform, account = form.ac
     showNotice('请先填写店铺账号标识', 'error')
     return
   }
-  if (!localAgentOnline.value) {
-    showNotice('请先安装并打开本地执行助手；登录、Cookie 和 Edge 都保存在当前电脑', 'error')
-    return
-  }
   try {
     const query = action === 'login' ? '?headed=true' : ''
     const result = await request(`/api/accounts/${platform}/${encodeURIComponent(account)}/${action}${query}`, { method: 'POST' })
@@ -866,6 +813,7 @@ function resetUserInterface() {
     platform: 'tmall',
     account: '',
     video: null,
+    coverImage: null,
     title: '',
     description: '',
     tags: '',
@@ -890,20 +838,12 @@ function resetUserInterface() {
   })
   jobs.value = []
   accounts.value = []
-  agentStatus.value = { execution_mode: 'local_agent', online: false, agents: [] }
-  pairingCode.value = ''
-  pairingExpiresAt.value = ''
-  pairingError.value = ''
-  pairingBusy.value = false
   jobSummary.value = { total: 0, statuses: {} }
   jobsOffset.value = 0
   selectedJob.value = null
   jobLogs.value = []
   batchErrors.value = []
   batchResult.value = null
-  mediaFiles.value = []
-  selectedMediaUploads.value = []
-  mediaError.value = ''
   draftRestoredVideoName.value = ''
   draftRestoredAt.value = ''
   dashboardRefreshPromise = null
@@ -955,6 +895,7 @@ onBeforeUnmount(() => {
 <template>
   <AuthGate v-if="!currentUser" @authenticated="beginAuthenticatedSession" />
   <main v-else class="shell">
+    <AgentSetupDialog v-if="showAgentSetup" @close="showAgentSetup = false" />
     <aside class="rail">
       <div class="brand">
         <span class="brand-mark">M</span>
@@ -962,13 +903,13 @@ onBeforeUnmount(() => {
       </div>
 
       <nav>
-        <button class="feature-nav-entry" :class="{ active: activeView === 'publish' }" @click="activeView = 'publish'">
-          <span>发布工作台</span>
-          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 15V4m0 0L8 8m4-4 4 4" /><path d="M5 14v5h14v-5" /></svg></span>
-        </button>
         <button class="feature-nav-entry" :class="{ active: activeView === 'ai-copy' }" @click="activeView = 'ai-copy'">
           <span>AI 文案工坊</span>
           <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3c.6 3.3 2.7 5.4 6 6-3.3.6-5.4 2.7-6 6-.6-3.3-2.7-5.4-6-6 3.3-.6 5.4-2.7 6-6Z" /><path d="M18.5 15.5c.2 1.4 1.1 2.3 2.5 2.5-1.4.2-2.3 1.1-2.5 2.5-.2-1.4-1.1-2.3-2.5-2.5 1.4-.2 2.3-1.1 2.5-2.5Z" /></svg></span>
+        </button>
+        <button class="feature-nav-entry" :class="{ active: activeView === 'publish' }" @click="activeView = 'publish'">
+          <span>发布工作台</span>
+          <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 15V4m0 0L8 8m4-4 4 4" /><path d="M5 14v5h14v-5" /></svg></span>
         </button>
         <button class="feature-nav-entry" :class="{ active: activeView === 'batch' }" @click="activeView = 'batch'">
           <span>批量发布任务</span>
@@ -989,9 +930,9 @@ onBeforeUnmount(() => {
       </nav>
 
       <div class="rail-note">
-        <span>本地执行代理</span>
-        <strong>{{ localAgentOnline ? '当前电脑已连接' : '当前电脑未连接' }}</strong>
-        <p>云端只保存任务与素材；Edge、Cookie、登录、短信和风控验证全部在你的电脑上完成。</p>
+        <span>运行范围</span>
+        <strong>仅天猫与京东</strong>
+        <p>浏览器自动化在本机运行。登录、短信和风控验证需要你在 Microsoft Edge 中完成。</p>
       </div>
     </aside>
 
@@ -1002,45 +943,14 @@ onBeforeUnmount(() => {
           <h1>{{ viewTitle }}</h1>
         </div>
         <div class="session-actions">
-          <div :class="['agent-status', { online: localAgentOnline }]">
-            <i></i>{{ localAgentOnline ? '本地代理在线' : '本地代理离线' }}
-          </div>
           <span><strong>{{ currentUser.display_name }}</strong><small>{{ currentUser.username }} · {{ currentUser.role }}</small></span>
+          <button class="refresh" type="button" @click="showAgentSetup = true">Windows 助手</button>
           <button v-if="!['ai-copy', 'llm-adapter', 'users'].includes(activeView)" class="refresh" @click="refreshDashboard">刷新状态</button>
           <button class="refresh logout" type="button" @click="logout">退出</button>
         </div>
       </header>
 
       <p v-if="notice && !['ai-copy', 'llm-adapter'].includes(activeView)" :class="['notice', `notice-${noticeType}`]">{{ notice }}</p>
-
-      <section v-if="!localAgentOnline" class="agent-onboarding" aria-live="polite">
-        <div class="agent-onboarding-copy">
-          <p class="eyebrow">ONE-TIME DEVICE SETUP</p>
-          <h2>连接这台电脑</h2>
-          <p>普通功能已经在云端可用。首次使用浏览器自动化时，只需安装一次本地执行助手并完成配对；以后打开本网页即可发布。</p>
-          <ol>
-            <li>安装并打开“MPAU 本地执行助手”</li>
-            <li>在下方生成配对码，输入助手窗口</li>
-            <li>配对成功后助手随 Windows 登录自动启动</li>
-          </ol>
-        </div>
-        <div class="agent-onboarding-actions">
-          <a
-            v-if="agentInstallerAvailable"
-            class="agent-download"
-            :href="apiUrl(agentStatus.installer.download_url)"
-          >下载 Windows 执行助手</a>
-          <p v-else class="agent-installer-missing">安装包尚未发布，请联系管理员预装本地执行助手。</p>
-          <button class="agent-pair-button" type="button" :disabled="pairingBusy" @click="generatePairingCode">
-            {{ pairingBusy ? '正在生成...' : pairingCode ? '重新生成配对码' : '生成一次性配对码' }}
-          </button>
-          <button v-if="pairingCode" class="pairing-code" type="button" title="点击复制" @click="copyPairingCode">
-            <strong>{{ pairingCode }}</strong>
-            <small>{{ pairingExpiryLabel ? `${pairingExpiryLabel} 前有效 · 点击复制` : '5 分钟内有效 · 点击复制' }}</small>
-          </button>
-          <p v-if="pairingError" class="pairing-error">{{ pairingError }}</p>
-        </div>
-      </section>
 
       <AiCopyView
         v-if="activeView === 'ai-copy'"
@@ -1055,7 +965,7 @@ onBeforeUnmount(() => {
             <label :class="{ selected: form.platform === 'tmall' }"><input v-model="form.platform" type="radio" value="tmall" /><span>天猫光合</span><small>视频、文案、标签、活动话题、音乐</small></label>
             <label :class="{ selected: form.platform === 'jd' }"><input v-model="form.platform" type="radio" value="jd" /><span>京东京麦</span><small>视频、标题、商品、原创声明</small></label>
           </div>
-          <p v-if="isTmall" class="workflow-tip"><strong>天猫实际步骤：</strong>上传视频 → 填写标题、文案和标签 → 参与话题 → 可选添加音乐 → 关联商品 → 设置定时 → 选择创作者声明 → 提交发布。</p>
+          <p v-if="isTmall" class="workflow-tip"><strong>天猫实际步骤：</strong>上传视频 → 可选设置自定义封面 → 填写标题、文案和标签 → 参与话题 → 可选添加音乐 → 关联商品 → 设置定时 → 选择创作者声明 → 提交发布。</p>
           <p v-else class="workflow-tip"><strong>京东实际步骤：</strong>上传视频 → 填写标题 → 关联商品 → 选择创作声明与自主原创 → 设置定时 → 提交发布；出现验证码时需要在 Edge 中手动完成验证。</p>
 
           <div class="field-row">
@@ -1065,13 +975,20 @@ onBeforeUnmount(() => {
 
           <div class="section-heading section-heading-with-action">
             <span>02</span>
-            <div><h2>内容素材</h2><p>视频先通过 HTTPS 上传到云端任务区，再由当前电脑的本地代理下载并交给 Edge 上传。</p></div>
+            <div><h2>内容素材</h2><p>视频会先存入本机运行目录，再由浏览器上传到平台。</p></div>
             <button type="button" class="quiet danger section-heading-action" @click="clearPublishDraft">一键清空发布配置与素材</button>
           </div>
           <div class="dropzone">
             <input id="video-file" ref="videoInput" type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/x-m4v,video/x-msvideo,video/webm,.m4v,.avi" @change="onFileChange" />
             <label for="video-file"><strong>{{ form.video ? form.video.name : '选择视频文件' }}</strong><small>{{ form.video ? `${(form.video.size / 1024 / 1024).toFixed(1)} MB` : '支持 MP4、MOV、MKV、M4V、AVI、WebM' }}</small></label>
             <button v-if="form.video" class="clear-file" type="button" @click="clearVideo">移除视频</button>
+          </div>
+          <div v-if="isTmall" class="field cover-image-field">
+            <span>自定义封面图片 <em>可选</em></span>
+            <input ref="coverImageInput" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" @change="onCoverImageChange" />
+            <small v-if="form.coverImage">{{ form.coverImage.name }} · {{ (form.coverImage.size / 1024 / 1024).toFixed(1) }} MB</small>
+            <small v-else class="field-hint">上传后会在视频上传完成时自动打开“编辑封面”，选择本地上传的图片；支持 JPG、PNG、WebP，最大 20 MiB，图片宽高均需至少 720 像素。未上传则跳过封面编辑。</small>
+            <button v-if="form.coverImage" class="clear-file" type="button" @click="clearCoverImage">移除封面</button>
           </div>
           <p v-if="draftRestoredAt" class="draft-restored-info" role="status">
             <span class="draft-pill">已保留上次发布配置</span>
@@ -1111,7 +1028,7 @@ onBeforeUnmount(() => {
           <p class="eyebrow">TODAY'S PULSE</p>
           <div class="metric"><strong>{{ counts.total }}</strong><span>全部任务</span></div>
           <div class="metrics"><div><strong>{{ counts.running }}</strong><span>执行中</span></div><div><strong>{{ counts.done }}</strong><span>已完成</span></div><div><strong>{{ counts.failed }}</strong><span>需处理</span></div></div>
-          <div class="checklist"><h3>每次发布前</h3><p><b>1</b> 确认本地代理在线</p><p><b>2</b> 先校验本机 Cookie</p><p><b>3</b> 首次建议使用流程验证</p><p><b>4</b> 任务期间不要关闭代理或 Edge</p></div>
+          <div class="checklist"><h3>每次发布前</h3><p><b>1</b> 先校验店铺 Cookie</p><p><b>2</b> 确认视频、标题和商品 ID</p><p><b>3</b> 首次建议使用流程验证</p><p><b>4</b> 任务期间不要关闭 Microsoft Edge</p></div>
         </aside>
       </section>
 
@@ -1131,27 +1048,13 @@ onBeforeUnmount(() => {
             <div class="account-actions"><span>账号状态</span><div><button type="button" class="quiet" @click="accountAction('check', batchForm.platform, batchForm.account)">校验 Cookie</button><button type="button" class="quiet" @click="accountAction('login', batchForm.platform, batchForm.account)">登录 / 重新登录</button><button type="button" class="quiet" @click="deleteAccount(batchForm.platform, batchForm.account)">删除账号</button></div></div>
           </div>
 
-          <div class="section-heading"><span>02</span><div><h2>上传批量视频素材</h2><p>文件保存到当前用户的云端素材目录，执行时由当前电脑的代理逐个下载；Excel 填写下方文件名。</p></div></div>
-          <div class="media-library">
-            <div class="media-upload-row">
-              <input ref="batchMediaInput" multiple type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/x-m4v,video/x-msvideo,video/webm,.m4v,.avi" @change="onBatchMediaChange" />
-              <button class="quiet" :disabled="mediaUploading" type="button" @click="uploadBatchMedia">{{ mediaUploading ? '正在上传…' : `上传所选视频${selectedMediaUploads.length ? `（${selectedMediaUploads.length}）` : ''}` }}</button>
-              <button class="quiet" type="button" @click="refreshMediaFiles">刷新素材</button>
-            </div>
-            <p v-if="mediaError" class="publish-error" role="alert">{{ mediaError }}</p>
-            <div v-if="mediaFiles.length" class="media-file-list">
-              <article v-for="file in mediaFiles" :key="file.name"><code>{{ file.name }}</code><span>{{ formatFileSize(file.size) }}</span><button type="button" @click="deleteMediaFile(file)">删除</button></article>
-            </div>
-            <p v-else class="field-hint">素材目录为空。上传后，将这里显示的文件名原样填入 Excel。</p>
-          </div>
-
-          <div class="section-heading"><span>03</span><div><h2>导入{{ batchPlatformLabel }}内容表</h2><p>每个非空行都会生成一条任务；所有行先通过校验，才会一次性进入队列。</p></div></div>
+          <div class="section-heading"><span>02</span><div><h2>导入{{ batchPlatformLabel }}内容表</h2><p>每个非空行都会生成一条任务；所有行先通过校验，才会一次性进入队列。</p></div></div>
           <div class="batch-guide">
             <div><strong>Excel 列</strong><span>{{ isTmallBatch ? '视频路径、标题、文案、标签、商品ID、活动话题、音乐名称、定时发布、创作者声明' : '视频路径、标题、商品ID、定时发布、自主原创、创作者声明' }}</span></div>
-            <div><strong>视频路径</strong><span>填写当前用户素材目录内的相对路径，例如 <code>video.mp4</code>。</span></div>
+            <div><strong>视频路径</strong><span>仅填写本机视频文件的绝对路径（如 <code>/Users/your-name/Videos/video.mp4</code>）。</span></div>
             <div v-if="isTmallBatch"><strong>天猫规则</strong><span>标题最多 30 字；标签最多 4 个；文案最多 1000 字；商品 ID 最多 6 个，以逗号或空格分隔；音乐名称可选，最多 100 字。</span></div>
             <div v-else><strong>京东规则</strong><span>标题为 5-27 字；“自主原创”填写“是”或“否”；当前上传器不支持文案、标签和活动话题。</span></div>
-            <a class="template-link" :href="apiUrl(`/api/batch-templates/${batchForm.platform}`)">下载{{ batchPlatformLabel }} Excel 模板</a>
+            <a class="template-link" :href="apiUrl(`/api/batch-templates-v2/${batchForm.platform}`)">下载{{ batchPlatformLabel }} Excel 模板</a>
           </div>
           <div class="dropzone batch-dropzone">
             <input id="batch-workbook" ref="batchWorkbookInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" @change="onBatchWorkbookChange" />
@@ -1161,7 +1064,7 @@ onBeforeUnmount(() => {
           <div v-if="batchErrors.length" class="batch-errors"><strong>以下内容未通过校验，未创建任何任务：</strong><p v-for="error in batchErrors" :key="`${error.row}-${error.field}-${error.message}`">第 {{ error.row }} 行 · {{ error.field }}：{{ error.message }}</p></div>
           <div v-if="batchResult" class="batch-result"><strong>已创建 {{ batchResult.created_count }} 条任务</strong><span>批次编号：{{ batchResult.batch_id }}</span><button type="button" class="quiet" @click="activeView = 'jobs'">前往任务与日志</button></div>
 
-          <div class="section-heading"><span>04</span><div><h2>执行方式</h2><p>同一店铺会严格串行执行；某一行失败不会阻止后续任务继续运行。</p></div></div>
+          <div class="section-heading"><span>03</span><div><h2>执行方式</h2><p>同一店铺会严格串行执行；某一行失败不会阻止后续任务继续运行。</p></div></div>
           <div class="toggles">
             <label><input v-model="batchForm.dryRun" type="checkbox" /><span><strong>流程验证</strong><small>填写并上传每一行内容，但不点击正式发布</small></span></label>
             <label><input v-model="batchForm.headed" type="checkbox" /><span><strong>显示 Microsoft Edge</strong><small>登录、短信和风控验证需要在可见浏览器中手动完成</small></span></label>
@@ -1175,13 +1078,19 @@ onBeforeUnmount(() => {
         <aside class="summary-panel batch-summary-panel">
           <p class="eyebrow">{{ batchForm.platform.toUpperCase() }} BATCH</p>
           <div class="metric"><strong>200</strong><span>单次最多内容行</span></div>
-          <div class="checklist"><h3>导入前检查</h3><p><b>1</b> 确认本地代理在线</p><p><b>2</b> 先校验本机 Cookie</p><p><b>3</b> 首次建议整表流程验证</p><p><b>4</b> 任务期间不要关闭代理或 Edge</p></div>
+          <div class="checklist"><h3>导入前检查</h3><p><b>1</b> 先校验店铺 Cookie</p><p><b>2</b> 视频路径必须在本机存在</p><p><b>3</b> 首次建议整表流程验证</p><p><b>4</b> 任务期间不要关闭 Edge</p></div>
         </aside>
       </section>
 
       <section v-else-if="activeView === 'jobs'" class="jobs-layout">
         <div class="jobs-card"><div class="section-heading"><span>LIVE</span><div><h2>任务记录</h2><p>每页最多 500 条并自动刷新；点击条目可查看该任务的独立日志。</p></div></div>
-          <article v-for="job in jobs" :key="job.id" class="job-row">
+          <div v-if="jobs.some(canDeleteJob)" class="batch-toolbar">
+            <label class="batch-toggle"><input type="checkbox" :checked="jobs.filter(canDeleteJob).length > 0 && selectedJobIds.length === jobs.filter(canDeleteJob).length" :indeterminate.prop="selectedJobIds.length > 0 && selectedJobIds.length < jobs.filter(canDeleteJob).length" @change="toggleSelectAllJobs" /><span>当前页可删除项{{ selectedJobIds.length ? `已选 ${selectedJobIds.length} 条` : '全选' }}</span></label>
+            <button type="button" class="delete-job" :disabled="!selectedJobIds.length || batchDeleting" @click="batchDeleteJobs">{{ batchDeleting ? '删除中…' : `批量删除${selectedJobIds.length ? `（${selectedJobIds.length} 条）` : ''}` }}</button>
+          </div>
+          <article v-for="job in jobs" :key="job.id" class="job-row" :class="{ selected: selectedJobIds.includes(job.id) }">
+            <input v-if="canDeleteJob(job)" type="checkbox" class="job-select" :checked="selectedJobIds.includes(job.id)" @change="toggleJobSelection(job)" :aria-label="`选中任务 ${job.id}`" />
+            <span v-else class="job-select-spacer" aria-hidden="true"></span>
             <button class="job-details" :class="{ current: selectedJob?.id === job.id }" type="button" @click="loadJob(job.id)"><span class="job-platform">{{ platformLabel(job.platform) }}</span><span class="job-title"><strong>{{ jobLabel(job.kind) }}<template v-if="job.source_row"> · Excel 第 {{ job.source_row }} 行</template> · {{ job.account }}</strong><small>{{ job.message }}</small></span><span :class="statusClass(job.status)">{{ statusLabel(job.status) }}</span></button>
             <div v-if="canCancelJob(job) || canDeleteJob(job)" class="job-actions"><button v-if="canCancelJob(job)" class="delete-job" type="button" @click="cancelJobAndDeleteAccount(job)">中断并删除账号</button><button v-if="canDeleteJob(job)" class="delete-job" type="button" @click="deleteJob(job)">删除</button></div>
           </article>

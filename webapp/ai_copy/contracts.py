@@ -1,3 +1,14 @@
+# -*- coding: utf-8 -*-
+"""webapp.ai_copy.contracts 模块：AI 文案的 Pydantic 数据契约。
+
+定义：
+- CopyStyle / ContentScene: 文案风格与内容场景枚举
+- STYLE_LABELS / SCENE_LABELS: 枚举值到中文标签的映射
+- ProductSearchConfig: 专用商品搜索服务配置（可选）
+- ProductReferencesRequest / ProductReference: 商品链接读取请求/响应
+- SellingPointReference / SellingPointCatalogUploadResponse: 卖点条目与上传响应
+- GenerateCopyRequest / GenerateCopyResponse / GeneratedCopyDraft: 文案生成请求/响应/草稿
+"""
 from __future__ import annotations
 
 from enum import Enum
@@ -6,64 +17,106 @@ from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator, 
 
 
 class CopyStyle(str, Enum):
-    FRIENDLY = "friendly"
-    PROFESSIONAL = "professional"
-    LIVELY = "lively"
-    PREMIUM = "premium"
-    MINIMAL = "minimal"
-    STORY = "story"
+    """文案风格枚举。"""
+    OLD_MONEY_LUXURY = "old_money_luxury"      # 老钱轻奢
+    RELAXED_NATURAL = "relaxed_natural"        # 自然松弛
+    GENTLE_HEALING = "gentle_healing"          # 治愈温柔
+    RETRO_ATMOSPHERE = "retro_atmosphere"      # 复古氛围
+    ATMOSPHERIC_SEEDING = "atmospheric_seeding"  # 氛围感种草
+    SWEET_CUTE = "sweet_cute"                  # 甜美可爱
+    COOL_BOLD = "cool_bold"                    # 酷感飒爽
 
 
 class ContentScene(str, Enum):
-    SHORT_VIDEO = "short_video"
-    SOCIAL_POST = "social_post"
-    PRODUCT_LAUNCH = "product_launch"
-    PROMOTION = "promotion"
-    LIVE_STREAM = "live_stream"
-    PRODUCT_DETAIL = "product_detail"
+    """内容场景枚举。"""
+    FITNESS = "fitness"                       # 运动健身
+    PARENTING_AND_BABY = "parenting_and_baby"  # 母婴亲子
+    LEISURE_TRAVEL = "leisure_travel"          # 度假休闲出游
+    DAILY_STYLING = "daily_styling"           # 日常穿搭
+    WORK_COMMUTE = "work_commute"             # 职场通勤
+    ROMANTIC_DATE = "romantic_date"           # 浪漫约会
+    SMART_CASUAL_GATHERING = "smart_casual_gathering"  # 轻正式聚会
+    HOLIDAY_GIFTING = "holiday_gifting"       # 节日礼赠
+    SELF_REWARD = "self_reward"              # 自用犒赏
 
 
+# 风格枚举→中文标签
 STYLE_LABELS: dict[CopyStyle, str] = {
-    CopyStyle.FRIENDLY: "亲切种草",
-    CopyStyle.PROFESSIONAL: "专业可信",
-    CopyStyle.LIVELY: "活泼有梗",
-    CopyStyle.PREMIUM: "高级质感",
-    CopyStyle.MINIMAL: "克制简洁",
-    CopyStyle.STORY: "故事叙述",
+    CopyStyle.OLD_MONEY_LUXURY: "老钱轻奢",
+    CopyStyle.RELAXED_NATURAL: "自然松弛",
+    CopyStyle.GENTLE_HEALING: "治愈温柔",
+    CopyStyle.RETRO_ATMOSPHERE: "复古氛围",
+    CopyStyle.ATMOSPHERIC_SEEDING: "氛围感种草",
+    CopyStyle.SWEET_CUTE: "甜美可爱",
+    CopyStyle.COOL_BOLD: "酷感飒爽",
 }
 
+# 场景枚举→中文标签
 SCENE_LABELS: dict[ContentScene, str] = {
-    ContentScene.SHORT_VIDEO: "短视频发布",
-    ContentScene.SOCIAL_POST: "社交媒体",
-    ContentScene.PRODUCT_LAUNCH: "新品首发",
-    ContentScene.PROMOTION: "促销活动",
-    ContentScene.LIVE_STREAM: "直播预告",
-    ContentScene.PRODUCT_DETAIL: "商品详情",
+    ContentScene.FITNESS: "运动健身",
+    ContentScene.PARENTING_AND_BABY: "母婴亲子",
+    ContentScene.LEISURE_TRAVEL: "度假休闲出游",
+    ContentScene.DAILY_STYLING: "日常穿搭",
+    ContentScene.WORK_COMMUTE: "职场通勤",
+    ContentScene.ROMANTIC_DATE: "浪漫约会",
+    ContentScene.SMART_CASUAL_GATHERING: "轻正式聚会",
+    ContentScene.HOLIDAY_GIFTING: "节日礼赠",
+    ContentScene.SELF_REWARD: "自用犒赏",
 }
 
-FESTIVAL_SUGGESTIONS = ("七夕", "中秋", "国庆", "双11", "双12", "元旦", "春节", "618")
+# 节日氛围建议（前端下拉预设）
+FESTIVAL_SUGGESTIONS = ("情人节", "女神节", "520", "暑假", "开学季", "圣诞节")
 
 
 def _trimmed(value: str | None) -> str | None:
+    """去首尾空白，空字符串转 None。"""
     if value is None:
         return None
     normalized = value.strip()
     return normalized or None
 
 
+def _normalize_product_urls(value: object, *, required: bool) -> list[str]:
+    """归一化商品链接列表：去重保序，限制最多 20 个。
+
+    :param required: True 时至少需要一个链接
+    """
+    if value is None and not required:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("商品链接必须是列表")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        product_url = str(item).strip()
+        if not product_url or product_url in seen:
+            continue
+        seen.add(product_url)
+        normalized.append(product_url)
+    if required and not normalized:
+        raise ValueError("请至少填写一个商品链接")
+    if len(normalized) > 20:
+        raise ValueError("一次最多支持 20 个商品链接")
+    return normalized
+
+
 class ProductSearchConfig(BaseModel):
+    """专用商品搜索服务配置（可选，用于公开商品页无法直接解析时）。"""
+
     model_config = ConfigDict(extra="forbid")
 
-    endpoint_url: AnyHttpUrl | None = None
-    api_key: str | None = Field(default=None, max_length=4096)
+    endpoint_url: AnyHttpUrl | None = None    # 搜索服务地址（必须 HTTPS 才能携带 API Key）
+    api_key: str | None = Field(default=None, max_length=4096)  # 搜索服务 API Key
 
     @field_validator("api_key")
     @classmethod
     def normalize_api_key(cls, value: str | None) -> str | None:
+        """去首尾空白。"""
         return _trimmed(value)
 
     @model_validator(mode="after")
     def require_endpoint_for_key(self) -> "ProductSearchConfig":
+        """携带 API Key 时必须同时填写服务地址且使用 HTTPS。"""
         if self.api_key and not self.endpoint_url:
             raise ValueError("填写商品搜索 API Key 时必须同时填写服务地址")
         if self.api_key and self.endpoint_url and self.endpoint_url.scheme != "https":
@@ -71,67 +124,157 @@ class ProductSearchConfig(BaseModel):
         return self
 
 
-class ProductReferenceRequest(BaseModel):
+class ProductReferencesRequest(BaseModel):
+    """商品链接读取请求（用于 /product-references 接口）。"""
+
     model_config = ConfigDict(extra="forbid")
 
-    product_url: AnyHttpUrl
+    product_urls: list[AnyHttpUrl] = Field(min_length=1, max_length=20)
     search: ProductSearchConfig = Field(default_factory=ProductSearchConfig)
+
+    @field_validator("product_urls", mode="before")
+    @classmethod
+    def normalize_product_urls(cls, value: object) -> list[str]:
+        """归一化商品链接列表（必填）。"""
+        return _normalize_product_urls(value, required=True)
 
 
 class ProductReference(BaseModel):
+    """商品读取结果：标题、摘要、结构化属性。"""
+
     source_url: str
     title: str = Field(min_length=1, max_length=300)
     summary: str = Field(min_length=1, max_length=4000)
     attributes: dict[str, str] = Field(default_factory=dict)
 
 
-class GenerateCopyRequest(BaseModel):
+class SellingPointReference(BaseModel):
+    """单条卖点条目：商品 ID/货号 + 核心内容卖点。"""
+
     model_config = ConfigDict(extra="forbid")
 
-    content_brief: str = Field(min_length=2, max_length=2000)
-    style: CopyStyle
-    scene: ContentScene
-    festival: str | None = Field(default=None, max_length=40)
-    product_url: AnyHttpUrl | None = None
-    product_search: ProductSearchConfig = Field(default_factory=ProductSearchConfig)
+    identifier: str = Field(min_length=1, max_length=100)
+    selling_point: str = Field(min_length=1, max_length=2000)
 
-    @field_validator("content_brief")
+
+class SellingPointCatalogUploadResponse(BaseModel):
+    """卖点 Excel 上传响应。"""
+
+    catalog_id: str          # 目录 ID（用于后续生成引用）
+    filename: str            # 安全化后的文件名
+    row_count: int           # 解析出的条目数
+    entries: list[SellingPointReference]  # 全部条目
+
+
+class GenerateCopyRequest(BaseModel):
+    """文案生成请求。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    selling_point_catalog_id: str = Field(min_length=16, max_length=64)  # 卖点目录 ID
+    product_identifiers: list[str] = Field(min_length=1, max_length=20)  # 商品 ID/货号列表
+    style: CopyStyle                          # 文案风格
+    scene: ContentScene                       # 内容场景
+    festival: str | None = Field(default=None, max_length=40)  # 可选节日氛围
+    product_urls: list[AnyHttpUrl] = Field(default_factory=list, max_length=20)  # 可选商品链接
+    product_search: ProductSearchConfig = Field(default_factory=ProductSearchConfig)  # 可选搜索服务
+    title_max_chars: int | None = Field(      # 标题字符上限
+        default=None,
+        ge=2,
+        le=100,
+        description="生成标题的字符上限（按汉字、英文字母、标点等逐字符计算）",
+    )
+    body_max_chars: int | None = Field(       # 正文字符上限
+        default=None,
+        ge=10,
+        le=1000,
+        description="生成正文的字符上限（按汉字、英文字母、标点等逐字符计算）",
+    )
+
+    @field_validator("selling_point_catalog_id")
     @classmethod
-    def normalize_brief(cls, value: str) -> str:
+    def normalize_catalog_id(cls, value: str) -> str:
+        """校验目录 ID 长度。"""
         normalized = value.strip()
-        if len(normalized) < 2:
-            raise ValueError("内容要点至少需要 2 个字符")
+        if len(normalized) < 16:
+            raise ValueError("请先上传商品核心卖点 Excel")
         return normalized
+
+    @field_validator("product_identifiers", mode="before")
+    @classmethod
+    def normalize_product_identifiers(cls, value: object) -> list[str]:
+        """归一化商品 ID 列表：去重（不区分大小写）、限 20 个。"""
+        if not isinstance(value, list):
+            raise ValueError("商品 ID 或货号必须是列表")
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            identifier = str(item).strip()
+            if not identifier:
+                continue
+            if len(identifier) > 100:
+                raise ValueError("单个商品 ID 或货号不能超过 100 个字符")
+            key = identifier.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(identifier)
+        if not normalized:
+            raise ValueError("至少需要输入一个商品 ID 或货号")
+        if len(normalized) > 20:
+            raise ValueError("一次最多支持 20 个商品 ID 或货号")
+        return normalized
+
+    @field_validator("product_urls", mode="before")
+    @classmethod
+    def normalize_product_urls(cls, value: object) -> list[str]:
+        """归一化商品链接列表（可选）。"""
+        return _normalize_product_urls(value, required=False)
 
     @field_validator("festival")
     @classmethod
     def normalize_festival(cls, value: str | None) -> str | None:
+        """去首尾空白。"""
         return _trimmed(value)
 
     @model_validator(mode="after")
     def require_product_for_search_config(self) -> "GenerateCopyRequest":
-        if not self.product_url and (
+        """配置搜索服务前必须先填写至少一个商品链接。"""
+        if not self.product_urls and (
             self.product_search.endpoint_url or self.product_search.api_key
         ):
-            raise ValueError("配置商品搜索服务前，请先填写商品链接")
+            raise ValueError("配置商品搜索服务前，请先填写至少一个商品链接")
         return self
 
 
 class GeneratedCopyDraft(BaseModel):
+    """LLM 生成的文案草稿（用于解析 LLM 返回的 JSON）。
+
+    静态上限故意放宽，覆盖业务允许的最大字符数；
+    真正的上限由 GenerateCopyRequest.title_max_chars / body_max_chars
+    在 AiCopyService._validate_draft_length 中按请求逐次校验。
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    title: str = Field(min_length=2, max_length=30)
-    body: str = Field(min_length=10, max_length=1000)
+    title: str = Field(min_length=2, max_length=200)
+    body: str = Field(min_length=10, max_length=2000)
 
     @field_validator("title", "body")
     @classmethod
     def normalize_text(cls, value: str) -> str:
+        """去首尾空白。"""
         return value.strip()
 
 
 class GenerateCopyResponse(BaseModel):
-    title: str
-    body: str
-    provider: str
-    model: str
-    product_reference: ProductReference | None = None
+    """文案生成响应。"""
+
+    title: str                              # 生成的标题
+    body: str                               # 生成的正文
+    provider: str                           # 使用的供应商
+    model: str                              # 使用的模型
+    selling_point_references: list[SellingPointReference]  # 引用的卖点
+    product_references: list[ProductReference] = Field(default_factory=list)  # 引用的商品资料
+    title_max_chars: int                    # 标题字符上限
+    body_max_chars: int                     # 正文字符上限

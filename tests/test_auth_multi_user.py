@@ -12,6 +12,7 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 
 from webapp.api.main import WebSettings, create_app
+from webapp.api.models import validate_publish_request
 from webapp.api.tasks import TaskManager
 from webapp.auth import AuthStore
 from webapp.workspaces import AppDataPaths, UserWorkspaceRegistry
@@ -567,6 +568,74 @@ class LocalAgentApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(workspace.store.list_accounts(), [])
+
+    def test_tmall_cover_is_downloadable_only_by_the_claimed_agent(self):
+        workspace = self.registry.get(self.user["id"])
+        workspace.task_manager.start()
+        upload_dir = workspace.paths.uploads / ("d" * 32)
+        upload_dir.mkdir()
+        video = upload_dir / "demo.mp4"
+        video.write_bytes(b"video")
+        cover = upload_dir / "cover-test.png"
+        cover.write_bytes(b"cover")
+        request = validate_publish_request(
+            platform="tmall",
+            account="shop1",
+            video_path=video,
+            cover_image_path=cover,
+            original_filename=video.name,
+            title="自定义封面传输测试",
+            managed_upload=True,
+        )
+        job = workspace.task_manager.submit_publish_task(request)
+
+        self.connect_agent()
+        claimed = self.agent_post_json(
+            "/api/agent/claim", {"agent_id": "b" * 32}
+        )
+        self.assertEqual(claimed.status_code, 200, claimed.text)
+        claimed_job = claimed.json()["job"]
+        self.assertEqual(claimed_job["id"], job["id"])
+        self.assertNotIn("video_path", claimed_job["payload"])
+        self.assertNotIn("cover_image_path", claimed_job["payload"])
+        self.assertEqual(
+            claimed_job["payload"]["cover_image_filename"], cover.name
+        )
+        self.assertEqual(
+            claimed_job["cover_image_download_url"],
+            f"/api/agent/jobs/{job['id']}/cover-image",
+        )
+
+        token_only = _AsgiClient(self.app)
+        headers = {"Authorization": f"Bearer {self.agent_token}"}
+        query = f"?agent_id={'b' * 32}"
+        video_response = token_only.get(
+            f"/api/agent/jobs/{job['id']}/video{query}", headers=headers
+        )
+        cover_response = token_only.get(
+            f"/api/agent/jobs/{job['id']}/cover-image{query}", headers=headers
+        )
+        self.assertEqual(video_response.status_code, 200, video_response.text)
+        self.assertEqual(video_response.body, b"video")
+        self.assertEqual(cover_response.status_code, 200, cover_response.text)
+        self.assertEqual(cover_response.body, b"cover")
+
+        browser_session_only = self.client.get(
+            f"/api/agent/jobs/{job['id']}/cover-image{query}"
+        )
+        self.assertEqual(browser_session_only.status_code, 401)
+
+        completed = self.agent_post_json(
+            f"/api/agent/jobs/{job['id']}/complete",
+            {
+                "agent_id": "b" * 32,
+                "status": "succeeded",
+                "message": "cover uploaded",
+                "result": {},
+            },
+        )
+        self.assertEqual(completed.status_code, 200, completed.text)
+        self.assertFalse(upload_dir.exists())
 
     def test_pairing_code_is_single_use_and_token_is_device_bound(self):
         paired = self.pair_agent()

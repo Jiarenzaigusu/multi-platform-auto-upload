@@ -8,6 +8,7 @@ from pathlib import Path
 
 SUPPORTED_PLATFORMS = {"tmall", "jd"}
 SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm"}
+SUPPORTED_COVER_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 ACCOUNT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 SCHEDULE_FORMAT = "%Y-%m-%d %H:%M"
 MIN_SCHEDULE_LEAD_TIME = timedelta(hours=2)
@@ -32,6 +33,7 @@ class PublishRequest:
     platform: str
     account: str
     video_path: Path
+    cover_image_path: Path | None
     original_filename: str
     title: str
     description: str
@@ -99,6 +101,7 @@ def validate_publish_request(
     platform: str,
     account: str,
     video_path: Path,
+    cover_image_path: Path | None = None,
     original_filename: str,
     title: str,
     description: str = "",
@@ -112,6 +115,7 @@ def validate_publish_request(
     dry_run: bool = False,
     headed: bool = True,
     managed_upload: bool = False,
+    verify_video_file: bool = True,
 ) -> PublishRequest:
     selected_platform = validate_platform(platform)
     selected_account = validate_account_name(account)
@@ -122,15 +126,28 @@ def validate_publish_request(
     music_name = raw_music_name.strip()
     creator_declaration = raw_creator_declaration.strip()
 
-    if not video_path.is_file():
-        raise ValidationError("视频文件不存在或上传未完成")
-    try:
-        if video_path.stat().st_size == 0:
-            raise ValidationError("视频文件为空")
-    except OSError as exc:
-        raise ValidationError("无法读取视频文件") from exc
+    if verify_video_file:
+        if not video_path.is_file():
+            raise ValidationError("视频文件不存在或上传未完成")
+        try:
+            if video_path.stat().st_size == 0:
+                raise ValidationError("视频文件为空")
+        except OSError as exc:
+            raise ValidationError("无法读取视频文件") from exc
     if video_path.suffix.lower() not in SUPPORTED_VIDEO_EXTENSIONS:
         raise ValidationError("仅支持 MP4、MOV、MKV、M4V、AVI 或 WebM 视频")
+    if cover_image_path is not None:
+        if selected_platform != "tmall":
+            raise ValidationError("当前仅天猫光合支持自定义封面图片")
+        if not cover_image_path.is_file():
+            raise ValidationError("封面图片不存在或上传未完成")
+        try:
+            if cover_image_path.stat().st_size == 0:
+                raise ValidationError("封面图片为空")
+        except OSError as exc:
+            raise ValidationError("无法读取封面图片") from exc
+        if cover_image_path.suffix.lower() not in SUPPORTED_COVER_IMAGE_EXTENSIONS:
+            raise ValidationError("封面图片仅支持 JPG、PNG 或 WebP 格式")
     if not normalized_title:
         raise ValidationError("标题不能为空")
     if creator_declaration not in CREATOR_DECLARATIONS:
@@ -169,6 +186,7 @@ def validate_publish_request(
         platform=selected_platform,
         account=selected_account,
         video_path=video_path.resolve(),
+        cover_image_path=cover_image_path.resolve() if cover_image_path else None,
         original_filename=original_filename,
         title=normalized_title,
         description=normalized_description,

@@ -4,7 +4,10 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from webapp.api.models import SUPPORTED_VIDEO_EXTENSIONS
+from webapp.api.models import (
+    SUPPORTED_COVER_IMAGE_EXTENSIONS,
+    SUPPORTED_VIDEO_EXTENSIONS,
+)
 
 _WINDOWS_RESERVED_NAMES = {
     "aux",
@@ -36,6 +39,28 @@ def validate_media_filename(filename: str) -> str:
         raise ValueError(f"视频文件名是 Windows 保留名称：{value}")
     if Path(value).suffix.lower() not in SUPPORTED_VIDEO_EXTENSIONS:
         raise ValueError(f"不支持的视频格式：{value}")
+    return value
+
+
+def validate_cover_image_filename(filename: str) -> str:
+    """Validate one generated cover filename before saving it on Windows."""
+    value = filename.strip()
+    if (
+        not value
+        or value in {".", ".."}
+        or len(value) > 200
+        or value.endswith((".", " "))
+    ):
+        raise ValueError("封面图片文件名为空或超过 200 个字符")
+    if Path(value).name != value or any(
+        character in _WINDOWS_INVALID_CHARACTERS or ord(character) < 32
+        for character in value
+    ):
+        raise ValueError(f"封面图片文件名包含不允许的字符：{value}")
+    if value.split(".", 1)[0].casefold() in _WINDOWS_RESERVED_NAMES:
+        raise ValueError(f"封面图片文件名是 Windows 保留名称：{value}")
+    if Path(value).suffix.lower() not in SUPPORTED_COVER_IMAGE_EXTENSIONS:
+        raise ValueError(f"不支持的封面图片格式：{value}")
     return value
 
 

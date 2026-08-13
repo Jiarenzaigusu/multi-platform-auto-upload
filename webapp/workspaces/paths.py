@@ -26,7 +26,6 @@ class UserDataPaths:
     media: Path
     job_logs: Path
     platform_logs: Path
-    screenshots: Path
     secrets: Path
 
     @classmethod
@@ -42,13 +41,10 @@ class UserDataPaths:
             media=_secure_directory(root / "media"),
             job_logs=_secure_directory(root / "job-logs"),
             platform_logs=_secure_directory(root / "platform-logs"),
-            screenshots=_secure_directory(root / "screenshots"),
             secrets=_secure_directory(root / "secrets"),
         )
         _secure_directory(paths.cookies / "tmall")
         _secure_directory(paths.cookies / "jd")
-        _secure_directory(paths.screenshots / "tmall")
-        _secure_directory(paths.screenshots / "jd")
         return paths
 
     def cookie_file(self, platform: str, account: str) -> Path:

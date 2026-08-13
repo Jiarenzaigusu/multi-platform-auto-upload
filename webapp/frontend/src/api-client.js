@@ -31,7 +31,7 @@ function errorMessage(body) {
 }
 
 /** Send an authenticated API request and attach CSRF proof to every mutation. */
-export async function apiRequest(path, options = {}) {
+export async function apiFetch(path, options = {}) {
   const method = (options.method || 'GET').toUpperCase()
   const headers = new Headers(options.headers || {})
   if (!SAFE_METHODS.has(method)) {
@@ -45,6 +45,11 @@ export async function apiRequest(path, options = {}) {
     headers,
     credentials: 'same-origin',
   })
+  return response
+}
+
+export async function apiRequest(path, options = {}) {
+  const response = await apiFetch(path, options)
   const body = response.status === 204
     ? null
     : await response.json().catch(() => ({}))

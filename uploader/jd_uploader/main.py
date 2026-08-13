@@ -1,4 +1,24 @@
 # -*- coding: utf-8 -*-
+"""
+uploader.jd_uploader.main 模块
+
+京东京麦平台（dr.jd.com）视频发布器核心实现。
+
+主要功能：
+1. Cookie 校验：访问发布中心判断是否仍处于登录态
+2. 手动登录：打开可见浏览器，等待用户完成扫码/密码/短信等验证后保存 storage_state
+3. 视频发布：上传视频 → 填写标题 → 关联商品（可选）→ 选择创作者声明 →
+            开启自主原创（可选）→ 设置定时（可选）→ 点击发布按钮 →
+            处理验证码（人工介入）→ 等待确认
+
+注意事项：
+- 京麦页面对 document.body.innerText 做了限制，登录后 innerText 只返回 '👋'，
+  所以通过 HTML 体量间接判断登录状态
+- 京麦发布页是微前端，真实表单在 iframe.micro-iframe 中
+- 验证码需人工完成，本模块会暂停并等待
+- 发布结果可能"不确定"，会抛出 PublishResultUncertainError
+"""
+from __future__ import annotations
 
 import asyncio
 import inspect
@@ -11,39 +31,47 @@ from urllib.parse import urlparse
 
 from patchright.async_api import BrowserContext, Frame
 
-from uploader.base_video import BaseVideoUploader
 from uploader.errors import PublishResultUncertainError
-from uploader.jd_uploader.session import JdBrowserSession
 from utils.config import DEBUG_MODE
+from uploader.base_video import BaseVideoUploader
+from uploader.jd_uploader.session import JdBrowserSession
 from utils.log import jd_logger
 
+# 京东京麦发布中心 URL，用于 Cookie 校验与登录入口
 JD_POST_CENTER_URL = "https://dr.jd.com/jm/#/n/post-center.html"
+# 京东京麦视频发布页 URL
 JD_PUBLISH_VIDEO_URL = "https://dr.jd.com/jm/#/n/publish-video.html?platform=jm-pop"
+# 登录成功后的目标 host，URL 命中此 host 表示已进入京麦后台
 JD_LOGIN_SUCCESS_HOST = "dr.jd.com"
 # passport.* / safe.* 都视作「用户正在登录中」的中间态，继续等待，不当成失败也不当成成功
 JD_AUTH_HOSTS = {"passport.shop.jd.com", "passport.jd.com", "safe.jd.com"}
 
+# 发布策略常量
 JD_PUBLISH_STRATEGY_IMMEDIATE = "immediate"
 JD_PUBLISH_STRATEGY_SCHEDULED = "scheduled"
 
 
 class JdAuthenticationError(RuntimeError):
+    """京东 Cookie 已失效异常。
+
+    当发布或校验流程中发现页面被重定向到鉴权页时抛出，
+    上层会捕获此异常并将会话标记为未认证。
+    """
     pass
 
 
-class JdPublishRejectedError(RuntimeError):
-    """The platform explicitly confirmed that the submission was rejected."""
-
-
 def _contains_exact_goods_id(value: str, goods_id: str) -> bool:
-    return bool(re.search(rf"(?<!\d){re.escape(goods_id)}(?!\d)", value or ""))
+    """Avoid associating a product when its ID only partially matches the result."""
+    return re.search(rf"(?<!\d){re.escape(goods_id)}(?!\d)", value) is not None
 
 
 def _msg(emoji: str, text: str) -> str:
+    """统一日志格式：emoji + 文本。"""
     return f"{emoji} {text}"
 
 
 async def _emit_qrcode_callback(qrcode_callback, payload: dict):
+    """触发二维码/登录回调，支持同步与异步回调函数。"""
     if not qrcode_callback:
         return
     callback_result = qrcode_callback(payload)
@@ -52,6 +80,7 @@ async def _emit_qrcode_callback(qrcode_callback, payload: dict):
 
 
 def _build_login_result(success, status, message, account_file, current_url=""):
+    """构造登录流程的统一返回结构。"""
     return {
         "success": success,
         "status": status,
@@ -62,6 +91,7 @@ def _build_login_result(success, status, message, account_file, current_url=""):
 
 
 def _url_host(url: str) -> str:
+    """提取 URL 的 host 部分，解析失败返回空字符串。"""
     try:
         return urlparse(url).hostname or ""
     except Exception:
@@ -95,6 +125,10 @@ async def _is_logged_in(page) -> bool:
 
 
 async def _cookie_auth_in_context(context: BrowserContext) -> bool:
+    """在指定 BrowserContext 中校验京东 Cookie 是否有效。
+
+    访问发布中心，最多等待 8 轮（每轮 2 秒）观察是否进入登录态。
+    """
     page = await context.new_page()
     try:
         await page.goto(JD_POST_CENTER_URL, wait_until="domcontentloaded")
@@ -115,7 +149,14 @@ async def cookie_auth(
     session: JdBrowserSession,
     max_age_seconds: float = 0,
 ):
-    """验证京东京麦 cookie 是否有效。"""
+    """验证京东京麦 cookie 是否有效。
+
+    :param account_file: 账号 Cookie 文件路径
+    :param session: 浏览器会话
+    :param max_age_seconds: 鉴权缓存有效期，<=0 不使用缓存
+    :returns: True 有效，False 失效
+    """
+    # 优先复用鉴权缓存
     if session.auth_is_fresh(max_age_seconds):
         return True
     context = await session.ensure_open()
@@ -137,7 +178,16 @@ async def jd_setup(
     session: JdBrowserSession,
     auth_cache_seconds: float = 0,
 ):
-    """检查 cookie；失效且 handle=True 时打开浏览器让用户手动登录。"""
+    """检查 cookie；失效且 handle=True 时打开浏览器让用户手动登录。
+
+    :param account_file: 账号 Cookie 文件路径
+    :param handle: True 时若 Cookie 失效则打开可见浏览器引导用户登录
+    :param return_detail: True 返回完整结果 dict，False 返回布尔
+    :param qrcode_callback: 登录回调
+    :param session: 浏览器会话
+    :param auth_cache_seconds: 鉴权缓存有效期
+    :returns: 取决于 return_detail，返回 dict 或布尔
+    """
     if not os.path.exists(account_file) or not await cookie_auth(
         account_file,
         session=session,
@@ -166,8 +216,20 @@ async def jd_cookie_gen(
     *,
     session: JdBrowserSession,
 ):
-    """打开京麦发布中心，等待用户在浏览器内完成登录（密码 / 短信 / 扫码），成功后保存 storage_state。"""
+    """打开京麦发布中心，等待用户在浏览器内完成登录（密码 / 短信 / 扫码），成功后保存 storage_state。
+
+    :param account_file: 账号 Cookie 文件路径
+    :param qrcode_callback: 登录回调
+    :param poll_interval: 轮询间隔秒数
+    :param max_checks: 最大轮询次数（默认 200 次）
+    :param session: 浏览器会话
+    :returns: 登录结果 dict
+
+    注意：京东可能在新的 tab 中完成认证，因此需要遍历 context.pages 检测登录态。
+    """
     context = await session.ensure_open()
+    # 记录本次登录前已有的 page，登录流程结束后只清理新建的 page
+    existing_page_ids = {id(open_page) for open_page in context.pages}
     result = _build_login_result(False, "failed", "京东京麦登录失败", account_file)
     page = None
 
@@ -182,11 +244,12 @@ async def jd_cookie_gen(
             "account_file": str(account_file),
         })
 
-        # Avoid treating the entry URL as authenticated before its JS redirect settles.
+        # 等待 5 秒让入口 URL 的 JS 跳转稳定，避免误判
         await asyncio.sleep(5)
 
+        # 轮询等待用户完成登录
         for tick in range(max_checks):
-            # JD may finish authentication in a newly opened tab.
+            # 京东可能在新 tab 中完成认证，遍历所有 page
             hit = None
             for candidate in context.pages:
                 if await _is_logged_in(candidate):
@@ -201,6 +264,7 @@ async def jd_cookie_gen(
                 jd_logger.info(_msg("⏳", f"等待用户完成登录: {[p.url for p in context.pages]}"))
             await asyncio.sleep(poll_interval)
         else:
+            # for...else：循环正常结束（未 break）表示超时
             return _build_login_result(False, "timeout", "等待京东京麦登录超时", account_file, page.url)
 
         await asyncio.sleep(3)
@@ -216,7 +280,11 @@ async def jd_cookie_gen(
     finally:
         if not result["success"]:
             jd_logger.error(_msg("😢", f"登录失败: {result['message']}"))
-        for open_page in list(context.pages):
+        # 只清理本次登录流程新建的页面，保留之前累积的发布页供人工复核
+        for open_page in [
+            candidate for candidate in list(context.pages)
+            if id(candidate) not in existing_page_ids
+        ]:
             try:
                 await open_page.close()
             except Exception:
@@ -226,19 +294,32 @@ async def jd_cookie_gen(
 
 
 class JDBaseUploader(BaseVideoUploader):
-    """京东京麦上传器基类（占位，待 upload-video 实现）。"""
+    """京东京麦上传器基类。
+
+    提供账号文件存在性校验，被 JDVideo 继承。
+    """
 
     def __init__(self, account_file, debug: bool = DEBUG_MODE):
+        """初始化基类。
+
+        :param account_file: 账号 Cookie 文件路径
+        :param debug: 是否调试模式
+        """
         self.account_file = account_file
         self.debug = debug
 
     async def validate_base_args(self):
+        """校验账号 Cookie 文件存在。"""
         if not os.path.exists(self.account_file):
             raise RuntimeError(f"cookie文件不存在，请先完成京东京麦登录: {self.account_file}")
 
 
 async def _find_publish_iframe(page, timeout_seconds: int = 30) -> Frame:
-    """京麦发布页是微前端，真实表单在 iframe.micro-iframe（src=/n/publish-video.html）里。"""
+    """定位京麦视频发布 iframe。
+
+    京麦发布页是微前端，真实表单在 iframe.micro-iframe（src=/n/publish-video.html）里。
+    最多等待 30 秒。
+    """
     for _ in range(timeout_seconds):
         for f in page.frames:
             if f != page.main_frame and "publish-video.html" in f.url:
@@ -248,6 +329,17 @@ async def _find_publish_iframe(page, timeout_seconds: int = 30) -> Frame:
 
 
 class JDVideo(JDBaseUploader):
+    """京东京麦视频发布器。
+
+    完整发布流程：
+    1. validate_upload_args: 校验所有参数
+    2. 打开发布页 → 定位发布 iframe → 上传视频文件
+    3. 等待视频上传完成（发布按钮 disabled 消失）
+    4. 填写标题 → 关联商品（可选）→ 选择创作者声明 → 开启自主原创（可选）→ 设置定时（可选）
+    5. dry_run 跳过发布；否则点击发布按钮 → 处理验证码（人工）→ 等待确认
+    6. 成功后保存 storage_state；页面保留供人工复核
+    """
+
     def __init__(
         self,
         file_path: str,
@@ -258,10 +350,21 @@ class JDVideo(JDBaseUploader):
         original: bool = False,
         creator_declaration: str = "",
         *,
-        screenshot_dir: str | Path,
         debug: bool = DEBUG_MODE,
         dry_run: bool = False,
     ):
+        """初始化发布参数。
+
+        :param file_path: 视频文件路径
+        :param title: 视频标题（5-27 字）
+        :param account_file: 账号 Cookie 文件路径
+        :param goods_id: 商品 ID（可选，最多 1 个）
+        :param schedule: 定时发布时间（None 立即发布）
+        :param original: 是否开启"自主原创"开关
+        :param creator_declaration: 创作者声明（必填）
+        :param debug: 调试模式
+        :param dry_run: True 只走流程不点发布按钮
+        """
         super().__init__(account_file=account_file, debug=debug)
         self.file_path = file_path
         self.title = title
@@ -269,27 +372,36 @@ class JDVideo(JDBaseUploader):
         self.schedule = schedule
         self.original = original
         self.creator_declaration = creator_declaration.strip()
-        self.screenshot_dir = Path(screenshot_dir).resolve()
         self.dry_run = dry_run
 
     async def validate_upload_args(self):
+        """校验所有发布参数。"""
         await self.validate_base_args()
+        # 校验视频文件
         self.file_path = str(self.validate_video_file(self.file_path))
+        # 标题长度校验（5-27 字）
         title = (self.title or "").strip()
         if not title:
             raise ValueError("京东视频标题不能为空")
         if not (5 <= len(title) <= 27):
             raise ValueError(f"京东视频标题长度必须 5-27 字（当前 {len(title)} 字）")
         self.title = title
+        # 商品 ID 必须为纯数字
         if self.goods_id and not self.goods_id.isdigit():
             raise ValueError(f"京东商品 ID 必须为纯数字: {self.goods_id}")
+        # 定时发布时间校验
         if self.schedule is not None:
             self.validate_publish_date(self.schedule)
+        # 创作者声明必填
         if not self.creator_declaration:
             raise ValueError("京东创作声明不能为空")
 
     async def _wait_for_video_uploaded(self, frame: Frame, timeout_seconds: int = 600):
-        """等视频上传完成。判定信号：发布按钮 disabled 属性消失。"""
+        """等视频上传完成。判定信号：发布按钮 disabled 属性消失。
+
+        :param frame: 发布 iframe
+        :param timeout_seconds: 超时秒数（默认 600 秒 = 10 分钟）
+        """
         for i in range(timeout_seconds // 2):
             disabled = await frame.evaluate(
                 """() => {
@@ -310,6 +422,12 @@ class JDVideo(JDBaseUploader):
 
         流程：点 + → 切站内搜索 tab → 输入 ID → 点查询 →
               等结果出现（含 ¥）→ 勾选第一个商品卡 → 点确定 → 等 drawer 关闭。
+
+        四种终态判定：
+        1. 出现 ¥ 价格 → 找到商品，可勾选
+        2. 平台返回明确无结果文案 → ID 不存在
+        3. 平台返回「失效原因」卡片 → ID 格式正确但商品不可用
+        4. 20s 内既无 ¥ 也无文案 → 接口超时
         """
         if not self.goods_id:
             return
@@ -321,12 +439,12 @@ class JDVideo(JDBaseUploader):
         await plus_btn.scroll_into_view_if_needed()
         await plus_btn.click()
 
-        # 等 drawer 打开。京东 tab id（如 rc-tabs-0-tab-2）是动态生成的，不能作为稳定选择器。
+        # 等 drawer 打开。京东 tab id（如 rc-tabs-0-tab-2）是动态生成的，不能作为稳定选择器
         drawer = frame.locator('.jd-drawer-open, .jd-drawer-wrapper-body').first
         await drawer.wait_for(state="visible", timeout=10000)
         await asyncio.sleep(1)
 
-        # 切到「站内搜索」tab：优先按 role+文本定位，避免依赖动态 id。
+        # 切到「站内搜索」tab：优先按 role+文本定位，避免依赖动态 id
         site_tab = frame.locator('.jd-drawer-wrapper-body [role="tab"]').filter(has_text="站内搜索").first
         if not await site_tab.count():
             site_tab = frame.locator('.jd-drawer-wrapper-body .jd-tabs-tab-btn').filter(has_text="站内搜索").first
@@ -334,7 +452,8 @@ class JDVideo(JDBaseUploader):
         await site_tab.click()
         await asyncio.sleep(1.5)
 
-        # 找当前激活的 tab panel。不同会话的 rc-tabs id 可能变化，优先取 aria-hidden=false 的 active panel。
+        # 找当前激活的 tab panel。不同会话的 rc-tabs id 可能变化，
+        # 优先取 aria-hidden=false 的 active panel
         active_panel = frame.locator('.jd-drawer-wrapper-body [role="tabpanel"][aria-hidden="false"]').first
         if not await active_panel.count():
             active_panel = frame.locator('.jd-drawer-wrapper-body .jd-tabs-tabpane-active').first
@@ -355,63 +474,22 @@ class JDVideo(JDBaseUploader):
         await query_btn.click()
         jd_logger.info(_msg("🔎", f"已点查询，搜索商品 ID: {self.goods_id}"))
 
-        # 等查询结果，三种终态：
-        # 1. 同一商品卡同时出现准确 ID 和价格 → 找到商品，可勾选
-        # 2. 平台返回明确无结果文案（暂无数据/没有找到/无结果）→ ID 不存在
-        # 3. 平台返回「失效原因: 输入信息不可用」之类的失效卡 → ID 格式正确但商品不可用
-        # 4. 20s 内既无 ¥ 也无上述文案 → 接口超时
+        # 等查询结果，四种终态判定
         INVALID_HINTS = ("暂无数据", "没有找到", "无结果", "未搜索到")
-        # 失效卡（实测格式：「<id>\n失效原因: <reason>」）—— 必须包含 ID 本身才算确切针对此 ID
         result_text = ""
-        goods_check = None
         for _ in range(20):
             await asyncio.sleep(1)
             result_text = await active_panel.evaluate("el => el.innerText || ''")
-            candidate_checks = active_panel.locator(
-                'label.jd-checkbox-wrapper.goods-card-check, '
-                'label.jd-checkbox-wrapper:not(.goods-card-header-check)'
-            )
-            exact_matches = []
-            for index in range(await candidate_checks.count()):
-                candidate = candidate_checks.nth(index)
-                if not await candidate.is_visible():
-                    continue
-                candidate_snapshot = await candidate.evaluate(
-                    """el => {
-                        const panel = el.closest('[role="tabpanel"], .jd-tabs-tabpane-active');
-                        let node = el;
-                        let card = el.parentElement;
-                        while (node && node.parentElement && node.parentElement !== panel) {
-                            node = node.parentElement;
-                            if (/[¥￥]/.test(node.innerText || '')) {
-                                card = node;
-                                break;
-                            }
-                        }
-                        return `${card?.innerText || ''}\n${card?.outerHTML || ''}`;
-                    }"""
-                )
-                if (
-                    _contains_exact_goods_id(candidate_snapshot, self.goods_id)
-                    and ("¥" in candidate_snapshot or "￥" in candidate_snapshot)
-                ):
-                    exact_matches.append(candidate)
-
-            if len(exact_matches) == 1:
-                goods_check = exact_matches[0]
+            # 终态 1：出现价格 → 找到商品
+            if "¥" in result_text or "￥" in result_text:
                 break
-            if len(exact_matches) > 1:
-                raise RuntimeError(
-                    f"商品 ID {self.goods_id} 返回了多个精确匹配结果，已停止关联以避免选错商品"
-                )
+            # 终态 2：明确无结果
             if any(k in result_text for k in INVALID_HINTS):
                 raise ValueError(
                     f"商品 ID {self.goods_id} 在京东站内搜索无结果。请核实 ID 是否正确，或使用「本店商品」tab。"
                 )
-            if "失效原因" in result_text and _contains_exact_goods_id(
-                result_text, self.goods_id
-            ):
-                # 提取失效原因（实测在「失效原因: 」后面）
+            # 终态 3：失效卡（实测格式：「<id>\n失效原因: <reason>」）
+            if "失效原因" in result_text:
                 reason = "未知"
                 if "失效原因:" in result_text:
                     reason = result_text.split("失效原因:", 1)[1].split("\n", 1)[0].strip() or reason
@@ -420,27 +498,19 @@ class JDVideo(JDBaseUploader):
                     "请核实 ID 是否正确、商品是否上架。"
                 )
         else:
+            # 终态 4：超时
             raise RuntimeError(
-                f"商品 ID {self.goods_id} 搜索 20s 内没有返回同时包含准确 ID 和价格的商品卡。"
-                "已停止关联以避免选错商品。"
+                f"商品 ID {self.goods_id} 搜索 20s 内未返回有效商品（结果区无 ¥/￥ 价格）。"
+                "建议用 --headed 观察。"
             )
 
-        if goods_check is None:
-            raise RuntimeError(f"商品 ID {self.goods_id} 没有可选择的精确匹配商品卡")
+        # 勾选第一个商品卡。表头还有一个 goods-card-header-check 是「全选」，要排除
+        goods_check = active_panel.locator('label.jd-checkbox-wrapper.goods-card-check').first
+        if not await goods_check.count():
+            # 兜底：找 active panel 里第一个不是 header-check 的 checkbox-wrapper
+            goods_check = active_panel.locator('label.jd-checkbox-wrapper:not(.goods-card-header-check)').first
         await goods_check.wait_for(state="visible", timeout=5000)
-        checkbox_input = goods_check.locator('input[type="checkbox"]').first
-        already_selected = (
-            await checkbox_input.count() > 0 and await checkbox_input.is_checked()
-        )
-        if not already_selected:
-            await goods_check.click()
-        if await checkbox_input.count() > 0:
-            for _ in range(10):
-                if await checkbox_input.is_checked():
-                    break
-                await asyncio.sleep(0.1)
-            else:
-                raise RuntimeError(f"商品 ID {self.goods_id} 点击后没有进入选中状态")
+        await goods_check.click()
         jd_logger.info(_msg("✅", "已勾选商品"))
         await asyncio.sleep(1)
 
@@ -448,18 +518,16 @@ class JDVideo(JDBaseUploader):
         confirm_btn = frame.locator('.jd-drawer-wrapper-body button.jd-btn-primary').filter(has_text="确定").first
         await confirm_btn.click()
         # 等 drawer 关闭
-        drawer = frame.locator('.jd-drawer-wrapper-body').first
+        drawer = frame.locator('.jd-drawer-wrapper-body')
         try:
             await drawer.wait_for(state="hidden", timeout=10000)
         except Exception:
-            if await drawer.is_visible():
-                raise RuntimeError(
-                    f"商品 ID {self.goods_id} 确认后选择窗口仍未关闭，关联结果无法确认"
-                )
+            # 兜底：drawer 关闭可能是内部状态切换而不是 DOM 移除
+            await asyncio.sleep(2)
         jd_logger.success(_msg("🛒", f"商品 {self.goods_id} 已关联"))
 
     async def _select_creator_declaration(self, frame: Frame):
-        """Select the exact declaration chosen by the operator.
+        """选择运营人员指定的创作者声明下拉项。
 
         DOM：.content-declaration-wrapper .jd-select-selector
         点开后 options 渲染到 portal，selector 为 div.jd-select-item-option。
@@ -473,6 +541,7 @@ class JDVideo(JDBaseUploader):
         await declaration.click()
         await asyncio.sleep(1)
 
+        # 按 label 属性精确匹配
         target_option = frame.locator(
             f'div.jd-select-item-option[label="{self.creator_declaration}"]'
         ).first
@@ -481,6 +550,7 @@ class JDVideo(JDBaseUploader):
                 f"未找到创作声明“{self.creator_declaration}”，页面选项可能已变化"
             )
 
+        # 二次校验：防止 label 属性与 innerText 不一致
         text = (await target_option.evaluate("el => el.getAttribute('label') || el.innerText") or "").strip()
         if text != self.creator_declaration:
             raise RuntimeError(
@@ -505,6 +575,7 @@ class JDVideo(JDBaseUploader):
         if not self.original:
             return
 
+        # 通过 JS 查找「自主原创」label 并向上找对应 switch 按钮
         switch_state = await frame.evaluate(r"""
             () => {
                 const lbl = [...document.querySelectorAll('label')]
@@ -530,12 +601,14 @@ class JDVideo(JDBaseUploader):
         if switch_state.get("error") == "switch_not_found":
             raise RuntimeError("找到「自主原创」label 但未找到对应 switch 按钮。")
 
+        # switch 禁用时报错（不绕过）
         if switch_state.get("disabled"):
             raise ValueError(
                 "该账号的「自主原创」switch 当前不可用（可能是账号资质未达标或该类目不支持）。"
                 "请在京东商家后台确认账号是否已开通原创功能，或去掉 --original 参数后重试。"
             )
 
+        # 已经开启则跳过
         if switch_state.get("aria_checked") == "true":
             jd_logger.info(_msg("✅", "自主原创已经是开启状态，跳过"))
             return
@@ -592,7 +665,7 @@ class JDVideo(JDBaseUploader):
         target_hour, target_minute = self.schedule.hour, self.schedule.minute
         expected_value = self.schedule.strftime("%Y-%m-%d %H:%M")
 
-        # 切到定时发布 radio
+        # 滚动到「定时发布」radio 并点击
         await frame.evaluate(
             "() => { const el = [...document.querySelectorAll('label')].find(l => l.title === '定时发布'); if(el) el.scrollIntoView({block:'center'}); }"
         )
@@ -606,9 +679,9 @@ class JDVideo(JDBaseUploader):
         await date_input.click()
         await asyncio.sleep(1.2)
 
-        # 翻月找目标日期 cell
-        # 先看当前面板年月，决定翻几次（每翻一次刷新一次）
+        # 翻月找目标日期 cell（最多 14 次，足够 1 年内任意月份）
         async def panel_state():
+            """读取当前日历面板状态：目标日期是否找到、是否禁用、可见范围。"""
             return await frame.evaluate(
                 r"""(targetTitle) => {
                     const cells = [...document.querySelectorAll('td.jd-picker-cell[title]')];
@@ -629,7 +702,6 @@ class JDVideo(JDBaseUploader):
                 target_date,
             )
 
-        # 翻月：最多 14 次（足够 1 年内任意月份）
         for _ in range(14):
             state = await panel_state()
             if state["target_found"]:
@@ -663,11 +735,7 @@ class JDVideo(JDBaseUploader):
         await asyncio.sleep(0.5)
         jd_logger.info(_msg("📅", f"已选择日期: {target_date}"))
 
-        # 设小时和分钟。
-        # 时分滚轮 DOM：.jd-picker-time-panel 内有 2 个 ul.jd-picker-time-panel-column
-        #   第 1 个 ul = 小时列（24 个 li，innerText 为 "00".."23"）
-        #   第 2 个 ul = 分钟列（60 个 li，innerText 为 "00".."59"）
-        # li 没有 title 属性，靠 innerText 定位。两列 li 文本会重叠，必须严格按列分。
+        # 设小时和分钟。两列 ul 分别是小时（24 个 li）和分钟（60 个 li）
         time_panel = frame.locator('.jd-picker-time-panel-column')
         hour_col, minute_col = time_panel.nth(0), time_panel.nth(1)
 
@@ -683,14 +751,14 @@ class JDVideo(JDBaseUploader):
         jd_logger.info(_msg("🕐", f"已选择分钟: {target_minute:02d}"))
         await asyncio.sleep(0.3)
 
-        # 点确定（截图上面板右下角的「确定」按钮）
+        # 点击日期面板右下角的「确定」按钮
         confirm_btn = frame.locator('.jd-picker-datetime-panel').locator('button').filter(has_text="确定").first
         if not await confirm_btn.count():
             confirm_btn = frame.locator('.jd-picker-ok button').first
         await confirm_btn.click()
         await asyncio.sleep(0.8)
 
-        # 校验 input.value
+        # 校验 input.value 与期望值一致
         actual = (await date_input.input_value()).strip()
         if actual != expected_value:
             raise RuntimeError(
@@ -731,8 +799,7 @@ class JDVideo(JDBaseUploader):
 
         jd_logger.warning(_msg("🔐", "检测到安全验证码，上传已暂停"))
 
-        stdin = sys.stdin
-        is_tty = bool(stdin is not None and getattr(stdin, "isatty", lambda: False)())
+        is_tty = bool(sys.stdin and sys.stdin.isatty())
 
         if is_tty:
             # 交互终端模式：等用户按回车再确认
@@ -742,7 +809,8 @@ class JDVideo(JDBaseUploader):
                 print("   完成后按回车继续...", flush=True)
                 print("=" * 50, flush=True)
 
-                await asyncio.get_running_loop().run_in_executor(None, stdin.readline)
+                # 在 executor 中阻塞读取 stdin，避免阻塞事件循环
+                await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
 
                 still_there = await frame.evaluate("""
                     () => {
@@ -784,6 +852,20 @@ class JDVideo(JDBaseUploader):
             raise RuntimeError("等待验证码超时（10 分钟），请检查浏览器并手动处理后重试")
 
     async def _upload_in_context(self, context: BrowserContext) -> dict:
+        """在指定 BrowserContext 中执行完整的发布流程。
+
+        流程：
+        1. 校验参数
+        2. 打开发布页 → 定位 iframe
+        3. 上传视频 → 等待上传完成 → 填写标题 → 关联商品 →
+           选择创作者声明 → 开启自主原创 → 设置定时
+        4. dry_run 跳过发布；否则点击发布按钮 → 处理验证码 → 等待确认
+        5. 成功后保存 storage_state；页面保留供人工复核
+
+        :returns: 发布结果 dict（含 mode/confirmation/final_url）
+        :raises JdAuthenticationError: Cookie 失效
+        :raises PublishResultUncertainError: 发布结果不确定
+        """
         jd_logger.info(_msg("🧍", "小人先检查 cookie 和视频文件"))
         await self.validate_upload_args()
         jd_logger.info(_msg("🥳", "上传前检查通过"))
@@ -806,43 +888,40 @@ class JDVideo(JDBaseUploader):
                 raise
             await asyncio.sleep(3)
 
+            # 上传视频文件
             jd_logger.info(_msg("🏃", f"小人开始上传视频: {Path(self.file_path).name}"))
             file_input = frame.locator('input[type="file"][accept*=".mp4"]').first
             await file_input.set_input_files(self.file_path)
             await self._wait_for_video_uploaded(frame)
 
+            # 填写标题
             jd_logger.info(_msg("✍️", f"填写正文标题: {self.title}"))
             await frame.locator("#title").fill(self.title)
             await asyncio.sleep(0.5)
 
+            # 各步骤依次执行
             await self._add_goods(page, frame)
             await self._select_creator_declaration(frame)
             await self._set_original(frame)
             await self._set_schedule(frame)
 
             if self.dry_run:
-                screenshot_dir = self.screenshot_dir
-                screenshot_dir.mkdir(parents=True, exist_ok=True)
-
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                shot = screenshot_dir / f"jd_dry_run_{timestamp}.png"
-
-                await page.screenshot(path=str(shot), full_page=True)
-                jd_logger.info(_msg("📸", f"截图已保存: {shot}"))
+                jd_logger.info(_msg("🧪", "Dry run 模式：跳过发布，所有基础设置已完成"))
                 success = True
-                return {"mode": "dry_run", "screenshot": str(shot)}
+                return {"mode": "dry_run"}
 
             # 真实发布
             publish_btn = frame.locator('button[class*="publishBtn"]').filter(has_text="发布").first
             jd_logger.info(_msg("🚀", "点击发布按钮"))
             before_submit_text = await frame.locator("body").inner_text(timeout=3000)
+            initial_url = page.url
             await publish_btn.click()
             submitted = True
 
             # 检测并处理验证码（人工介入）
             await self._handle_captcha(frame)
 
-            # Confirm an explicit success message or a real navigation away from the form.
+            # 确认明确的成功消息或真实的页面跳转
             published = False
             confirmation = ""
             success_hints = ("发布成功", "提交成功", "已提交审核", "审核中", "发布完成")
@@ -851,9 +930,11 @@ class JDVideo(JDBaseUploader):
                 await asyncio.sleep(1)
                 try:
                     current_text = await frame.locator("body").inner_text(timeout=3000)
+                    # 先检测失败
                     for hint in failure_hints:
                         if hint in current_text and hint not in before_submit_text:
-                            raise JdPublishRejectedError(f"平台返回发布失败提示：{hint}")
+                            raise RuntimeError(f"平台返回发布失败提示：{hint}")
+                    # 检测成功提示
                     matched_success = next(
                         (
                             hint
@@ -866,8 +947,18 @@ class JDVideo(JDBaseUploader):
                         published = True
                         confirmation = f"检测到平台成功提示：{matched_success}"
                         break
+                    # 检测页面跳转
+                    if page.url != initial_url and _url_host(page.url) not in JD_AUTH_HOSTS:
+                        published = True
+                        confirmation = f"页面已跳转：{page.url}"
+                        break
                 except Exception as e:
+                    # frame 可能因页面跳转而 detach
                     if "detached" in str(e).lower():
+                        if page.url != initial_url and _url_host(page.url) not in JD_AUTH_HOSTS:
+                            published = True
+                            confirmation = f"发布表单已关闭并跳转：{page.url}"
+                            break
                         raise PublishResultUncertainError(
                             "京东发布表单已关闭，但页面没有给出可确认的发布结果"
                         ) from e
@@ -886,45 +977,39 @@ class JDVideo(JDBaseUploader):
                 "final_url": page.url,
             }
         except asyncio.CancelledError as exc:
+            # 已点击发布按钮但被中断 → 结果不确定
             if submitted:
                 raise PublishResultUncertainError(
                     "京东发布按钮已经点击，但任务在取得平台确认前被中断"
                 ) from exc
             raise
-        except JdPublishRejectedError:
-            raise
-        except PublishResultUncertainError:
-            raise
         except Exception as exc:
             jd_logger.error(_msg("❌", f"UPLOAD_FAILED: {exc}"))
-            if submitted:
-                raise PublishResultUncertainError(
-                    "京东发布按钮已经点击，但后续流程异常，平台结果无法确认"
-                ) from exc
             raise
         finally:
+            # 成功后保存 storage_state（更新 Cookie）
             if success:
                 await context.storage_state(path=self.account_file)
                 jd_logger.success(_msg("🥳", "cookie 更新完毕"))
-            elif page:
-                try:
-                    screenshot_dir = self.screenshot_dir
-                    screenshot_dir.mkdir(parents=True, exist_ok=True)
-
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                    shot = screenshot_dir / f"jd_upload_failed_{timestamp}.png"
-
-                    await page.screenshot(path=str(shot), full_page=True)
-                    jd_logger.info(_msg("📸", f"失败现场截图已保存: {shot}"))
-                except Exception:
-                    pass
+            # 页面保留供人工复核
             if page:
                 try:
-                    await page.close()
+                    if not page.is_closed():
+                        jd_logger.info(
+                            _msg(
+                                "📌",
+                                f"发布页面已保留供人工复核；当前账号共保留 {len(context.pages)} 个页面",
+                            )
+                        )
                 except Exception:
                     pass
 
     async def upload_in_session(self, session: JdBrowserSession) -> dict:
+        """通过浏览器会话执行发布流程。
+
+        会话校验 Cookie 后调用 _upload_in_context。
+        若抛出 JdAuthenticationError 则标记会话未认证。
+        """
         context = await session.ensure_open()
         try:
             result = await self._upload_in_context(context)

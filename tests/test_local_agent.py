@@ -232,6 +232,79 @@ class AgentConnectionStoreTests(unittest.TestCase):
 
 
 class LocalAgentApplicationTests(unittest.TestCase):
+    def test_publish_downloads_video_and_cover_before_running(self):
+        class Client:
+            def __init__(self):
+                self.completed = None
+
+            def download_video(
+                self, _job_id, _agent_id, destination, *, progress
+            ):
+                destination.write_bytes(b"video")
+                progress()
+
+            def download_cover_image(
+                self, _job_id, _agent_id, destination, *, progress
+            ):
+                destination.write_bytes(b"cover")
+                progress()
+
+            def heartbeat(self, _job_id, _agent_id):
+                return {"cancel_requested": False}
+
+            def complete(self, _job_id, **payload):
+                self.completed = payload
+
+        class CompletedFuture:
+            @staticmethod
+            def done():
+                return True
+
+            @staticmethod
+            def result(timeout=None):
+                return {"message": "complete"}
+
+        class Runner:
+            user_id = USER_ID
+
+            def __init__(self, root):
+                self.paths = AppDataPaths.create(root).for_user(USER_ID)
+                self.received = None
+
+            def submit(self, _job, video_path, cover_image_path=None):
+                self.received = (
+                    video_path.read_bytes(),
+                    cover_image_path.read_bytes(),
+                )
+                return CompletedFuture()
+
+            @staticmethod
+            def finish_logs(_job_id):
+                return []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = Client()
+            application = LocalAgentApplication(
+                client, data_root=Path(temp_dir) / "agent", poll_seconds=1
+            )
+            runner = Runner(Path(temp_dir) / "runner")
+            application.runner = runner
+            application.execute(
+                {
+                    "id": "d" * 32,
+                    "kind": "publish",
+                    "platform": "tmall",
+                    "account": "shop1",
+                    "payload": {
+                        "original_filename": "demo.mp4",
+                        "cover_image_filename": "cover-test.png",
+                    },
+                }
+            )
+
+        self.assertEqual(runner.received, (b"video", b"cover"))
+        self.assertEqual(client.completed["status"], "succeeded")
+
     def test_unauthorized_device_stops_and_requests_pairing(self):
         class UnauthorizedClient:
             def claim(self, _agent_id):
@@ -300,7 +373,7 @@ class LocalAgentApplicationTests(unittest.TestCase):
                 self.paths = AppDataPaths.create(root).for_user(USER_ID)
                 self.cancelled = False
 
-            def submit(self, _job, _video_path):
+            def submit(self, _job, _video_path, _cover_image_path=None):
                 return PendingFuture()
 
             def cancel(self, _job_id):
@@ -362,7 +435,7 @@ class AgentJobRunnerTests(unittest.TestCase):
                 "payload": {},
             }
 
-            async def publishing(_job, _video_path):
+            async def publishing(_job, _video_path, _cover_image_path):
                 started.set()
                 try:
                     await asyncio.sleep(60)
@@ -388,6 +461,8 @@ class AgentJobRunnerTests(unittest.TestCase):
             paths = AppDataPaths.create(Path(temp_dir) / "agent-data").for_user(USER_ID)
             video = paths.uploads / "demo.mp4"
             video.write_bytes(b"video")
+            cover = paths.uploads / "cover.png"
+            cover.write_bytes(b"cover")
             runner = AgentJobRunner(USER_ID, paths)
             session_pool = object()
             runner.runtime.tmall_sessions = lambda: session_pool
@@ -415,10 +490,11 @@ class AgentJobRunnerTests(unittest.TestCase):
                     "local_agent.runner.upload_tmall_video",
                     new=AsyncMock(return_value={"mode": "dry_run"}),
                 ) as upload:
-                    result = asyncio.run(runner._run_job(job, video))
+                    result = asyncio.run(runner._run_job(job, video, cover))
                 request = upload.await_args.args[0]
                 self.assertEqual(request.account_name, "shop1")
                 self.assertEqual(request.video_file, video)
+                self.assertEqual(request.cover_image_file, cover)
                 self.assertTrue(request.dry_run)
                 self.assertFalse(request.headless)
                 self.assertEqual(upload.await_args.kwargs["session_pool"], session_pool)

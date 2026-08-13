@@ -24,7 +24,7 @@ from local_agent.paths import (
 )
 from local_agent.runner import AgentJobRunner
 from uploader.errors import PublishResultUncertainError
-from utils.files import validate_media_filename
+from utils.files import validate_cover_image_filename, validate_media_filename
 
 
 class AgentJobCancelledError(RuntimeError):
@@ -114,6 +114,7 @@ class LocalAgentApplication:
         label = {"tmall": "天猫", "jd": "京东"}.get(job["platform"], job["platform"])
         print(f"领取任务：{label} / {job['account']} / {job['kind']} / {job_id}")
         video_path: Path | None = None
+        cover_image_path: Path | None = None
         download_dir: Path | None = None
         future = None
         status = "failed"
@@ -143,23 +144,49 @@ class LocalAgentApplication:
 
         try:
             if job["kind"] == "publish":
-                original_name = validate_media_filename(
-                    job.get("payload", {}).get("original_filename") or "video.mp4"
-                )
-                download_dir = secure_directory(self.runner.paths.uploads / job_id)
-                video_path = download_dir / original_name
-                print(f"正在下载任务视频：{original_name}")
-                self.client.download_video(
-                    job_id,
-                    self.agent_id,
-                    video_path,
-                    progress=heartbeat_with_grace,
-                )
-                heartbeat_with_grace()
-                if not video_path.is_file() or video_path.stat().st_size == 0:
-                    raise RuntimeError("任务视频下载为空")
+                payload = job.get("payload", {})
+                # Older queued tasks omitted the flag and still need the managed download path.
+                if payload.get("managed_upload", True):
+                    original_name = validate_media_filename(
+                        payload.get("original_filename") or "video.mp4"
+                    )
+                    download_dir = secure_directory(self.runner.paths.uploads / job_id)
+                    video_path = download_dir / original_name
+                    print(f"正在下载任务视频：{original_name}")
+                    self.client.download_video(
+                        job_id,
+                        self.agent_id,
+                        video_path,
+                        progress=heartbeat_with_grace,
+                    )
+                    heartbeat_with_grace()
+                    if not video_path.is_file() or video_path.stat().st_size == 0:
+                        raise RuntimeError("任务视频下载为空")
+                    raw_cover_name = payload.get("cover_image_filename")
+                    if raw_cover_name:
+                        cover_name = validate_cover_image_filename(raw_cover_name)
+                        cover_image_path = download_dir / cover_name
+                        print(f"正在下载自定义封面：{cover_name}")
+                        self.client.download_cover_image(
+                            job_id,
+                            self.agent_id,
+                            cover_image_path,
+                            progress=heartbeat_with_grace,
+                        )
+                        heartbeat_with_grace()
+                        if (
+                            not cover_image_path.is_file()
+                            or cover_image_path.stat().st_size == 0
+                        ):
+                            raise RuntimeError("任务封面图片下载为空")
+                else:
+                    video_path = Path(str(payload.get("video_path") or "")).expanduser()
+                    if not video_path.is_absolute() or not video_path.is_file():
+                        raise RuntimeError("Excel 中的视频本机绝对路径不存在或无法读取")
+                    if video_path.stat().st_size == 0:
+                        raise RuntimeError("Excel 中的视频文件为空")
 
-            future = self.runner.submit(job, video_path)
+            future = self.runner.submit(job, video_path, cover_image_path)
             while not future.done():
                 try:
                     result = future.result(timeout=10)
@@ -204,7 +231,7 @@ class LocalAgentApplication:
             error = cancellation_reason
         except Exception as exc:
             status = "failed"
-            message = "本地代理任务失败，请查看任务日志或本机失败截图"
+            message = "本地代理任务失败，请查看任务日志"
             error = str(exc)
         finally:
             try:
@@ -218,7 +245,7 @@ class LocalAgentApplication:
                         break
                     except OSError as exc:
                         if attempt == 2:
-                            logs.append(f"本地临时视频清理失败：{exc}")
+                            logs.append(f"本地临时素材清理失败：{exc}")
                         else:
                             time.sleep(0.5 * (attempt + 1))
 

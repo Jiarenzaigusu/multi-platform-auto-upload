@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Iterable
 from zipfile import BadZipFile
 
@@ -120,18 +120,12 @@ def row_value(values: tuple[Any, ...], positions: dict[str, int], field: str) ->
     return cell_text(values[index])
 
 
-def resolve_video_path(raw_path: str, base_dir: Path) -> Path:
-    """Resolve a batch video strictly inside the authenticated user's media root."""
+def resolve_video_path(raw_path: str) -> Path:
+    """Resolve a batch video path supplied for the user's local Windows assistant."""
     try:
         video_path = Path(raw_path)
     except RuntimeError as exc:
         raise ValueError("视频路径无法解析") from exc
-    if video_path.is_absolute():
-        raise ValueError("视频路径必须填写当前用户素材目录内的相对路径")
-    root = base_dir.resolve()
-    resolved = (root / video_path).resolve()
-    try:
-        resolved.relative_to(root)
-    except ValueError as exc:
-        raise ValueError("视频路径不能超出当前用户素材目录") from exc
-    return resolved
+    if not video_path.is_absolute() and not PureWindowsPath(raw_path).is_absolute():
+        raise ValueError("视频路径必须填写本机绝对路径")
+    return video_path

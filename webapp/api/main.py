@@ -31,6 +31,7 @@ from webapp.ai_copy import create_ai_copy_router
 from webapp.api.agent import create_agent_router
 from webapp.api.batch import BatchValidationError
 from webapp.api.batch_jd import parse_jd_batch_workbook
+from webapp.api.batch_templates import build_batch_template
 from webapp.api.batch_tmall import parse_tmall_batch_workbook
 from webapp.api.media import (
     MediaQuotaExceededError,
@@ -43,6 +44,7 @@ from webapp.api.media import (
     validate_media_filename,
 )
 from webapp.api.models import (
+    SUPPORTED_COVER_IMAGE_EXTENSIONS,
     ValidationError,
     validate_account_name,
     validate_platform,
@@ -65,6 +67,7 @@ class WebSettings:
     data_dir: Path
     frontend_dist_dir: Path
     max_upload_bytes: int = 4 * 1024 * 1024 * 1024
+    max_cover_image_bytes: int = 20 * 1024 * 1024
     max_upload_request_bytes: int = 20 * 1024 * 1024 * 1024
     max_media_total_bytes: int = 100 * 1024 * 1024 * 1024
     max_media_files: int = 1000
@@ -176,7 +179,6 @@ def create_app(
 ) -> FastAPI:
     settings = settings or WebSettings.from_environment()
     data_paths = AppDataPaths.create(settings.data_dir)
-    batch_template_dir = Path(__file__).resolve().parents[1] / "templates"
     workspace_registry = workspace_registry or UserWorkspaceRegistry(
         data_paths,
         user_workers=settings.user_workers,
@@ -515,17 +517,29 @@ def create_app(
             raise HTTPException(status_code=500, detail="删除 Cookie 文件失败") from exc
         return result
 
-    @app.get("/api/batch-templates/tmall")
-    def download_tmall_batch_template(
+    @app.get("/api/batch-templates-v2/{platform}")
+    def download_batch_template(
+        platform: str,
         _user=Depends(require_user),
-    ) -> FileResponse:
-        template_path = batch_template_dir / "tmall_batch_template.xlsx"
-        if not template_path.is_file():
-            raise HTTPException(status_code=500, detail="天猫批量发布模板尚未生成")
-        return FileResponse(
-            template_path,
+    ) -> StreamingResponse:
+        try:
+            content = build_batch_template(validate_platform(platform))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        filename = (
+            "%E5%A4%A9%E7%8C%AB_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx"
+            if platform == "tmall"
+            else "%E4%BA%AC%E4%B8%9C_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx"
+        )
+        return StreamingResponse(
+            iter([content]),
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            filename="tmall_batch_template.xlsx",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{filename}",
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
         )
 
     @app.get("/downloads/MPAU-Agent-Setup.exe")
@@ -540,19 +554,6 @@ def create_app(
             installer,
             media_type="application/vnd.microsoft.portable-executable",
             filename="MPAU-Agent-Setup.exe",
-        )
-
-    @app.get("/api/batch-templates/jd")
-    def download_jd_batch_template(
-        _user=Depends(require_user),
-    ) -> FileResponse:
-        template_path = batch_template_dir / "jd_batch_template.xlsx"
-        if not template_path.is_file():
-            raise HTTPException(status_code=500, detail="京东批量发布模板尚未生成")
-        return FileResponse(
-            template_path,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            filename="jd_batch_template.xlsx",
         )
 
     @app.post("/api/accounts/{platform}/{account}/login", status_code=202)
@@ -648,6 +649,37 @@ def create_app(
             raise HTTPException(status_code=500, detail="删除任务日志失败，任务记录已保留") from exc
         return {"deleted_id": job_id}
 
+    @app.post("/api/jobs/batch-delete")
+    def batch_delete_jobs(
+        payload: dict,
+        workspace: UserWorkspace = Depends(operator_workspace),
+    ) -> dict:
+        """Mirror the local console's task-list batch deletion within one user workspace."""
+        raw_ids = payload.get("job_ids") if isinstance(payload, dict) else None
+        if not isinstance(raw_ids, list) or not raw_ids:
+            raise HTTPException(status_code=422, detail="请提供需要删除的任务 ID 列表")
+
+        unique_ids: list[str] = []
+        seen: set[str] = set()
+        for job_id in raw_ids:
+            if not isinstance(job_id, str) or not job_id or job_id in seen:
+                continue
+            seen.add(job_id)
+            unique_ids.append(job_id)
+        if not unique_ids:
+            raise HTTPException(status_code=422, detail="请提供需要删除的任务 ID 列表")
+
+        deleted, skipped = workspace.store.delete_jobs(unique_ids)
+        if deleted:
+            try:
+                workspace.task_manager.delete_jobs_artifacts(deleted)
+            except OSError as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail="部分任务日志删除失败，任务记录已保留",
+                ) from exc
+        return {"deleted": deleted, "skipped": skipped}
+
     @app.post("/api/jobs/{job_id}/cancel-and-delete-account", status_code=202)
     def cancel_job_and_delete_account(
         job_id: str,
@@ -741,6 +773,7 @@ def create_app(
         platform: str = Form(...),
         account: str = Form(...),
         video: UploadFile = File(...),
+        cover_image: UploadFile | None = File(None),
         title: str = Form(...),
         description: str = Form(""),
         tags: str = Form(""),
@@ -759,18 +792,33 @@ def create_app(
             original_name = validate_media_filename(video.filename or "video.mp4")
         except ValueError as exc:
             await video.close()
+            if cover_image:
+                await cover_image.close()
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        cover_name = Path(cover_image.filename or "cover.jpg").name if cover_image else ""
+        if cover_image and Path(cover_name).suffix.lower() not in SUPPORTED_COVER_IMAGE_EXTENSIONS:
+            await video.close()
+            await cover_image.close()
+            raise HTTPException(status_code=422, detail="封面图片仅支持 JPG、PNG 或 WebP 格式")
 
         # Start recovery and orphan cleanup before creating a new managed upload directory.
         try:
             manager.start()
         except Exception:
             await video.close()
+            if cover_image:
+                await cover_image.close()
             raise
 
         destination_dir = workspace.paths.uploads / uuid.uuid4().hex
         destination_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
         destination = destination_dir / original_name
+        cover_destination = (
+            destination_dir
+            / f"cover-{uuid.uuid4().hex}{Path(cover_name).suffix.lower()}"
+            if cover_image
+            else None
+        )
         try:
             await asyncio.to_thread(
                 stage_upload,
@@ -778,10 +826,24 @@ def create_app(
                 destination,
                 settings.max_upload_bytes,
             )
+            if cover_image and cover_destination:
+                try:
+                    await asyncio.to_thread(
+                        stage_upload,
+                        cover_image,
+                        cover_destination,
+                        settings.max_cover_image_bytes,
+                    )
+                except UploadTooLargeError as exc:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="封面图片超过 20 MiB 限制",
+                    ) from exc
             request = validate_publish_request(
                 platform=platform,
                 account=account,
                 video_path=destination,
+                cover_image_path=cover_destination,
                 original_filename=original_name,
                 title=title,
                 description=description,
@@ -813,6 +875,8 @@ def create_app(
             raise
         finally:
             await video.close()
+            if cover_image:
+                await cover_image.close()
 
         def submit_with_quota() -> dict:
             with workspace.store.media_lock:
@@ -868,7 +932,6 @@ def create_app(
                     account=selected_account,
                     dry_run=dry_run,
                     headed=headed,
-                    base_dir=workspace.paths.media,
                     max_rows=settings.max_batch_rows,
                 )
                 batch_id = uuid.uuid4().hex

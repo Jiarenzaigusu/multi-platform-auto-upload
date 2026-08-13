@@ -31,6 +31,7 @@ class TmallVideoUploadRequest:
     title: str
     description: str
     tags: list[str]
+    cover_image_file: Path | None = None
     goods_id: str = ""
     activity_topic: str = ""
     music_name: str = ""
@@ -134,6 +135,9 @@ async def upload_tmall_video(
     account_file = resolve_account_file(paths, "tmall", request.account_name)
     uploader = TmallVideo(
         file_path=str(request.video_file),
+        cover_image_path=(
+            str(request.cover_image_file) if request.cover_image_file else None
+        ),
         title=request.title,
         desc=request.description,
         account_file=str(account_file),
@@ -144,7 +148,6 @@ async def upload_tmall_video(
         creator_declaration=request.creator_declaration,
         schedule=request.schedule,
         publish_strategy=request.publish_strategy,
-        screenshot_dir=paths.screenshots / "tmall",
         debug=request.debug,
         dry_run=request.dry_run,
     )
@@ -221,7 +224,6 @@ async def upload_jd_video(
         schedule=request.schedule,
         original=request.original,
         creator_declaration=request.creator_declaration,
-        screenshot_dir=paths.screenshots / "jd",
         debug=request.debug,
         dry_run=request.dry_run,
     )

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from webapp.api.batch import (
     BatchPublishRow,
     BatchRowError,
@@ -23,7 +21,19 @@ TMALL_BATCH_COLUMNS = (
     ("activity_topic", "活动话题", False),
     ("music_name", "音乐名称", False),
     ("schedule", "定时发布", False),
-    ("creator_declaration", "创作者声明", True),
+    ("creator_declaration", "创作者声明", False),
+)
+
+TMALL_SAMPLE_ROW = (
+    "/Users/your-name/Videos/example.mp4",
+    "夏季女鞋穿搭",
+    "轻盈舒适，适合通勤与日常穿搭。",
+    "女鞋,夏季穿搭",
+    "123456789",
+    "夏日上新",
+    "默契",
+    "2030-12-31 14:30",
+    "内容含营销广告",
 )
 
 TMALL_COLUMN_ALIASES = {
@@ -45,7 +55,6 @@ def parse_tmall_batch_workbook(
     account: str,
     dry_run: bool,
     headed: bool,
-    base_dir: Path,
     max_rows: int = 200,
 ) -> list[BatchPublishRow]:
     """Validate all Tmall rows before the API queues any task."""
@@ -77,7 +86,12 @@ def parse_tmall_batch_workbook(
                 break
 
             try:
-                video_path = resolve_video_path(row_values["video_path"], base_dir)
+                video_path = resolve_video_path(row_values["video_path"])
+                creator_declaration = (
+                    row_values["creator_declaration"]
+                    if "creator_declaration" in positions
+                    else "内容无需标注"
+                )
                 request = validate_publish_request(
                     platform="tmall",
                     account=account,
@@ -89,10 +103,11 @@ def parse_tmall_batch_workbook(
                     goods_id=row_values["goods_id"],
                     activity_topic=row_values["activity_topic"],
                     raw_music_name=row_values["music_name"],
-                    raw_creator_declaration=row_values["creator_declaration"],
+                    raw_creator_declaration=creator_declaration,
                     raw_schedule=row_values["schedule"],
                     dry_run=dry_run,
                     headed=headed,
+                    verify_video_file=False,
                 )
             except ValueError as exc:
                 errors.append(BatchRowError(row_number, "内容", str(exc)))

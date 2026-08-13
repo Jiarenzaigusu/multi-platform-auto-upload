@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from webapp.api.batch import (
     BatchPublishRow,
     BatchRowError,
@@ -20,7 +18,16 @@ JD_BATCH_COLUMNS = (
     ("goods_id", "商品ID", False),
     ("schedule", "定时发布", False),
     ("original", "自主原创", False),
-    ("creator_declaration", "创作者声明", True),
+    ("creator_declaration", "创作者声明", False),
+)
+
+JD_SAMPLE_ROW = (
+    "/Users/your-name/Videos/example.mp4",
+    "夏季女鞋穿搭",
+    "123456789",
+    "2030-12-31 14:30",
+    "否",
+    "内容含营销广告",
 )
 
 JD_COLUMN_ALIASES = {
@@ -51,7 +58,6 @@ def parse_jd_batch_workbook(
     account: str,
     dry_run: bool,
     headed: bool,
-    base_dir: Path,
     max_rows: int = 200,
 ) -> list[BatchPublishRow]:
     """Validate all JD rows before the API queues any task."""
@@ -89,7 +95,12 @@ def parse_jd_batch_workbook(
                 continue
 
             try:
-                video_path = resolve_video_path(row_values["video_path"], base_dir)
+                video_path = resolve_video_path(row_values["video_path"])
+                creator_declaration = (
+                    row_values["creator_declaration"]
+                    if "creator_declaration" in positions
+                    else "内容无需标注"
+                )
                 request = validate_publish_request(
                     platform="jd",
                     account=account,
@@ -99,9 +110,10 @@ def parse_jd_batch_workbook(
                     goods_id=row_values["goods_id"],
                     raw_schedule=row_values["schedule"],
                     original=original,
-                    raw_creator_declaration=row_values["creator_declaration"],
+                    raw_creator_declaration=creator_declaration,
                     dry_run=dry_run,
                     headed=headed,
+                    verify_video_file=False,
                 )
             except ValueError as exc:
                 errors.append(BatchRowError(row_number, "内容", str(exc)))

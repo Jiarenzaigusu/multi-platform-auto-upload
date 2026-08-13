@@ -135,8 +135,41 @@ class AgentApiClient:
         *,
         progress=None,
     ) -> None:
+        self._download_file(
+            f"/api/agent/jobs/{quote(job_id)}/video",
+            agent_id,
+            destination,
+            resource_label="视频",
+            progress=progress,
+        )
+
+    def download_cover_image(
+        self,
+        job_id: str,
+        agent_id: str,
+        destination: Path,
+        *,
+        progress=None,
+    ) -> None:
+        self._download_file(
+            f"/api/agent/jobs/{quote(job_id)}/cover-image",
+            agent_id,
+            destination,
+            resource_label="封面图片",
+            progress=progress,
+        )
+
+    def _download_file(
+        self,
+        path: str,
+        agent_id: str,
+        destination: Path,
+        *,
+        resource_label: str,
+        progress=None,
+    ) -> None:
         query = urlencode({"agent_id": agent_id})
-        path = f"/api/agent/jobs/{quote(job_id)}/video?{query}"
+        path = f"{path}?{query}"
         if not self.agent_token:
             raise AgentApiError("本地执行助手尚未配对", 401)
         request = Request(
@@ -163,11 +196,14 @@ class AgentApiClient:
             raw = exc.read(100_000)
             destination.unlink(missing_ok=True)
             raise AgentApiError(
-                self._error_message(raw, f"视频下载失败（HTTP {exc.code}）"), exc.code
+                self._error_message(
+                    raw, f"{resource_label}下载失败（HTTP {exc.code}）"
+                ),
+                exc.code,
             ) from exc
         except (URLError, TimeoutError, OSError) as exc:
             destination.unlink(missing_ok=True)
-            raise AgentApiError(f"视频下载失败：{exc}") from exc
+            raise AgentApiError(f"{resource_label}下载失败：{exc}") from exc
         except Exception:
             destination.unlink(missing_ok=True)
             raise

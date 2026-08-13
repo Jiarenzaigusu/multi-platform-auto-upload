@@ -1,23 +1,42 @@
+"""tests.test_ai_copy 模块：AI 文案功能的单元测试。
+
+覆盖：
+- 卖点 Excel 解析与目录存储（上传/解析/删除/TTL/LRU）
+- 商品链接读取（京东/天猫/通用 HTML/自定义服务，含 SSRF 防护）
+- LLM 文案生成（system prompt、工具调用、字数校验、高风险表述/无依据数字校验）
+- FastAPI 路由（/api/ai-copy/*）
+"""
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
+from copy import deepcopy
+from io import BytesIO
 import json
 import unittest
-from contextlib import nullcontext
 from unittest.mock import Mock, patch
 
 import certifi
-from fastapi import HTTPException, Request
+from fastapi import HTTPException
+from openpyxl import Workbook, load_workbook
+from openpyxl.worksheet.datavalidation import DataValidation
+from starlette.datastructures import UploadFile
 
 from webapp.ai_copy.contracts import (
     GenerateCopyRequest,
     ProductReference,
-    ProductReferenceRequest,
+    ProductReferencesRequest,
     ProductSearchConfig,
+    SellingPointReference,
 )
-from webapp.ai_copy.errors import LLMResponseError, ProductLookupError
+from webapp.ai_copy.errors import (
+    LLMResponseError,
+    ProductLookupError,
+    SellingPointCatalogError,
+)
 from webapp.ai_copy.product_lookup import ProductSearchTool
 from webapp.ai_copy.product_lookup.cache import ProductReferenceCache
+from webapp.ai_copy.product_lookup.custom_reader import _NoRedirectHandler
 from webapp.ai_copy.product_lookup.generic_reader import GenericHtmlProductReader
 from webapp.ai_copy.product_lookup.jd_client import (
     JD_MOBILE_HEADERS,
@@ -31,13 +50,13 @@ from webapp.ai_copy.product_lookup.public_http import (
     create_trusted_ssl_context,
     validate_public_product_url,
 )
-from webapp.ai_copy.product_lookup.tmall_client import BrowserRuntimeTmallPageFetcher
 from webapp.ai_copy.product_lookup.tmall_reader import (
     TmallProductReader,
     extract_tmall_product_ids,
 )
-from webapp.ai_copy.router import create_ai_copy_router
+from webapp.ai_copy.router import _import_copy_to_excel, create_ai_copy_router
 from webapp.ai_copy.service import AiCopyService
+from webapp.ai_copy.selling_points import SellingPointCatalogStore
 from webapp.ai_copy.settings import AiCopySettings
 
 
@@ -49,10 +68,11 @@ class FakeChatProvider:
         self,
         *,
         tool_url: str = "https://shop.example/product/42",
+        tool_urls: list[str] | None = None,
         ready: bool = True,
         draft: dict[str, str] | None = None,
     ) -> None:
-        self.tool_url = tool_url
+        self.tool_urls = tool_urls or [tool_url]
         self.ready = ready
         self.draft = draft or {
             "title": "轻盈入夏，每一步都自在",
@@ -61,20 +81,21 @@ class FakeChatProvider:
         self.calls: list[dict] = []
 
     def chat(self, messages, **options):
-        self.calls.append({"messages": messages, **options})
+        self.calls.append({"messages": deepcopy(messages), **options})
         if options.get("tools"):
             return {
                 "role": "assistant",
                 "content": None,
                 "tool_calls": [
                     {
-                        "id": "call-product-1",
+                        "id": f"call-product-{index}",
                         "type": "function",
                         "function": {
                             "name": "inspect_product_link",
-                            "arguments": json.dumps({"url": self.tool_url}),
+                            "arguments": json.dumps({"url": product_url}),
                         },
                     }
+                    for index, product_url in enumerate(self.tool_urls, start=1)
                 ],
             }
         return {
@@ -101,49 +122,88 @@ class FakeProductTool:
         )
 
 
-class TmallBrowserCapacityTests(unittest.TestCase):
-    """Keep AI browser reads inside the process-wide browser capacity limit."""
+def build_selling_point_workbook(rows: list[tuple[object, object]]) -> bytes:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.append(["商品ID或货号", "商品核心内容卖点"])
+    for row in rows:
+        worksheet.append(list(row))
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    return output.getvalue()
 
-    def test_page_fetcher_holds_global_slot_while_runtime_executes(self):
-        events: list[str] = []
-        expected = FetchedPage(b"page", "text/html", "utf-8", "https://example.com")
 
-        class Slot:
-            def __enter__(self):
-                events.append("enter")
-
-            def __exit__(self, _exc_type, _exc, _traceback):
-                events.append("exit")
-
-        class Runtime:
-            def run(self, coroutine):
-                events.append("run")
-                coroutine.close()
-                return expected
-
-        fetcher = BrowserRuntimeTmallPageFetcher(
-            Runtime(),
-            Mock(),
-            timeout_seconds=5,
-            max_bytes=1024,
-            browser_slots=Slot(),
+class SellingPointCatalogTests(unittest.TestCase):
+    def test_upload_and_resolve_multiple_unique_identifiers(self):
+        store = SellingPointCatalogStore()
+        uploaded = store.upload(
+            "商品核心卖点.xlsx",
+            build_selling_point_workbook(
+                [
+                    ("SKU-001", "轻量透气，适合夏日通勤"),
+                    ("000002", "柔软好搭，适合日常穿着"),
+                ]
+            ),
         )
 
-        self.assertIs(fetcher.get("https://detail.tmall.com/item.htm?id=1"), expected)
-        self.assertEqual(events, ["enter", "run", "exit"])
+        resolved = store.resolve(uploaded.catalog_id, ["sku-001", "000002"])
+
+        self.assertEqual(uploaded.row_count, 2)
+        self.assertEqual([item.identifier for item in resolved], ["SKU-001", "000002"])
+        self.assertIn("夏日通勤", resolved[0].selling_point)
+
+    def test_duplicate_identifier_is_rejected_case_insensitively(self):
+        store = SellingPointCatalogStore()
+
+        with self.assertRaisesRegex(SellingPointCatalogError, "重复"):
+            store.upload(
+                "points.xlsx",
+                build_selling_point_workbook(
+                    [("SKU-001", "卖点一"), ("sku-001", "卖点二")]
+                ),
+            )
+
+    def test_unknown_identifier_is_rejected(self):
+        store = SellingPointCatalogStore()
+        uploaded = store.upload(
+            "points.xlsx",
+            build_selling_point_workbook([("SKU-001", "卖点一")]),
+        )
+
+        with self.assertRaisesRegex(SellingPointCatalogError, "SKU-404"):
+            store.resolve(uploaded.catalog_id, ["SKU-404"])
 
 
 class AiCopyServiceTests(unittest.TestCase):
+    @staticmethod
+    def make_request(
+        service: AiCopyService,
+        selling_point: str,
+        **values,
+    ) -> GenerateCopyRequest:
+        identifier = values.pop("identifier", "SKU-001")
+        catalog = service.upload_selling_points(
+            "points.xlsx",
+            build_selling_point_workbook([(identifier, selling_point)]),
+        )
+        return GenerateCopyRequest(
+            selling_point_catalog_id=catalog.catalog_id,
+            product_identifiers=[identifier],
+            style=values.pop("style", "atmospheric_seeding"),
+            scene=values.pop("scene", "daily_styling"),
+            **values,
+        )
+
     def test_product_link_is_read_through_required_llm_tool_call(self):
         provider = FakeChatProvider()
         product_tool = FakeProductTool()
         service = AiCopyService(provider, product_tool)
-        request = GenerateCopyRequest(
-            content_brief="突出轻便、透气和通勤百搭",
-            style="friendly",
-            scene="short_video",
-            festival="七夕",
-            product_url="https://shop.example/product/42",
+        request = self.make_request(
+            service,
+            "突出轻便、透气和通勤百搭",
+            festival="情人节",
+            product_urls=["https://shop.example/product/42"],
             product_search={
                 "endpoint_url": "https://search.example/inspect",
                 "api_key": "request-only-secret",
@@ -154,7 +214,7 @@ class AiCopyServiceTests(unittest.TestCase):
 
         self.assertEqual(result.model, "test-copy-model")
         self.assertEqual(result.provider, "Test Provider")
-        self.assertEqual(result.product_reference.title, "轻量透气休闲鞋")
+        self.assertEqual(result.product_references[0].title, "轻量透气休闲鞋")
         self.assertEqual(len(provider.calls), 2)
         self.assertEqual(provider.calls[0]["tool_choice"]["function"]["name"], "inspect_product_link")
         self.assertEqual(product_tool.calls[0][0], "https://shop.example/product/42")
@@ -169,17 +229,34 @@ class AiCopyServiceTests(unittest.TestCase):
         service = AiCopyService(provider, product_tool)
 
         result = service.generate(
-            GenerateCopyRequest(
-                content_brief="夏季轻量通勤鞋",
-                style="minimal",
-                scene="social_post",
+            self.make_request(
+                service,
+                "夏季轻量通勤鞋",
+                style="relaxed_natural",
+                scene="daily_styling",
             )
         )
 
-        self.assertIsNone(result.product_reference)
+        self.assertEqual(result.product_references, [])
         self.assertEqual(product_tool.calls, [])
         self.assertEqual(len(provider.calls), 1)
         self.assertNotIn("tools", provider.calls[0])
+
+    def test_copy_prompt_requires_grounded_and_non_absolute_language(self):
+        messages = AiCopyService._initial_messages(
+            self.make_request(
+                AiCopyService(FakeChatProvider(), FakeProductTool()),
+                "不要使用功效词汇",
+                style="relaxed_natural",
+                scene="daily_styling",
+            ),
+            [SellingPointReference(identifier="SKU-001", selling_point="不要使用功效词汇")],
+        )
+
+        system_prompt = messages[0]["content"]
+        self.assertIn("不得出现任何阿拉伯数字", system_prompt)
+        self.assertIn("不要使用功效词汇", system_prompt)
+        self.assertIn("100%", system_prompt)
 
     def test_llm_cannot_change_the_requested_product_url(self):
         provider = FakeChatProvider(tool_url="https://attacker.example/private")
@@ -187,11 +264,12 @@ class AiCopyServiceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(LLMResponseError, "链接与用户请求不一致"):
             service.generate(
-                GenerateCopyRequest(
-                    content_brief="商品介绍",
-                    style="professional",
-                    scene="product_detail",
-                    product_url="https://shop.example/product/42",
+                self.make_request(
+                    service,
+                    "商品介绍",
+                    style="old_money_luxury",
+                    scene="daily_styling",
+                    product_urls=["https://shop.example/product/42"],
                 )
             )
 
@@ -203,11 +281,7 @@ class AiCopyServiceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(LLMResponseError, "高风险"):
             service.generate(
-                GenerateCopyRequest(
-                    content_brief="日常百搭休闲鞋",
-                    style="friendly",
-                    scene="short_video",
-                )
+                self.make_request(service, "日常百搭休闲鞋")
             )
 
     def test_invented_numeric_claim_is_rejected(self):
@@ -218,11 +292,7 @@ class AiCopyServiceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(LLMResponseError, "没有的数字信息：99%"):
             service.generate(
-                GenerateCopyRequest(
-                    content_brief="突出轻便和通勤百搭",
-                    style="friendly",
-                    scene="short_video",
-                )
+                self.make_request(service, "突出轻便和通勤百搭")
             )
 
     def test_source_grounded_number_is_allowed(self):
@@ -232,11 +302,7 @@ class AiCopyServiceTests(unittest.TestCase):
         service = AiCopyService(provider, FakeProductTool())
 
         result = service.generate(
-            GenerateCopyRequest(
-                content_brief="鞋面含棉99%，适合日常通勤",
-                style="friendly",
-                scene="short_video",
-            )
+            self.make_request(service, "鞋面含棉99%，适合日常通勤")
         )
 
         self.assertIn("99%", result.body)
@@ -250,13 +316,102 @@ class AiCopyServiceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(LLMResponseError, "没有的数字信息：99%"):
             service.generate(
-                GenerateCopyRequest(
-                    content_brief="突出轻便和通勤百搭",
-                    style="friendly",
-                    scene="short_video",
-                    product_url="https://shop.example/product/99",
+                self.make_request(
+                    service,
+                    "突出轻便和通勤百搭",
+                    product_urls=["https://shop.example/product/99"],
                 )
             )
+
+    def test_multiple_product_links_are_all_read_before_generation(self):
+        product_urls = [
+            "https://shop.example/product/alpha",
+            "https://shop.example/product/beta",
+        ]
+        provider = FakeChatProvider(tool_urls=product_urls)
+        product_tool = FakeProductTool()
+        service = AiCopyService(provider, product_tool)
+
+        result = service.generate(
+            self.make_request(
+                service,
+                "适合日常搭配与通勤",
+                product_urls=product_urls,
+            )
+        )
+
+        self.assertEqual(
+            [reference.source_url for reference in result.product_references],
+            product_urls,
+        )
+        self.assertEqual([call[0] for call in product_tool.calls], product_urls)
+        self.assertEqual(len(provider.calls[0]["messages"]), 2)
+        self.assertEqual(len(provider.calls[0]["tools"]), 1)
+        for product_url in product_urls:
+            self.assertIn(product_url, provider.calls[0]["messages"][1]["content"])
+        final_messages = provider.calls[1]["messages"]
+        self.assertEqual(
+            [message["role"] for message in final_messages[-3:-1]],
+            ["tool", "tool"],
+        )
+        self.assertTrue(
+            all(
+                "轻量透气休闲鞋" in message["content"]
+                for message in final_messages[-3:-1]
+            )
+        )
+
+    def test_product_links_are_deduplicated_and_limited(self):
+        service = AiCopyService(FakeChatProvider(), FakeProductTool())
+        product_url = "https://shop.example/product/alpha"
+
+        request = self.make_request(
+            service,
+            "日常百搭",
+            product_urls=[product_url, product_url],
+        )
+
+        self.assertEqual(
+            [str(value) for value in request.product_urls],
+            [product_url],
+        )
+        with self.assertRaisesRegex(ValueError, "20 个商品链接"):
+            self.make_request(
+                service,
+                "日常百搭",
+                product_urls=[
+                    f"https://shop.example/product/item-{index}"
+                    for index in range(21)
+                ],
+            )
+
+    def test_multiple_selling_points_are_sent_as_important_references(self):
+        provider = FakeChatProvider()
+        service = AiCopyService(provider, FakeProductTool())
+        catalog = service.upload_selling_points(
+            "points.xlsx",
+            build_selling_point_workbook(
+                [
+                    ("SKU-001", "轻量透气，适合通勤"),
+                    ("SKU-002", "柔软百搭，适合周末出游"),
+                ]
+            ),
+        )
+
+        result = service.generate(
+            GenerateCopyRequest(
+                selling_point_catalog_id=catalog.catalog_id,
+                product_identifiers=["SKU-001", "SKU-002"],
+                style="atmospheric_seeding",
+                scene="daily_styling",
+            )
+        )
+
+        prompt = provider.calls[0]["messages"][1]["content"]
+        self.assertIn("SKU-001：轻量透气", prompt)
+        self.assertIn("SKU-002：柔软百搭", prompt)
+        self.assertIn("标题和正文的重要参考", prompt)
+        self.assertEqual(len(result.selling_point_references), 2)
 
 
 class _FakeHeaders:
@@ -297,7 +452,7 @@ class ProductSearchToolTests(unittest.TestCase):
         self.settings = AiCopySettings()
 
     def test_custom_search_service_uses_strict_contract_and_request_key(self):
-        response = FetchedPage(
+        response = _FakeResponse(
             json.dumps(
                 {
                     "title": "夏季凉感床品",
@@ -305,15 +460,14 @@ class ProductSearchToolTests(unittest.TestCase):
                     "attributes": {"规格": "四件套"},
                 },
                 ensure_ascii=False,
-            ).encode(),
-            "application/json",
-            "utf-8",
-            "https://search.example/inspect",
+            ).encode()
         )
+        opener = Mock()
+        opener.open.return_value = response
         with patch(
-            "webapp.ai_copy.product_lookup.public_http.PublicPageHttpClient.post_json",
-            return_value=response,
-        ) as post_json:
+            "webapp.ai_copy.product_lookup.custom_reader.build_opener",
+            return_value=opener,
+        ):
             result = ProductSearchTool(self.settings).inspect(
                 "https://shop.example/item/1",
                 ProductSearchConfig(
@@ -322,13 +476,9 @@ class ProductSearchToolTests(unittest.TestCase):
                 ),
             )
 
-        endpoint, payload = post_json.call_args.args
-        self.assertEqual(endpoint, "https://search.example/inspect")
-        self.assertEqual(
-            post_json.call_args.kwargs["headers"]["Authorization"],
-            "Bearer one-request-key",
-        )
-        self.assertEqual(json.loads(payload), {"url": "https://shop.example/item/1"})
+        sent_request = opener.open.call_args.args[0]
+        self.assertEqual(sent_request.get_header("Authorization"), "Bearer one-request-key")
+        self.assertEqual(json.loads(sent_request.data), {"url": "https://shop.example/item/1"})
         self.assertEqual(result.attributes, {"规格": "四件套"})
 
     def test_custom_search_key_requires_https_endpoint(self):
@@ -338,19 +488,28 @@ class ProductSearchToolTests(unittest.TestCase):
                 api_key="one-request-key",
             )
 
-    def test_custom_service_rejects_private_dns_results(self):
+    def test_custom_service_disables_redirects_that_could_forward_its_key(self):
+        response = _FakeResponse(
+            json.dumps(
+                {"title": "商品", "summary": "商品摘要", "attributes": {}},
+                ensure_ascii=False,
+            ).encode()
+        )
+        opener = Mock()
+        opener.open.return_value = response
         with patch(
-            "webapp.ai_copy.product_lookup.public_http.socket.getaddrinfo",
-            return_value=[(2, 1, 6, "", ("127.0.0.1", 443))],
-        ):
-            with self.assertRaisesRegex(ProductLookupError, "内网"):
-                ProductSearchTool(self.settings).inspect(
-                    "https://shop.example/item/1",
-                    ProductSearchConfig(
-                        endpoint_url="https://search.example/inspect",
-                        api_key="one-request-key",
-                    ),
-                )
+            "webapp.ai_copy.product_lookup.custom_reader.build_opener",
+            return_value=opener,
+        ) as build:
+            ProductSearchTool(self.settings).inspect(
+                "https://shop.example/item/1",
+                ProductSearchConfig(
+                    endpoint_url="https://search.example/inspect",
+                    api_key="one-request-key",
+                ),
+            )
+
+        self.assertIsInstance(build.call_args.args[0], _NoRedirectHandler)
 
     def test_public_page_retries_each_validated_address(self):
         attempts: list[str] = []
@@ -674,17 +833,283 @@ class ProductSearchToolTests(unittest.TestCase):
 
 
 class AiCopyRouterTests(unittest.TestCase):
+    def test_import_copy_matches_a_multi_id_group_regardless_of_separator_or_order(self):
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append(["视频路径", "标题", "文案", "商品ID"])
+        worksheet.append([
+            "photos/demo.mp4",
+            "旧标题",
+            "旧文案",
+            "1049855907469，1061612282569",
+        ])
+        content = BytesIO()
+        workbook.save(content)
+        workbook.close()
+
+        modified_content, stats = _import_copy_to_excel(
+            content.getvalue(),
+            "新标题",
+            "新文案",
+            ["1061612282569", "1049855907469"],
+        )
+
+        imported = load_workbook(BytesIO(modified_content))
+        try:
+            worksheet = imported.active
+            self.assertEqual(worksheet["B2"].value, "新标题")
+            self.assertEqual(worksheet["C2"].value, "新文案")
+            self.assertEqual(worksheet.max_row, 2)
+            self.assertEqual(stats, {"matched": 1, "created": 0})
+        finally:
+            imported.close()
+
+    def test_import_copy_matches_ids_separated_by_newlines_in_a_goods_cell(self):
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append(["视频路径", "标题", "文案", "商品ID"])
+        worksheet.append([
+            "photos/demo.mp4",
+            "旧标题",
+            "旧文案",
+            "1049855907469\n1061612282569\r\n1059642023424",
+        ])
+        content = BytesIO()
+        workbook.save(content)
+        workbook.close()
+
+        modified_content, stats = _import_copy_to_excel(
+            content.getvalue(),
+            "新标题",
+            "新文案",
+            ["1059642023424", "1049855907469", "1061612282569"],
+        )
+
+        imported = load_workbook(BytesIO(modified_content))
+        try:
+            worksheet = imported.active
+            self.assertEqual(worksheet["B2"].value, "新标题")
+            self.assertEqual(worksheet["C2"].value, "新文案")
+            self.assertEqual(stats, {"matched": 1, "created": 0})
+        finally:
+            imported.close()
+
+    def test_import_copy_does_not_match_a_single_id_to_a_multi_id_row(self):
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append(["视频路径", "标题", "文案", "商品ID"])
+        worksheet.append([
+            "photos/group.mp4",
+            "多商品旧标题",
+            "多商品旧文案",
+            "1049855907469\n1061612282569",
+        ])
+        worksheet.append([
+            "photos/other.mp4",
+            "其他旧标题",
+            "其他旧文案",
+            "1059642023424",
+        ])
+        content = BytesIO()
+        workbook.save(content)
+        workbook.close()
+
+        modified_content, stats = _import_copy_to_excel(
+            content.getvalue(),
+            "新标题",
+            "新文案",
+            ["1061612282569"],
+        )
+
+        imported = load_workbook(BytesIO(modified_content))
+        try:
+            worksheet = imported.active
+            self.assertEqual(worksheet["B2"].value, "多商品旧标题")
+            self.assertEqual(worksheet["C2"].value, "多商品旧文案")
+            self.assertEqual(worksheet["B4"].value, "新标题")
+            self.assertEqual(worksheet["C4"].value, "新文案")
+            self.assertEqual(worksheet["D4"].value, "1061612282569")
+            self.assertEqual(stats, {"matched": 0, "created": 1})
+        finally:
+            imported.close()
+
+    def test_import_copy_does_not_match_an_overlapping_but_different_multi_id_group(self):
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append(["视频路径", "标题", "文案", "商品ID"])
+        worksheet.append([
+            "photos/group.mp4",
+            "原组合标题",
+            "原组合文案",
+            "1049855907469\n1061612282569\n1059642023424",
+        ])
+        content = BytesIO()
+        workbook.save(content)
+        workbook.close()
+
+        modified_content, stats = _import_copy_to_excel(
+            content.getvalue(),
+            "新标题",
+            "新文案",
+            ["1049855907469", "1061612282569"],
+        )
+
+        imported = load_workbook(BytesIO(modified_content))
+        try:
+            worksheet = imported.active
+            self.assertEqual(worksheet["B2"].value, "原组合标题")
+            self.assertEqual(worksheet["B3"].value, "新标题")
+            self.assertEqual(worksheet["D3"].value, "1049855907469\n1061612282569")
+            self.assertEqual(stats, {"matched": 0, "created": 1})
+        finally:
+            imported.close()
+
+    def test_import_copy_creates_a_row_for_an_unknown_identifier_group(self):
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append(["视频路径", "标题", "文案", "商品ID"])
+        worksheet.append(["photos/demo.mp4", "旧标题", "旧文案", "1049855907469"])
+        content = BytesIO()
+        workbook.save(content)
+        workbook.close()
+
+        modified_content, stats = _import_copy_to_excel(
+            content.getvalue(),
+            "新标题",
+            "新文案",
+            ["1061612282569", "1059642023424"],
+        )
+
+        imported = load_workbook(BytesIO(modified_content))
+        try:
+            worksheet = imported.active
+            self.assertEqual(worksheet.max_row, 3)
+            self.assertEqual(worksheet["A3"].value, None)
+            self.assertEqual(worksheet["B3"].value, "新标题")
+            self.assertEqual(worksheet["C3"].value, "新文案")
+            self.assertEqual(worksheet["D3"].value, "1061612282569\n1059642023424")
+            self.assertEqual(stats, {"matched": 0, "created": 1})
+        finally:
+            imported.close()
+
+    def test_import_copy_appends_after_last_value_not_template_validation_range(self):
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append(["视频路径", "标题", "文案", "商品ID", "创作者声明"])
+        worksheet.append(["photos/demo.mp4", "旧标题", "旧文案", "1049855907469", "内容无需标注"])
+        validation = DataValidation(type="list", formula1='"内容无需标注,内容含营销广告"')
+        worksheet.add_data_validation(validation)
+        validation.add("E2:E201")
+        content = BytesIO()
+        workbook.save(content)
+        workbook.close()
+
+        modified_content, stats = _import_copy_to_excel(
+            content.getvalue(),
+            "新标题",
+            "新文案",
+            ["1061612282569"],
+        )
+
+        imported = load_workbook(BytesIO(modified_content))
+        try:
+            worksheet = imported.active
+            self.assertEqual(worksheet["B3"].value, "新标题")
+            self.assertEqual(worksheet["C3"].value, "新文案")
+            self.assertEqual(worksheet["D3"].value, "1061612282569")
+            self.assertIsNone(worksheet["B202"].value)
+            self.assertEqual(stats, {"matched": 0, "created": 1})
+        finally:
+            imported.close()
+
+    def test_import_copy_only_writes_title_when_the_workbook_has_no_body_column(self):
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append(["视频路径", "标题", "商品ID"])
+        worksheet.append(["photos/demo.mp4", "旧标题", "1061612282569"])
+        content = BytesIO()
+        workbook.save(content)
+        workbook.close()
+
+        modified_content, stats = _import_copy_to_excel(
+            content.getvalue(),
+            "新标题",
+            "不应写入的文案",
+            ["1061612282569"],
+        )
+
+        imported = load_workbook(BytesIO(modified_content))
+        try:
+            worksheet = imported.active
+            self.assertEqual(worksheet["B2"].value, "新标题")
+            self.assertEqual(worksheet.max_column, 3)
+            self.assertEqual(stats, {"matched": 1, "created": 0})
+        finally:
+            imported.close()
+
     def test_options_expose_ui_choices_and_llm_readiness(self):
         service = AiCopyService(FakeChatProvider(ready=False), FakeProductTool())
         router = create_ai_copy_router(service)
         endpoint = next(route.endpoint for route in router.routes if route.path.endswith("/options"))
 
-        body = endpoint(Request({"type": "http", "headers": []}))
+        body = endpoint()
 
         self.assertFalse(body["llm"]["ready"])
         self.assertEqual(body["llm"]["model"], "test-copy-model")
         self.assertEqual(body["llm"]["provider"], "Test Provider")
-        self.assertIn({"value": "friendly", "label": "亲切种草"}, body["styles"])
+        self.assertEqual(
+            body["styles"],
+            [
+                {"value": "old_money_luxury", "label": "老钱轻奢"},
+                {"value": "relaxed_natural", "label": "自然松弛"},
+                {"value": "gentle_healing", "label": "治愈温柔"},
+                {"value": "retro_atmosphere", "label": "复古氛围"},
+                {"value": "atmospheric_seeding", "label": "氛围感种草"},
+                {"value": "sweet_cute", "label": "甜美可爱"},
+                {"value": "cool_bold", "label": "酷感飒爽"},
+            ],
+        )
+        self.assertEqual(
+            body["scenes"],
+            [
+                {"value": "fitness", "label": "运动健身"},
+                {"value": "parenting_and_baby", "label": "母婴亲子"},
+                {"value": "leisure_travel", "label": "度假休闲出游"},
+                {"value": "daily_styling", "label": "日常穿搭"},
+                {"value": "work_commute", "label": "职场通勤"},
+                {"value": "romantic_date", "label": "浪漫约会"},
+                {"value": "smart_casual_gathering", "label": "轻正式聚会"},
+                {"value": "holiday_gifting", "label": "节日礼赠"},
+                {"value": "self_reward", "label": "自用犒赏"},
+            ],
+        )
+        self.assertEqual(
+            body["festivals"],
+            ["情人节", "女神节", "520", "暑假", "开学季", "圣诞节"],
+        )
+
+    def test_selling_point_excel_upload_returns_catalog_and_entries(self):
+        service = AiCopyService(FakeChatProvider(), FakeProductTool())
+        router = create_ai_copy_router(service)
+        endpoint = next(
+            route.endpoint
+            for route in router.routes
+            if route.path == "/api/ai-copy/selling-point-catalog"
+        )
+        upload = UploadFile(
+            filename="points.xlsx",
+            file=BytesIO(
+                build_selling_point_workbook(
+                    [("SKU-001", "轻量透气，适合日常通勤")]
+                )
+            ),
+        )
+
+        result = asyncio.run(endpoint(upload))
+
+        self.assertEqual(result.row_count, 1)
+        self.assertEqual(result.entries[0].identifier, "SKU-001")
+        self.assertTrue(result.catalog_id)
 
     def test_product_lookup_errors_are_mapped_without_leaking_request_key(self):
         class FailingTool(FakeProductTool):
@@ -694,19 +1119,21 @@ class AiCopyRouterTests(unittest.TestCase):
         service = AiCopyService(FakeChatProvider(), FailingTool())
         router = create_ai_copy_router(service)
         endpoint = next(
-            route.endpoint for route in router.routes if route.path.endswith("/product-reference")
+            route.endpoint for route in router.routes if route.path.endswith("/product-references")
         )
 
         with self.assertRaises(HTTPException) as context:
             asyncio.run(
                 endpoint(
-                    ProductReferenceRequest(
-                        product_url="https://shop.example/item/1",
+                    ProductReferencesRequest(
+                        product_urls=["https://shop.example/item/1"],
                         search={"api_key": None},
-                    ),
-                    Request({"type": "http", "headers": []}),
+                    )
                 )
             )
 
         self.assertEqual(context.exception.status_code, 502)
-        self.assertEqual(context.exception.detail, "商品服务暂时不可用")
+        self.assertEqual(
+            context.exception.detail,
+            "第 1 个商品链接读取失败：商品服务暂时不可用",
+        )
