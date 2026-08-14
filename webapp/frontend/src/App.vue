@@ -10,6 +10,14 @@ import UserManagementView from './features/users/UserManagementView.vue'
 const apiBase = import.meta.env.VITE_API_BASE_URL || ''
 const currentUser = ref(null)
 const agentSetupPlatform = ref('')
+const agentStatus = reactive({
+  checked: false,
+  checking: false,
+  online: false,
+  deviceName: '',
+  system: '',
+  unavailable: false,
+})
 configureApiClient({ baseUrl: apiBase, onUnauthorized: endAuthenticatedSession })
 
 // === 发布草稿持久化（localStorage 文本 + IndexedDB 视频） ===
@@ -408,6 +416,18 @@ const jobsPageEnd = computed(() => Math.min(
 ))
 const hasPreviousJobs = computed(() => jobsOffset.value > 0)
 const hasMoreJobs = computed(() => jobsOffset.value + jobs.value.length < jobSummary.value.total)
+const agentStatusLabel = computed(() => {
+  if (!agentStatus.checked || agentStatus.checking) return '正在检查代理'
+  if (agentStatus.unavailable) return '代理状态未知'
+  if (!agentStatus.online) return '代理离线'
+  return agentStatus.deviceName ? `代理在线 · ${agentStatus.deviceName}` : '代理在线'
+})
+
+const agentStatusDescription = computed(() => {
+  if (agentStatus.unavailable) return '无法读取本地执行助手状态，请刷新后重试。'
+  if (!agentStatus.online) return '未检测到已配对的本地执行助手；登录和发布任务无法执行。'
+  return agentStatus.system || '本地执行助手已连接，可执行登录和发布任务。'
+})
 
 watch(() => form.platform, (platform, previousPlatform) => {
   if (isRestoringDraft.value) return
@@ -455,6 +475,44 @@ function importAiCopyToWorkbench(draft) {
   activeView.value = 'publish'
 }
 
+function applyAgentStatus(result) {
+  const agent = Array.isArray(result?.agents) ? result.agents[0] : null
+  agentStatus.checked = true
+  agentStatus.checking = false
+  agentStatus.unavailable = false
+  agentStatus.online = Boolean(result?.online && agent)
+  agentStatus.deviceName = agent?.device_name || ''
+  agentStatus.system = agent?.system || ''
+}
+
+async function refreshAgentStatus() {
+  agentStatus.checking = true
+  try {
+    const result = await request('/api/agent/status')
+    applyAgentStatus(result)
+    return agentStatus.online
+  } catch {
+    agentStatus.checked = true
+    agentStatus.checking = false
+    agentStatus.online = false
+    agentStatus.deviceName = ''
+    agentStatus.system = ''
+    agentStatus.unavailable = true
+    return false
+  }
+}
+
+async function requireOnlineAgent(targetError = null) {
+  const online = await refreshAgentStatus()
+  if (online) return true
+  const message = agentStatus.unavailable
+    ? '无法确认本地执行助手状态，请刷新页面后重试。'
+    : '本地执行助手离线：请先启动并完成 Windows 助手或 Mac 助手配对。'
+  if (targetError) targetError.value = message
+  showNotice(message, 'error')
+  return false
+}
+
 async function refreshDashboard() {
   const userId = currentUser.value?.id
   if (!userId) return
@@ -462,9 +520,10 @@ async function refreshDashboard() {
   dashboardRefreshPromise = (async () => {
     try {
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const [jobsResult, accountsResult] = await Promise.all([
+        const [jobsResult, accountsResult, agentResult] = await Promise.all([
           request(`/api/jobs?limit=${jobsPageSize}&offset=${jobsOffset.value}`),
           request('/api/accounts'),
+          request('/api/agent/status').catch(() => null),
         ])
         if (currentUser.value?.id !== userId) return
         if (jobsResult.total > 0 && jobsOffset.value >= jobsResult.total) {
@@ -477,6 +536,15 @@ async function refreshDashboard() {
           statuses: jobsResult.status_counts || {},
         }
         accounts.value = accountsResult.accounts
+        if (agentResult) applyAgentStatus(agentResult)
+        else {
+          agentStatus.checked = true
+          agentStatus.checking = false
+          agentStatus.online = false
+          agentStatus.deviceName = ''
+          agentStatus.system = ''
+          agentStatus.unavailable = true
+        }
         syncJobSelection()
         if (selectedJob.value) await loadJob(selectedJob.value.id, false)
         break
@@ -686,6 +754,7 @@ async function submitPublish() {
     publishError.value = '请先选择或填写店铺账号标识'
     return
   }
+  if (!await requireOnlineAgent(publishError)) return
   if (!form.video) {
     publishError.value = '请先重新选择一个视频文件'
     return
@@ -763,6 +832,7 @@ async function submitBatch() {
     batchSubmitError.value = `请先重新选择${batchPlatformLabel.value}批量发布 Excel 文件`
     return
   }
+  if (!await requireOnlineAgent(batchSubmitError)) return
 
   batchSubmitting.value = true
   batchErrors.value = []
@@ -793,6 +863,7 @@ async function accountAction(action, platform = form.platform, account = form.ac
     showNotice('请先填写店铺账号标识', 'error')
     return
   }
+  if (!await requireOnlineAgent()) return
   try {
     const query = action === 'login' ? '?headed=true' : ''
     const result = await request(`/api/accounts/${platform}/${encodeURIComponent(account)}/${action}${query}`, { method: 'POST' })
@@ -844,6 +915,12 @@ function resetUserInterface() {
   jobLogs.value = []
   batchErrors.value = []
   batchResult.value = null
+  agentStatus.checked = false
+  agentStatus.checking = false
+  agentStatus.online = false
+  agentStatus.deviceName = ''
+  agentStatus.system = ''
+  agentStatus.unavailable = false
   draftRestoredVideoName.value = ''
   draftRestoredAt.value = ''
   dashboardRefreshPromise = null
@@ -948,6 +1025,15 @@ onBeforeUnmount(() => {
         </div>
         <div class="session-actions">
           <span><strong>{{ currentUser.display_name }}</strong><small>{{ currentUser.username }} · {{ currentUser.role }}</small></span>
+          <button
+            class="agent-connection-status"
+            :class="{ online: agentStatus.online, offline: !agentStatus.online && agentStatus.checked && !agentStatus.unavailable, unknown: agentStatus.unavailable || !agentStatus.checked }"
+            :title="agentStatusDescription"
+            type="button"
+            @click="refreshAgentStatus"
+          >
+            <i aria-hidden="true"></i>{{ agentStatusLabel }}
+          </button>
           <button class="refresh agent-windows" type="button" @click="agentSetupPlatform = 'windows'">Windows 助手</button>
           <button class="refresh agent-macos" type="button" @click="agentSetupPlatform = 'macos'">Mac 助手</button>
           <button v-if="!['ai-copy', 'llm-adapter', 'users'].includes(activeView)" class="refresh" @click="refreshDashboard">刷新状态</button>
