@@ -689,6 +689,8 @@ async function onFileChange(event) {
 
 function onCoverImageChange(event) {
   const file = event.target.files?.[0] || null
+  // Selecting "Cancel" must not discard the previously selected cover.
+  if (!file) return
   form.coverImage = file
   publishError.value = ''
 }
@@ -1076,8 +1078,12 @@ onBeforeUnmount(() => {
           </div>
           <div v-if="isTmall" class="field cover-image-field">
             <span>自定义封面图片 <em>可选</em></span>
-            <input ref="coverImageInput" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" @change="onCoverImageChange" />
-            <small v-if="form.coverImage">{{ form.coverImage.name }} · {{ (form.coverImage.size / 1024 / 1024).toFixed(1) }} MB</small>
+            <input id="cover-image-file" ref="coverImageInput" class="native-file-input" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" @change="onCoverImageChange" />
+            <label class="cover-file-picker" :class="{ selected: form.coverImage }" for="cover-image-file">
+              <span class="cover-file-action">{{ form.coverImage ? '更换封面' : '选择封面图片' }}</span>
+              <span class="cover-file-name">{{ form.coverImage ? form.coverImage.name : '尚未选择封面图片' }}</span>
+            </label>
+            <small v-if="form.coverImage" class="cover-file-selected">已选择封面 · {{ form.coverImage.name }} · {{ (form.coverImage.size / 1024 / 1024).toFixed(1) }} MB</small>
             <small v-else class="field-hint">上传后会在视频上传完成时自动打开“编辑封面”，选择本地上传的图片；支持 JPG、PNG、WebP，最大 20 MiB，图片宽高均需至少 720 像素。未上传则跳过封面编辑。</small>
             <button v-if="form.coverImage" class="clear-file" type="button" @click="clearCoverImage">移除封面</button>
           </div>

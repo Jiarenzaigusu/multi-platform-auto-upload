@@ -66,3 +66,12 @@ nav { display: grid; gap: 7px; } nav button { padding: 11px 12px; border: 0; bor
 .jobs-pagination .quiet:disabled { cursor: not-allowed; opacity: .45; }
 @media (max-width: 980px) { .shell { grid-template-columns: 1fr; }.rail { padding: 16px 22px; }.brand { padding-bottom: 14px; }.rail nav { display: flex; flex-wrap: wrap; }.rail nav button { flex: 1 1 140px; text-align: center; white-space: nowrap; }.rail-note { display: none; }.publish-layout, .batch-layout, .jobs-layout { grid-template-columns: 1fr; }.summary-panel { order: -1; }.log-card { position: static; }.metric strong { font-size: 48px; } }
 @media (max-width: 640px) { .workspace { padding: 28px 16px; }.topbar { align-items: flex-start; gap: 14px; }.topbar h1 { font-size: 34px; }.rail nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }.rail nav button { min-width: 0; }.field-row, .platform-choice { grid-template-columns: 1fr; }.account-actions { margin-bottom: 16px; }.section-heading-with-action { flex-wrap: wrap; }.section-heading-action { margin-left: 42px; }.batch-guide div { grid-template-columns: 1fr; gap: 2px; }.job-row { grid-template-columns: auto minmax(0, 1fr) auto; }.job-details { grid-template-columns: 1fr auto; }.job-platform { grid-column: 1 / -1; }.job-title { min-width: 0; } .batch-toolbar { flex-wrap: wrap; } }
+
+/* File inputs cannot show a restored File object; render the selected cover ourselves. */
+.native-file-input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+.cover-file-picker { display: flex; min-width: 0; align-items: center; gap: 11px; min-height: 47px; padding: 7px 10px; border: 1px solid #bdcfc1; border-radius: 8px; color: #61746a; background: rgba(255,255,255,.75); cursor: pointer; }
+.cover-file-picker:hover { border-color: #789969; background: #f5faed; }
+.cover-file-picker.selected { border-color: #7fa673; color: #295943; background: #f1f8e9; }
+.cover-file-action { flex: 0 0 auto; padding: 7px 10px; border: 1px solid #86a57b; border-radius: 6px; color: #315b3d; background: #fffffa; font-size: 12px; font-weight: 750; }
+.cover-file-name { min-width: 0; overflow: hidden; font-size: 13px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.cover-file-selected { color: #2c6547 !important; font-weight: 650; }
