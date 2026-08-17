@@ -1,3 +1,11 @@
+"""webapp.ai_copy.product_lookup.facade 模块：商品读取门面（ProductSearchTool）。
+
+整合：
+- page_router: 平台专属读取器路由（京东 → 天猫 → 通用 HTML）
+- custom_reader: 专用商品搜索服务读取器
+
+inspect() 根据是否配置搜索服务决定使用哪个读取器。
+"""
 from __future__ import annotations
 
 from webapp.ai_copy.contracts import ProductReference, ProductSearchConfig
@@ -7,7 +15,6 @@ from webapp.ai_copy.product_lookup.generic_reader import GenericHtmlProductReade
 from webapp.ai_copy.product_lookup.interfaces import (
     ProductLookup,
     ProductPageLookup,
-    ProductPageReader,
     ProductReaderRouter,
 )
 from webapp.ai_copy.product_lookup.jd_client import PatchrightJdPageFetcher
@@ -31,7 +38,6 @@ class ProductSearchTool:
         page_router: ProductPageLookup | None = None,
         custom_reader: ProductLookup | None = None,
         tmall_page_fetcher: TmallPageFetcher | None = None,
-        tmall_product_reader: ProductPageReader | None = None,
     ) -> None:
         if page_router is None or custom_reader is None:
             ssl_context = create_trusted_ssl_context()
@@ -54,9 +60,7 @@ class ProductSearchTool:
                     ),
                 )
             ]
-            if tmall_product_reader is not None:
-                platform_readers.append(tmall_product_reader)
-            elif tmall_page_fetcher is not None:
+            if tmall_page_fetcher is not None:
                 platform_readers.append(
                     TmallProductReader(
                         tmall_page_fetcher,

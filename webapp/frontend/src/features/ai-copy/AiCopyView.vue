@@ -5,10 +5,10 @@
   - 上传商品核心卖点 Excel（获得 catalog_id）
   - 输入商品 ID/货号（1-20 个，匹配卖点表）
   - 可选读取商品链接（最多 20 个，逐个调用商品读取工具）
-  - 调用 LLM 生成标题与正文（含风格/场景/节日/字数限制）
+  - 调用 LLM 生成标题与正文（含风格/场景/节日/目标字数）
   - 复制结果或导入发布工作台
 
-  字数限制：输入过程不夹紧、失焦时归位到默认值或合法范围。
+  目标字数：输入过程不夹紧、失焦时归位到默认值或合法范围。
   生成前必须所有商品 ID 都能在卖点表中匹配。
 -->
 <script setup>
@@ -18,27 +18,39 @@ import { createAiCopyApi } from './api.js'
 import AiCopyDropdown from './AiCopyDropdown.vue'
 
 const props = defineProps({
+  apiBase: { type: String, default: '' },
   active: { type: Boolean, default: false },
 })
 const emit = defineEmits(['import-to-workbench'])
 
-const api = createAiCopyApi()
+const api = createAiCopyApi(props.apiBase)
 const options = ref({ styles: [], scenes: [], festivals: [], llm: { ready: false, model: '', provider: '' } })
 const titleLimitPresets = [10, 15]
 const bodyLimitPresets = [25, 50, 100, 200]
+const titleCountPresets = [1, 3, 5]
+const bodyCountPresets = [1, 2, 3]
 const titleMin = 2
 const titleMax = 100
 const bodyMin = 10
 const bodyMax = 1000
+const candidateCountMin = 1
+const candidateCountMax = 10
 const titleLimitDefault = 15
 const bodyLimitDefault = 100
+const titleCountDefault = 1
+const bodyCountDefault = 1
 const createDefaultForm = () => ({
   productIdentifiers: '',
   titleMaxChars: titleLimitDefault,
   bodyMaxChars: bodyLimitDefault,
+  titleCount: titleCountDefault,
+  bodyCount: bodyCountDefault,
   style: 'atmospheric_seeding',
   scene: 'daily_styling',
   festival: '',
+  customStyle: '',
+  customScene: '',
+  customFestival: '',
   productUrls: '',
   searchEndpoint: '',
   searchApiKey: '',
@@ -59,6 +71,8 @@ const sellingPointFileInput = ref(null)
 const batchExcelFileInput = ref(null)
 const importingToBatchExcel = ref(false)
 const downloadBatchExcelCopy = ref(false)
+const selectedTitleIndex = ref(0)
+const selectedBodyIndex = ref(0)
 let copyTimer
 let successTimer
 
@@ -91,6 +105,22 @@ const festivalOptions = computed(() => [
   { value: '', label: '不指定节日' },
   ...options.value.festivals.map((festival) => ({ value: festival, label: festival })),
 ])
+const customSelectionValue = '__custom__'
+const hasCustomStyle = computed(() => Boolean(form.customStyle.trim()))
+const selectedScene = computed({
+  get: () => (form.customScene.trim() ? customSelectionValue : form.scene),
+  set: (value) => {
+    form.scene = value
+    form.customScene = ''
+  },
+})
+const selectedFestival = computed({
+  get: () => (form.customFestival.trim() ? customSelectionValue : form.festival),
+  set: (value) => {
+    form.festival = value
+    form.customFestival = ''
+  },
+})
 
 function normalizeTitleLimit(value) {
   const numeric = Number(value)
@@ -102,6 +132,11 @@ function normalizeBodyLimit(value) {
   if (!Number.isFinite(numeric) || numeric <= 0) return null
   return Math.min(bodyMax, Math.max(bodyMin, Math.round(numeric)))
 }
+function normalizeCandidateCount(value) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric <= 0) return null
+  return Math.min(candidateCountMax, Math.max(candidateCountMin, Math.round(numeric)))
+}
 function pickTitleLimit(value) {
   const normalized = normalizeTitleLimit(value)
   if (normalized === null) return
@@ -111,6 +146,14 @@ function pickBodyLimit(value) {
   const normalized = normalizeBodyLimit(value)
   if (normalized === null) return
   form.bodyMaxChars = normalized
+}
+function pickTitleCount(value) {
+  const normalized = normalizeCandidateCount(value)
+  if (normalized !== null) form.titleCount = normalized
+}
+function pickBodyCount(value) {
+  const normalized = normalizeCandidateCount(value)
+  if (normalized !== null) form.bodyCount = normalized
 }
 function cleanNumericInput(raw) {
   // 只允许数字字符 + 空串；输入过程中不做夹紧，让用户能自由输入中间态。
@@ -126,6 +169,16 @@ function onBodyLimitInput(event) {
   const cleaned = cleanNumericInput(event.target.value)
   if (cleaned !== event.target.value) event.target.value = cleaned
   form.bodyMaxChars = cleaned === '' ? '' : Number(cleaned)
+}
+function onTitleCountInput(event) {
+  const cleaned = cleanNumericInput(event.target.value)
+  if (cleaned !== event.target.value) event.target.value = cleaned
+  form.titleCount = cleaned === '' ? '' : Number(cleaned)
+}
+function onBodyCountInput(event) {
+  const cleaned = cleanNumericInput(event.target.value)
+  if (cleaned !== event.target.value) event.target.value = cleaned
+  form.bodyCount = cleaned === '' ? '' : Number(cleaned)
 }
 function onTitleLimitBlur() {
   if (form.titleMaxChars === '' || form.titleMaxChars === null) {
@@ -144,6 +197,14 @@ function onBodyLimitBlur() {
   const normalized = normalizeBodyLimit(form.bodyMaxChars)
   form.bodyMaxChars = normalized === null ? bodyLimitDefault : normalized
 }
+function onTitleCountBlur() {
+  const normalized = normalizeCandidateCount(form.titleCount)
+  form.titleCount = normalized === null ? titleCountDefault : normalized
+}
+function onBodyCountBlur() {
+  const normalized = normalizeCandidateCount(form.bodyCount)
+  form.bodyCount = normalized === null ? bodyCountDefault : normalized
+}
 // 仅在数值非空且越界时算 invalid，避免输入过程显示提示
 const titleLimitValid = computed(() => {
   if (form.titleMaxChars === '' || form.titleMaxChars === null) return true
@@ -154,6 +215,16 @@ const bodyLimitValid = computed(() => {
   if (form.bodyMaxChars === '' || form.bodyMaxChars === null) return true
   const value = Number(form.bodyMaxChars)
   return Number.isFinite(value) && value >= bodyMin && value <= bodyMax
+})
+const titleCountValid = computed(() => {
+  if (form.titleCount === '' || form.titleCount === null) return true
+  const value = Number(form.titleCount)
+  return Number.isFinite(value) && value >= candidateCountMin && value <= candidateCountMax
+})
+const bodyCountValid = computed(() => {
+  if (form.bodyCount === '' || form.bodyCount === null) return true
+  const value = Number(form.bodyCount)
+  return Number.isFinite(value) && value >= candidateCountMin && value <= candidateCountMax
 })
 
 const resultTitleMax = computed(() => {
@@ -166,6 +237,16 @@ const resultBodyMax = computed(() => {
   const fromResponse = Number(result.value.body_max_chars)
   return Number.isFinite(fromResponse) && fromResponse > 0 ? fromResponse : (form.bodyMaxChars || 1000)
 })
+const resultTitles = computed(() => {
+  if (!result.value) return []
+  return result.value.titles?.length ? result.value.titles : [result.value.title]
+})
+const resultBodies = computed(() => {
+  if (!result.value) return []
+  return result.value.bodies?.length ? result.value.bodies : [result.value.body]
+})
+const selectedTitle = computed(() => resultTitles.value[selectedTitleIndex.value] || resultTitles.value[0] || '')
+const selectedBody = computed(() => resultBodies.value[selectedBodyIndex.value] || resultBodies.value[0] || '')
 
 const canGenerate = computed(() => (
   Boolean(sellingPointCatalog.value)
@@ -175,6 +256,8 @@ const canGenerate = computed(() => (
   && missingProductIdentifiers.value.length === 0
   && titleLimitValid.value
   && bodyLimitValid.value
+  && titleCountValid.value
+  && bodyCountValid.value
   && !uploadingSellingPoints.value
   && !readingProduct.value
   && !generating.value
@@ -321,11 +404,19 @@ async function generateCopy() {
     return
   }
   if (!titleLimitValid.value) {
-    error.value = `标题字数限制必须在 ${titleMin}-${titleMax} 之间`
+    error.value = `标题目标字数必须在 ${titleMin}-${titleMax} 之间`
     return
   }
   if (!bodyLimitValid.value) {
-    error.value = `文案字数限制必须在 ${bodyMin}-${bodyMax} 之间`
+    error.value = `文案目标字数必须在 ${bodyMin}-${bodyMax} 之间`
+    return
+  }
+  if (!titleCountValid.value) {
+    error.value = `标题生成个数必须在 ${candidateCountMin}-${candidateCountMax} 之间`
+    return
+  }
+  if (!bodyCountValid.value) {
+    error.value = `文案生成个数必须在 ${candidateCountMin}-${candidateCountMax} 之间`
     return
   }
   result.value = null
@@ -336,19 +427,32 @@ async function generateCopy() {
   const bodyLimit = form.bodyMaxChars === '' || form.bodyMaxChars === null
     ? null
     : Number(form.bodyMaxChars)
+  const titleCount = form.titleCount === '' || form.titleCount === null
+    ? titleCountDefault
+    : Number(form.titleCount)
+  const bodyCount = form.bodyCount === '' || form.bodyCount === null
+    ? bodyCountDefault
+    : Number(form.bodyCount)
   try {
     const response = await api.generate({
       selling_point_catalog_id: sellingPointCatalog.value.catalog_id,
       product_identifiers: productIdentifiers.value,
-      style: form.style,
-      scene: form.scene,
-      festival: form.festival.trim() || null,
+      style: hasCustomStyle.value ? null : form.style,
+      scene: form.customScene.trim() ? null : form.scene,
+      festival: form.customFestival.trim() ? null : (form.festival.trim() || null),
+      custom_style: form.customStyle.trim() || null,
+      custom_scene: form.customScene.trim() || null,
+      custom_festival: form.customFestival.trim() || null,
       product_urls: productUrls.value,
       product_search: searchConfig(),
       title_max_chars: titleLimit,
       body_max_chars: bodyLimit,
+      title_count: titleCount,
+      body_count: bodyCount,
     })
     result.value = response
+    selectedTitleIndex.value = 0
+    selectedBodyIndex.value = 0
     productReferences.value = response.product_references || []
   } catch (requestError) {
     error.value = requestError.message
@@ -369,10 +473,10 @@ async function copyText(field, value) {
 }
 
 function importToWorkbench() {
-  if (!result.value) return
+  if (!result.value || !selectedTitle.value || !selectedBody.value) return
   emit('import-to-workbench', {
-    title: result.value.title,
-    body: result.value.body,
+    title: selectedTitle.value,
+    body: selectedBody.value,
   })
 }
 
@@ -427,14 +531,14 @@ async function importToBatchExcelByHandle(fileHandle) {
     error.value = '请选择 .xlsx 格式的批量发布表格'
     return
   }
-  if (!result.value) return
+  if (!result.value || !selectedTitle.value || !selectedBody.value) return
   clearFeedback()
   importingToBatchExcel.value = true
   try {
     const response = await api.importToBatchExcel(
       file,
-      result.value.title,
-      result.value.body,
+      selectedTitle.value,
+      selectedBody.value,
       productIdentifiers.value.join(','),
     )
     const summaryText = importSummaryText(response)
@@ -471,8 +575,8 @@ async function importToBatchExcel(event) {
   try {
     const response = await api.importToBatchExcel(
       file,
-      result.value.title,
-      result.value.body,
+      selectedTitle.value,
+      selectedBody.value,
       productIdentifiers.value.join(','),
     )
     const summaryText = importSummaryText(response)
@@ -583,10 +687,10 @@ watch(() => props.active, (active) => {
       </section>
 
       <fieldset class="ai-copy-choice-group ai-copy-limits">
-        <legend><b>字数限制</b><span>选定后模型必须严格遵守</span></legend>
+        <legend><b>目标字数</b><span>生成内容会接近所选字数（上下约 10%）</span></legend>
 
         <div class="ai-copy-limit-row">
-          <span class="ai-copy-limit-label"><b>标题字数</b><small>不超过多少字</small></span>
+          <span class="ai-copy-limit-label"><b>标题字数</b><small>期望生成多少字</small></span>
           <div class="ai-copy-limit-chips">
             <button
               v-for="preset in titleLimitPresets"
@@ -594,7 +698,7 @@ watch(() => props.active, (active) => {
               type="button"
               :class="{ active: form.titleMaxChars === preset }"
               @click="pickTitleLimit(preset)"
-            >不超过 {{ preset }} 字</button>
+            >约 {{ preset }} 字</button>
           </div>
           <label class="ai-copy-limit-custom">
             <span>自定义</span>
@@ -613,7 +717,7 @@ watch(() => props.active, (active) => {
         </div>
 
         <div class="ai-copy-limit-row">
-          <span class="ai-copy-limit-label"><b>文案字数</b><small>不超过多少字</small></span>
+          <span class="ai-copy-limit-label"><b>文案字数</b><small>期望生成多少字</small></span>
           <div class="ai-copy-limit-chips">
             <button
               v-for="preset in bodyLimitPresets"
@@ -621,7 +725,7 @@ watch(() => props.active, (active) => {
               type="button"
               :class="{ active: form.bodyMaxChars === preset }"
               @click="pickBodyLimit(preset)"
-            >不超过 {{ preset }} 字</button>
+            >约 {{ preset }} 字</button>
           </div>
           <label class="ai-copy-limit-custom">
             <span>自定义</span>
@@ -640,39 +744,108 @@ watch(() => props.active, (active) => {
         </div>
       </fieldset>
 
+      <fieldset class="ai-copy-choice-group ai-copy-limits ai-copy-counts">
+        <legend><b>生成个数</b><span>标题与文案分别生成候选，导入前各选择一条</span></legend>
+
+        <div class="ai-copy-limit-row">
+          <span class="ai-copy-limit-label"><b>标题个数</b><small>生成几条标题候选</small></span>
+          <div class="ai-copy-limit-chips">
+            <button
+              v-for="preset in titleCountPresets"
+              :key="`title-count-${preset}`"
+              type="button"
+              :class="{ active: form.titleCount === preset }"
+              @click="pickTitleCount(preset)"
+            >{{ preset }} 条</button>
+          </div>
+          <label class="ai-copy-limit-custom">
+            <span>自定义</span>
+            <input
+              type="text"
+              inputmode="numeric"
+              pattern="[0-9]*"
+              maxlength="2"
+              placeholder="自定义"
+              :value="form.titleCount"
+              @input="onTitleCountInput"
+              @blur="onTitleCountBlur"
+            />
+            <small v-if="!titleCountValid">需为 {{ candidateCountMin }}-{{ candidateCountMax }} 之间的整数</small>
+          </label>
+        </div>
+
+        <div class="ai-copy-limit-row">
+          <span class="ai-copy-limit-label"><b>文案个数</b><small>生成几条正文候选</small></span>
+          <div class="ai-copy-limit-chips">
+            <button
+              v-for="preset in bodyCountPresets"
+              :key="`body-count-${preset}`"
+              type="button"
+              :class="{ active: form.bodyCount === preset }"
+              @click="pickBodyCount(preset)"
+            >{{ preset }} 条</button>
+          </div>
+          <label class="ai-copy-limit-custom">
+            <span>自定义</span>
+            <input
+              type="text"
+              inputmode="numeric"
+              pattern="[0-9]*"
+              maxlength="2"
+              placeholder="自定义"
+              :value="form.bodyCount"
+              @input="onBodyCountInput"
+              @blur="onBodyCountBlur"
+            />
+            <small v-if="!bodyCountValid">需为 {{ candidateCountMin }}-{{ candidateCountMax }} 之间的整数</small>
+          </label>
+        </div>
+      </fieldset>
+
       <fieldset class="ai-copy-choice-group">
         <legend><b>文案风格</b><span>选择文案的语气与节奏</span></legend>
         <div class="ai-copy-style-grid">
           <label
             v-for="(item, index) in options.styles"
             :key="item.value"
-            :class="{ selected: form.style === item.value }"
+            :class="{ selected: !hasCustomStyle && form.style === item.value }"
           >
-            <input v-model="form.style" type="radio" :value="item.value" />
+            <input
+              :checked="!hasCustomStyle && form.style === item.value"
+              type="radio"
+              :value="item.value"
+              @change="form.style = item.value; form.customStyle = ''"
+            />
             <i>0{{ index + 1 }}</i>
             <strong>{{ item.label }}</strong>
           </label>
         </div>
+        <label class="ai-copy-field ai-copy-custom-context">
+          <span><strong>自定义文案风格</strong><small>可选；填写后仅使用自定义内容</small></span>
+          <input v-model="form.customStyle" maxlength="100" placeholder="请输入自定义文案风格" />
+        </label>
       </fieldset>
 
       <div class="ai-copy-split-fields">
         <label class="ai-copy-field">
-          <span><strong>内容场景</strong><small>必选</small></span>
+          <span><strong>内容场景</strong><small>预设或自定义</small></span>
           <AiCopyDropdown
-            v-model="form.scene"
+            v-model="selectedScene"
             aria-label="内容场景"
             :options="options.scenes"
-            placeholder="选择内容场景"
+            placeholder="自定义场景已启用"
           />
+          <input v-model="form.customScene" maxlength="100" placeholder="请输入自定义内容场景" />
         </label>
         <label class="ai-copy-field">
-          <span><strong>节日氛围</strong><small>可选</small></span>
+          <span><strong>节日氛围</strong><small>预设或自定义</small></span>
           <AiCopyDropdown
-            v-model="form.festival"
+            v-model="selectedFestival"
             aria-label="节日氛围"
             :options="festivalOptions"
-            placeholder="不指定节日"
+            placeholder="自定义主题已启用"
           />
+          <input v-model="form.customFestival" maxlength="80" placeholder="请输入自定义节日或主题" />
         </label>
       </div>
 
@@ -770,21 +943,53 @@ watch(() => props.active, (active) => {
       </div>
 
       <template v-else-if="result">
-        <article class="ai-copy-output ai-copy-title-output">
-          <div class="ai-copy-output-label"><span>标题</span><small>{{ result.title.length }} / {{ resultTitleMax }}</small></div>
-          <h3>{{ result.title }}</h3>
-          <button type="button" @click="copyText('title', result.title)">
-            {{ copiedField === 'title' ? '已复制' : '复制标题' }}
-          </button>
-        </article>
+        <section class="ai-copy-output-group">
+          <div class="ai-copy-candidate-heading">
+            <span>标题候选</span><small>已生成 {{ resultTitles.length }} 条；请选择 1 条用于导入</small>
+          </div>
+          <article
+            v-for="(title, index) in resultTitles"
+            :key="`title-${index}`"
+            :class="['ai-copy-output', 'ai-copy-title-output', { selected: selectedTitleIndex === index }]"
+          >
+            <div class="ai-copy-output-label">
+              <span>标题{{ resultTitles.length > 1 ? ` ${index + 1}` : '' }}</span>
+              <small>{{ title.length }} 字 · 目标约 {{ resultTitleMax }} 字</small>
+            </div>
+            <label v-if="resultTitles.length > 1" class="ai-copy-candidate-select">
+              <input type="checkbox" :checked="selectedTitleIndex === index" @change="selectedTitleIndex = index" />
+              <span>选用此标题</span>
+            </label>
+            <h3>{{ title }}</h3>
+            <button type="button" @click="copyText(`title-${index}`, title)">
+              {{ copiedField === `title-${index}` ? '已复制' : '复制标题' }}
+            </button>
+          </article>
+        </section>
 
-        <article class="ai-copy-output ai-copy-body-output">
-          <div class="ai-copy-output-label"><span>正文文案</span><small>{{ result.body.length }} / {{ resultBodyMax }}</small></div>
-          <p>{{ result.body }}</p>
-          <button type="button" @click="copyText('body', result.body)">
-            {{ copiedField === 'body' ? '已复制' : '复制文案' }}
-          </button>
-        </article>
+        <section class="ai-copy-output-group">
+          <div class="ai-copy-candidate-heading">
+            <span>正文文案候选</span><small>已生成 {{ resultBodies.length }} 条；请选择 1 条用于导入</small>
+          </div>
+          <article
+            v-for="(body, index) in resultBodies"
+            :key="`body-${index}`"
+            :class="['ai-copy-output', 'ai-copy-body-output', { selected: selectedBodyIndex === index }]"
+          >
+            <div class="ai-copy-output-label">
+              <span>正文文案{{ resultBodies.length > 1 ? ` ${index + 1}` : '' }}</span>
+              <small>{{ body.length }} 字 · 目标约 {{ resultBodyMax }} 字</small>
+            </div>
+            <label v-if="resultBodies.length > 1" class="ai-copy-candidate-select">
+              <input type="checkbox" :checked="selectedBodyIndex === index" @change="selectedBodyIndex = index" />
+              <span>选用此文案</span>
+            </label>
+            <p>{{ body }}</p>
+            <button type="button" @click="copyText(`body-${index}`, body)">
+              {{ copiedField === `body-${index}` ? '已复制' : '复制文案' }}
+            </button>
+          </article>
+        </section>
 
         <button class="ai-copy-import" type="button" @click="importToWorkbench">
           <span>
@@ -841,7 +1046,7 @@ watch(() => props.active, (active) => {
         <span>AI</span>
         <h3>用商品编号，精准调取每一条卖点</h3>
         <p>上传核心卖点 Excel，输入一个或多个商品 ID / 货号，系统会自动匹配对应内容再生成文案。</p>
-        <ol><li>标题与正文字数可在「字数限制」中预设或自定义</li><li>不虚构商品信息与促销承诺</li></ol>
+        <ol><li>标题与正文字数可在「目标字数」中预设或自定义</li><li>不虚构商品信息与促销承诺</li></ol>
       </div>
     </aside>
   </section>

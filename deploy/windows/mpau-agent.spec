@@ -43,8 +43,6 @@ analysis = Analysis(
         "webapp.api.agent",
         "webapp.api.agent_tasks",
         "webapp.api.batch",
-        "webapp.api.batch_jd",
-        "webapp.api.batch_tmall",
         "webapp.api.media",
         "webapp.api.store",
         "webapp.api.tasks",

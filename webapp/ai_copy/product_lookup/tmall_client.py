@@ -1,8 +1,15 @@
+"""webapp.ai_copy.product_lookup.tmall_client 模块：天猫商品页面抓取客户端。
+
+通过应用的可复用认证浏览器池（Patchright async）加载已登录的天猫账号会话来读取
+需要登录的商品页。DirectoryTmallStorageStateProvider 从 cookies 目录按修改时间
+倒序查找 tmall_*.json 登录态文件，逐个尝试直到成功。
+
+验证逻辑：页面未跳登录、含 itemId、含 loaderData/skuCore 才算有效商品页。
+"""
 from __future__ import annotations
 
-import json
 from collections.abc import Coroutine, Sequence
-from contextlib import AbstractContextManager, nullcontext
+import json
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 from urllib.parse import parse_qs, urlsplit
@@ -12,6 +19,7 @@ from patchright.async_api import TimeoutError as PatchrightTimeoutError
 
 from webapp.ai_copy.errors import ProductLookupError
 from webapp.ai_copy.product_lookup.public_http import FetchedPage
+
 
 T = TypeVar("T")
 
@@ -40,7 +48,7 @@ class DirectoryTmallStorageStateProvider:
     def candidates(self) -> Sequence[Path]:
         try:
             paths = sorted(
-                self._cookie_dir.glob("*.json"),
+                self._cookie_dir.glob("tmall_*.json"),
                 key=lambda path: path.stat().st_mtime,
                 reverse=True,
             )
@@ -98,20 +106,16 @@ class BrowserRuntimeTmallPageFetcher:
         *,
         timeout_seconds: float,
         max_bytes: int,
-        browser_slots: AbstractContextManager[Any] | None = None,
     ) -> None:
         self._runtime = runtime
         self._storage_states = storage_states
         self._timeout_ms = timeout_seconds * 1000
         self._max_bytes = max_bytes
-        self._browser_slots = browser_slots
 
     def get(self, product_url: str) -> FetchedPage:
-        slot = self._browser_slots or nullcontext()
-        with slot:
-            return self._runtime.run(self.get_async(product_url))
+        return self._runtime.run(self._get(product_url))
 
-    async def get_async(self, product_url: str) -> FetchedPage:
+    async def _get(self, product_url: str) -> FetchedPage:
         states = self._storage_states.candidates()
         if not states:
             raise ProductLookupError(

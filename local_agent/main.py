@@ -25,6 +25,7 @@ from local_agent.paths import (
 from local_agent.runner import AgentJobRunner
 from uploader.errors import PublishResultUncertainError
 from utils.files import validate_cover_image_filename, validate_media_filename
+from webapp.api.models import SUPPORTED_COVER_IMAGE_EXTENSIONS
 
 
 class AgentJobCancelledError(RuntimeError):
@@ -33,6 +34,32 @@ class AgentJobCancelledError(RuntimeError):
 
 class AgentLeaseLostError(RuntimeError):
     pass
+
+
+def _article_images_from_folder(raw_folder_path: object) -> tuple[Path, ...]:
+    """Resolve the source workbook's image folder on the paired computer."""
+    folder_path = Path(str(raw_folder_path or "")).expanduser()
+    if not folder_path.is_absolute() or not folder_path.is_dir():
+        raise RuntimeError("Excel 中的图文图片文件夹不存在或无法读取")
+    try:
+        image_paths = tuple(
+            sorted(
+                (
+                    path
+                    for path in folder_path.iterdir()
+                    if path.is_file()
+                    and path.suffix.lower() in SUPPORTED_COVER_IMAGE_EXTENSIONS
+                ),
+                key=lambda path: (path.name.casefold(), path.name),
+            )
+        )
+    except OSError as exc:
+        raise RuntimeError("Excel 中的图文图片文件夹无法读取") from exc
+    if not 1 <= len(image_paths) <= 9:
+        raise RuntimeError("图文图片文件夹必须包含 1-9 张 JPG、PNG 或 WebP 图片")
+    if any(path.stat().st_size == 0 for path in image_paths):
+        raise RuntimeError("Excel 中的图文图片不能为空")
+    return image_paths
 
 
 class LocalAgentApplication:
@@ -115,6 +142,7 @@ class LocalAgentApplication:
         print(f"领取任务：{label} / {job['account']} / {job['kind']} / {job_id}")
         video_path: Path | None = None
         cover_image_path: Path | None = None
+        image_paths: tuple[Path, ...] = ()
         download_dir: Path | None = None
         future = None
         status = "failed"
@@ -145,48 +173,91 @@ class LocalAgentApplication:
         try:
             if job["kind"] == "publish":
                 payload = job.get("payload", {})
+                content_type = payload.get("content_type", "video")
                 # Older queued tasks omitted the flag and still need the managed download path.
                 if payload.get("managed_upload", True):
-                    original_name = validate_media_filename(
-                        payload.get("original_filename") or "video.mp4"
-                    )
                     download_dir = secure_directory(self.runner.paths.uploads / job_id)
-                    video_path = download_dir / original_name
-                    print(f"正在下载任务视频：{original_name}")
-                    self.client.download_video(
-                        job_id,
-                        self.agent_id,
-                        video_path,
-                        progress=heartbeat_with_grace,
-                    )
-                    heartbeat_with_grace()
-                    if not video_path.is_file() or video_path.stat().st_size == 0:
-                        raise RuntimeError("任务视频下载为空")
-                    raw_cover_name = payload.get("cover_image_filename")
-                    if raw_cover_name:
-                        cover_name = validate_cover_image_filename(raw_cover_name)
-                        cover_image_path = download_dir / cover_name
-                        print(f"正在下载自定义封面：{cover_name}")
-                        self.client.download_cover_image(
+                    if content_type == "article":
+                        downloaded_images: list[Path] = []
+                        for index, raw_name in enumerate(payload.get("image_filenames") or []):
+                            image_name = validate_cover_image_filename(raw_name)
+                            image_path = download_dir / image_name
+                            print(f"正在下载图文图片：{image_name}")
+                            self.client.download_article_image(
+                                job_id,
+                                self.agent_id,
+                                index,
+                                image_path,
+                                progress=heartbeat_with_grace,
+                            )
+                            heartbeat_with_grace()
+                            if not image_path.is_file() or image_path.stat().st_size == 0:
+                                raise RuntimeError("任务图文图片下载为空")
+                            downloaded_images.append(image_path)
+                        image_paths = tuple(downloaded_images)
+                        if not 1 <= len(image_paths) <= 9:
+                            raise RuntimeError("任务图文图片数量无效")
+                    else:
+                        original_name = validate_media_filename(
+                            payload.get("original_filename") or "video.mp4"
+                        )
+                        video_path = download_dir / original_name
+                        print(f"正在下载任务视频：{original_name}")
+                        self.client.download_video(
                             job_id,
                             self.agent_id,
-                            cover_image_path,
+                            video_path,
                             progress=heartbeat_with_grace,
                         )
                         heartbeat_with_grace()
-                        if (
-                            not cover_image_path.is_file()
-                            or cover_image_path.stat().st_size == 0
-                        ):
-                            raise RuntimeError("任务封面图片下载为空")
+                        if not video_path.is_file() or video_path.stat().st_size == 0:
+                            raise RuntimeError("任务视频下载为空")
+                        raw_cover_name = payload.get("cover_image_filename")
+                        if raw_cover_name:
+                            cover_name = validate_cover_image_filename(raw_cover_name)
+                            cover_image_path = download_dir / cover_name
+                            print(f"正在下载自定义封面：{cover_name}")
+                            self.client.download_cover_image(
+                                job_id,
+                                self.agent_id,
+                                cover_image_path,
+                                progress=heartbeat_with_grace,
+                            )
+                            heartbeat_with_grace()
+                            if (
+                                not cover_image_path.is_file()
+                                or cover_image_path.stat().st_size == 0
+                            ):
+                                raise RuntimeError("任务封面图片下载为空")
                 else:
-                    video_path = Path(str(payload.get("video_path") or "")).expanduser()
-                    if not video_path.is_absolute() or not video_path.is_file():
-                        raise RuntimeError("Excel 中的视频本机绝对路径不存在或无法读取")
-                    if video_path.stat().st_size == 0:
-                        raise RuntimeError("Excel 中的视频文件为空")
+                    if content_type == "article":
+                        image_folder_path = payload.get("image_folder_path")
+                        if image_folder_path:
+                            image_paths = _article_images_from_folder(image_folder_path)
+                        else:
+                            image_paths = tuple(
+                                Path(str(path)).expanduser()
+                                for path in payload.get("image_paths") or []
+                            )
+                            if not image_paths or any(not path.is_file() for path in image_paths):
+                                raise RuntimeError("Excel 中的图文图片路径不存在或无法读取")
+                    else:
+                        video_path = Path(str(payload.get("video_path") or "")).expanduser()
+                        if not video_path.is_absolute() or not video_path.is_file():
+                            raise RuntimeError("Excel 中的视频本机绝对路径不存在或无法读取")
+                        if video_path.stat().st_size == 0:
+                            raise RuntimeError("Excel 中的视频文件为空")
+                        raw_cover_path = payload.get("cover_image_path")
+                        if raw_cover_path:
+                            cover_image_path = Path(str(raw_cover_path)).expanduser()
+                            if not cover_image_path.is_file() or cover_image_path.stat().st_size == 0:
+                                raise RuntimeError("Excel 中的自定义封面不存在、为空或无法读取")
 
-            future = self.runner.submit(job, video_path, cover_image_path)
+            future = (
+                self.runner.submit(job, video_path, cover_image_path, image_paths)
+                if image_paths
+                else self.runner.submit(job, video_path, cover_image_path)
+            )
             while not future.done():
                 try:
                     result = future.result(timeout=10)
@@ -302,6 +373,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run() -> None:
+    if os.name != "nt":
+        raise SystemExit("MPAU 本地执行助手仅支持 Windows")
     args = build_parser().parse_args()
     connection_store = AgentConnectionStore(args.data_dir)
     try:

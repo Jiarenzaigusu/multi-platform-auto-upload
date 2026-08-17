@@ -70,13 +70,13 @@ class FakeChatProvider:
         tool_url: str = "https://shop.example/product/42",
         tool_urls: list[str] | None = None,
         ready: bool = True,
-        draft: dict[str, str] | None = None,
+        draft: dict[str, str | list[str]] | None = None,
     ) -> None:
         self.tool_urls = tool_urls or [tool_url]
         self.ready = ready
         self.draft = draft or {
-            "title": "轻盈入夏，每一步都自在",
-            "body": "轻薄透气的日常鞋款，让通勤和周末出游都更轻松。自然好搭配，陪你舒服走过每一程。",
+            "title": "轻盈入夏，通勤与周末自在相伴，写下舒展轻松的日常节奏呀呀",
+            "body": "轻盈透气的日常鞋款，陪伴通勤、散步与周末出游，让每一次搭配都自然舒展。" * 30,
         }
         self.calls: list[dict] = []
 
@@ -100,7 +100,16 @@ class FakeChatProvider:
             }
         return {
             "role": "assistant",
-            "content": json.dumps(self.draft, ensure_ascii=False),
+            "content": json.dumps(self._candidate_payload(), ensure_ascii=False),
+        }
+
+    def _candidate_payload(self) -> dict[str, list[str]]:
+        """Allow single-result fixtures while exercising the source candidate contract."""
+        if "titles" in self.draft and "bodies" in self.draft:
+            return self.draft  # type: ignore[return-value]
+        return {
+            "titles": [str(self.draft["title"])],
+            "bodies": [str(self.draft["body"])],
         }
 
     @staticmethod
@@ -254,8 +263,8 @@ class AiCopyServiceTests(unittest.TestCase):
         )
 
         system_prompt = messages[0]["content"]
-        self.assertIn("不得出现任何阿拉伯数字", system_prompt)
-        self.assertIn("不要使用功效词汇", system_prompt)
+        self.assertIn("商品编号ID、阿拉伯数字", system_prompt)
+        self.assertNotIn("不要使用功效词汇", system_prompt)
         self.assertIn("100%", system_prompt)
 
     def test_llm_cannot_change_the_requested_product_url(self):
@@ -410,7 +419,7 @@ class AiCopyServiceTests(unittest.TestCase):
         prompt = provider.calls[0]["messages"][1]["content"]
         self.assertIn("SKU-001：轻量透气", prompt)
         self.assertIn("SKU-002：柔软百搭", prompt)
-        self.assertIn("标题和正文的重要参考", prompt)
+        self.assertIn("标题和正文的参考", prompt)
         self.assertEqual(len(result.selling_point_references), 2)
 
 

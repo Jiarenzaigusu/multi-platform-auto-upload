@@ -9,11 +9,11 @@ from webapp.ai_copy.product_lookup.tmall_client import (
     BrowserRuntimeTmallPageFetcher,
     DirectoryTmallStorageStateProvider,
 )
-from webapp.ai_copy.service import build_ai_copy_service
 from webapp.ai_copy.settings import AiCopySettings
 from webapp.api.agent_tasks import AgentTaskManager
 from webapp.api.store import JobStore
 from webapp.llm_adapter import FileAdapterCredentialStore, LLMAdapterRegistry
+from webapp.server_adapters.ai_copy import build_server_ai_copy_service
 from webapp.workspaces.paths import AppDataPaths
 from webapp.workspaces.service import UserWorkspace
 
@@ -95,11 +95,11 @@ class UserWorkspaceRegistry:
                     manager,
                     timeout_seconds=max(60.0, ai_settings.product_timeout_seconds + 10),
                 )
-            ai_copy_service = build_ai_copy_service(
+            ai_copy_service = build_server_ai_copy_service(
                 llm_registry,
                 ai_settings,
                 tmall_page_fetcher=tmall_fetcher,
-                tmall_product_reader=tmall_product_reader,
+                agent_tmall_reader=tmall_product_reader,
             )
         except Exception:
             try:

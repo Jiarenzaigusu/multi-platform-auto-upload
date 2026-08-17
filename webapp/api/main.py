@@ -29,10 +29,17 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from utils.config import BASE_DIR
 from webapp.ai_copy import create_ai_copy_router
 from webapp.api.agent import create_agent_router
+from webapp.api.agent_batch import (
+    parse_remote_jd_video_batch_workbook,
+    parse_remote_tmall_article_batch_workbook,
+    parse_remote_tmall_video_batch_workbook,
+)
 from webapp.api.batch import BatchValidationError
-from webapp.api.batch_jd import parse_jd_batch_workbook
+from webapp.api.batch_jd_article import JD_ARTICLE_BATCH_UNAVAILABLE_MESSAGE
+from webapp.api.batch_jd_video import parse_jd_video_batch_workbook
 from webapp.api.batch_templates import build_batch_template
-from webapp.api.batch_tmall import parse_tmall_batch_workbook
+from webapp.api.batch_tmall_article import parse_tmall_article_batch_workbook
+from webapp.api.batch_tmall_video import parse_tmall_video_batch_workbook
 from webapp.api.media import (
     MediaQuotaExceededError,
     UploadTooLargeError,
@@ -45,8 +52,10 @@ from webapp.api.media import (
 )
 from webapp.api.models import (
     SUPPORTED_COVER_IMAGE_EXTENSIONS,
+    SUPPORTED_VIDEO_EXTENSIONS,
     ValidationError,
     validate_account_name,
+    validate_content_type,
     validate_platform,
     validate_publish_request,
 )
@@ -77,7 +86,6 @@ class WebSettings:
     user_workers: int = 1
     global_browser_tasks: int = 10
     agent_installer_path: Path | None = None
-    mac_agent_installer_path: Path | None = None
     session_seconds: int = 12 * 60 * 60
     secure_cookies: bool = False
     allowed_hosts: tuple[str, ...] = ("127.0.0.1", "localhost", "testserver")
@@ -140,12 +148,6 @@ class WebSettings:
                     str(BASE_DIR / "deploy/windows/output/MPAU-Agent-Setup.exe"),
                 )
             ).expanduser().resolve(),
-            mac_agent_installer_path=Path(
-                os.getenv(
-                    "MPAU_MAC_AGENT_INSTALLER_PATH",
-                    str(BASE_DIR / "deploy/macos/output/MPAU-Agent-macOS-arm64.dmg"),
-                )
-            ).expanduser().resolve(),
             session_seconds=positive_int("MPAU_SESSION_SECONDS", 12 * 60 * 60),
             secure_cookies=os.getenv("MPAU_SECURE_COOKIES", "false").strip().lower()
             in {"1", "true", "yes", "on"},
@@ -177,6 +179,11 @@ def _tail_file(path: Path, lines: int = 120) -> list[str]:
         return path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]
     except OSError:
         return []
+
+
+def _article_staged_image_name(index: int, suffix: str, upload_token: str) -> str:
+    """Keep each article image uniquely identifiable in the verified picker flow."""
+    return f"mpau-article-{upload_token}-{index:02d}{suffix.lower()}"
 
 
 def create_app(
@@ -527,15 +534,20 @@ def create_app(
     @app.get("/api/batch-templates-v2/{platform}")
     def download_batch_template(
         platform: str,
+        content_type: str = Query("video"),
         _user=Depends(require_user),
     ) -> StreamingResponse:
         try:
-            content = build_batch_template(validate_platform(platform))
+            selected_platform = validate_platform(platform)
+            selected_content_type = validate_content_type(content_type)
+            content = build_batch_template(selected_platform, selected_content_type)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         filename = (
-            "%E5%A4%A9%E7%8C%AB_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx"
-            if platform == "tmall"
+            "%E5%A4%A9%E7%8C%AB_%E5%9B%BE%E6%96%87_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx"
+            if selected_platform == "tmall" and selected_content_type == "article"
+            else "%E5%A4%A9%E7%8C%AB_%E8%A7%86%E9%A2%91_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx"
+            if selected_platform == "tmall"
             else "%E4%BA%AC%E4%B8%9C_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx"
         )
         return StreamingResponse(
@@ -561,20 +573,6 @@ def create_app(
             installer,
             media_type="application/vnd.microsoft.portable-executable",
             filename="MPAU-Agent-Setup.exe",
-        )
-
-    @app.get("/downloads/MPAU-Agent-macOS-arm64.dmg")
-    def download_macos_agent_installer(_user=Depends(require_user)) -> FileResponse:
-        installer = settings.mac_agent_installer_path
-        if installer is None or not installer.is_file():
-            raise HTTPException(
-                status_code=404,
-                detail="管理员尚未上传 macOS 本地执行助手安装包",
-            )
-        return FileResponse(
-            installer,
-            media_type="application/x-apple-diskimage",
-            filename="MPAU-Agent-macOS-arm64.dmg",
         )
 
     @app.post("/api/accounts/{platform}/{account}/login", status_code=202)
@@ -793,7 +791,9 @@ def create_app(
     async def create_publish_job(
         platform: str = Form(...),
         account: str = Form(...),
-        video: UploadFile = File(...),
+        content_type: str = Form("video"),
+        video: UploadFile | None = File(None),
+        images: list[UploadFile] = File(default=[]),
         cover_image: UploadFile | None = File(None),
         title: str = Form(...),
         description: str = Form(""),
@@ -808,32 +808,78 @@ def create_app(
         headed: bool = Form(True),
         workspace: UserWorkspace = Depends(operator_workspace),
     ) -> JSONResponse:
+        """Stage a video or the verified ordered Tmall article image set."""
         manager = workspace.task_manager
         try:
-            original_name = validate_media_filename(video.filename or "video.mp4")
+            selected_content_type = validate_content_type(
+                content_type if isinstance(content_type, str) else "video"
+            )
+            selected_platform = validate_platform(platform)
         except ValueError as exc:
-            await video.close()
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        image_uploads = (
+            [item for item in images if getattr(item, "filename", "")]
+            if isinstance(images, list)
+            else []
+        )
+
+        try:
+            if selected_content_type == "video":
+                if video is None:
+                    raise ValidationError("请上传视频文件")
+                original_name = validate_media_filename(video.filename or "video.mp4")
+                if Path(original_name).suffix.lower() not in SUPPORTED_VIDEO_EXTENSIONS:
+                    raise ValidationError("上传文件不是支持的视频格式")
+            else:
+                if selected_platform != "tmall":
+                    raise ValidationError("京东图文发布尚未开放")
+                if not 1 <= len(image_uploads) <= 9:
+                    raise ValidationError("天猫图文必须上传 1-9 张图片")
+                if any(
+                    Path(item.filename or "").suffix.lower()
+                    not in SUPPORTED_COVER_IMAGE_EXTENSIONS
+                    for item in image_uploads
+                ):
+                    raise ValidationError("图文图片仅支持 JPG、PNG 或 WebP 格式")
+                original_name = Path(image_uploads[0].filename or "image.jpg").name
+            cover_name = Path(cover_image.filename or "cover.jpg").name if cover_image else ""
+            if cover_image and (
+                selected_content_type != "video"
+                or Path(cover_name).suffix.lower() not in SUPPORTED_COVER_IMAGE_EXTENSIONS
+            ):
+                raise ValidationError("封面图片仅支持视频 JPG、PNG 或 WebP 格式")
+        except ValidationError as exc:
+            if video:
+                await video.close()
+            for image in image_uploads:
+                await image.close()
             if cover_image:
                 await cover_image.close()
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        cover_name = Path(cover_image.filename or "cover.jpg").name if cover_image else ""
-        if cover_image and Path(cover_name).suffix.lower() not in SUPPORTED_COVER_IMAGE_EXTENSIONS:
-            await video.close()
-            await cover_image.close()
-            raise HTTPException(status_code=422, detail="封面图片仅支持 JPG、PNG 或 WebP 格式")
-
-        # Start recovery and orphan cleanup before creating a new managed upload directory.
         try:
             manager.start()
         except Exception:
-            await video.close()
+            if video:
+                await video.close()
+            for image in image_uploads:
+                await image.close()
             if cover_image:
                 await cover_image.close()
             raise
 
         destination_dir = workspace.paths.uploads / uuid.uuid4().hex
         destination_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
-        destination = destination_dir / original_name
+        destination = (
+            destination_dir / original_name if selected_content_type == "video" else None
+        )
+        article_token = uuid.uuid4().hex[:12]
+        image_destinations = tuple(
+            destination_dir
+            / _article_staged_image_name(
+                index, Path(image.filename or ".jpg").suffix or ".jpg", article_token
+            )
+            for index, image in enumerate(image_uploads, start=1)
+        )
         cover_destination = (
             destination_dir
             / f"cover-{uuid.uuid4().hex}{Path(cover_name).suffix.lower()}"
@@ -841,12 +887,20 @@ def create_app(
             else None
         )
         try:
-            await asyncio.to_thread(
-                stage_upload,
-                video,
-                destination,
-                settings.max_upload_bytes,
-            )
+            if selected_content_type == "video" and video and destination:
+                await asyncio.to_thread(
+                    stage_upload, video, destination, settings.max_upload_bytes
+                )
+            else:
+                for image, image_destination in zip(
+                    image_uploads, image_destinations, strict=True
+                ):
+                    await asyncio.to_thread(
+                        stage_upload,
+                        image,
+                        image_destination,
+                        settings.max_cover_image_bytes,
+                    )
             if cover_image and cover_destination:
                 try:
                     await asyncio.to_thread(
@@ -863,7 +917,9 @@ def create_app(
             request = validate_publish_request(
                 platform=platform,
                 account=account,
+                content_type=selected_content_type,
                 video_path=destination,
+                image_paths=image_destinations,
                 cover_image_path=cover_destination,
                 original_filename=original_name,
                 title=title,
@@ -884,7 +940,8 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except UploadTooLargeError as exc:
             cleanup_staged_upload(destination_dir, manager)
-            raise HTTPException(status_code=413, detail="视频超过 Web 应用允许的最大文件大小") from exc
+            label = "视频" if selected_content_type == "video" else "图文图片"
+            raise HTTPException(status_code=413, detail=f"{label}超过 Web 应用允许的最大文件大小") from exc
         except HTTPException:
             cleanup_staged_upload(destination_dir, manager)
             raise
@@ -895,7 +952,10 @@ def create_app(
             cleanup_staged_upload(destination_dir, manager)
             raise
         finally:
-            await video.close()
+            if video:
+                await video.close()
+            for image in image_uploads:
+                await image.close()
             if cover_image:
                 await cover_image.close()
 
@@ -927,6 +987,7 @@ def create_app(
         parser,
         account: str = Form(...),
         workbook: UploadFile = File(...),
+        content_type: str = Form("video"),
         dry_run: bool = Form(False),
         headed: bool = Form(True),
         workspace: UserWorkspace,
@@ -956,10 +1017,13 @@ def create_app(
                     max_rows=settings.max_batch_rows,
                 )
                 batch_id = uuid.uuid4().hex
-                jobs = workspace.task_manager.submit_publish_tasks(
-                    [(row.request, row.row_number) for row in rows],
-                    batch_id=batch_id,
-                )
+                requests = [
+                    (row.request, row.row_number, row.image_folder_path)
+                    if getattr(row, "image_folder_path", None)
+                    else (row.request, row.row_number)
+                    for row in rows
+                ]
+                jobs = workspace.task_manager.submit_publish_tasks(requests, batch_id=batch_id)
                 return batch_id, jobs
 
         try:
@@ -987,15 +1051,32 @@ def create_app(
     async def create_tmall_batch_jobs(
         account: str = Form(...),
         workbook: UploadFile = File(...),
+        content_type: str = Form("video"),
         dry_run: bool = Form(False),
         headed: bool = Form(True),
         workspace: UserWorkspace = Depends(operator_workspace),
     ) -> JSONResponse:
+        selected_content_type = validate_content_type(
+            content_type if isinstance(content_type, str) else "video"
+        )
+        if getattr(workspace.task_manager, "remote_execution", False):
+            parser = (
+                parse_remote_tmall_video_batch_workbook
+                if selected_content_type == "video"
+                else parse_remote_tmall_article_batch_workbook
+            )
+        else:
+            parser = (
+                parse_tmall_video_batch_workbook
+                if selected_content_type == "video"
+                else parse_tmall_article_batch_workbook
+            )
         return await create_batch_jobs(
             platform_label="天猫",
-            parser=parse_tmall_batch_workbook,
+            parser=parser,
             account=account,
             workbook=workbook,
+            content_type=selected_content_type,
             dry_run=dry_run,
             headed=headed,
             workspace=workspace,
@@ -1005,15 +1086,24 @@ def create_app(
     async def create_jd_batch_jobs(
         account: str = Form(...),
         workbook: UploadFile = File(...),
+        content_type: str = Form("video"),
         dry_run: bool = Form(False),
         headed: bool = Form(True),
         workspace: UserWorkspace = Depends(operator_workspace),
     ) -> JSONResponse:
+        if isinstance(content_type, str) and content_type != "video":
+            await workbook.close()
+            raise HTTPException(status_code=422, detail=JD_ARTICLE_BATCH_UNAVAILABLE_MESSAGE)
         return await create_batch_jobs(
             platform_label="京东",
-            parser=parse_jd_batch_workbook,
+            parser=(
+                parse_remote_jd_video_batch_workbook
+                if getattr(workspace.task_manager, "remote_execution", False)
+                else parse_jd_video_batch_workbook
+            ),
             account=account,
             workbook=workbook,
+            content_type="video",
             dry_run=dry_run,
             headed=headed,
             workspace=workspace,
@@ -1039,7 +1129,6 @@ def create_app(
             workspace_registry.get,
             auth_service,
             settings.agent_installer_path,
-            settings.mac_agent_installer_path,
         )
     )
 

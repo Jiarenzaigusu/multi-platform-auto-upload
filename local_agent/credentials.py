@@ -7,8 +7,6 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
-import subprocess
-import sys
 import tempfile
 from typing import Any
 
@@ -114,61 +112,11 @@ class AgentConnectionStore:
         self.data_root = secure_directory(data_root)
         self.path = self.data_root / "connection.json"
 
-    @property
-    def _macos_keychain_account(self) -> str:
-        """Give every local-agent data root an isolated Keychain record."""
-        import hashlib
-
-        digest = hashlib.sha256(str(self.data_root).encode("utf-8")).hexdigest()
-        return f"agent-{digest[:24]}"
-
     def _protect_token(self, token: str) -> bytes:
-        if sys.platform != "darwin":
-            return _dpapi_protect(token.encode("utf-8"))
-        account = self._macos_keychain_account
-        completed = subprocess.run(
-            [
-                "security",
-                "add-generic-password",
-                "-a",
-                account,
-                "-s",
-                "MPAU Agent",
-                "-w",
-                token,
-                "-U",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if completed.returncode != 0:
-            raise ValueError("无法将本地执行助手凭据保存到 macOS 钥匙串")
-        return f"keychain:{account}".encode("utf-8")
+        return _dpapi_protect(token.encode("utf-8"))
 
     def _unprotect_token(self, value: bytes) -> bytes:
-        if not value.startswith(b"keychain:"):
-            return _dpapi_unprotect(value)
-        if sys.platform != "darwin":
-            raise ValueError("本地执行助手凭据不能由当前系统解密")
-        account = value.removeprefix(b"keychain:").decode("utf-8")
-        completed = subprocess.run(
-            [
-                "security",
-                "find-generic-password",
-                "-a",
-                account,
-                "-s",
-                "MPAU Agent",
-                "-w",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if completed.returncode != 0:
-            raise ValueError("无法从 macOS 钥匙串读取本地执行助手凭据")
-        return completed.stdout.rstrip("\n").encode("utf-8")
+        return _dpapi_unprotect(value)
 
     def save(
         self,
@@ -226,17 +174,3 @@ class AgentConnectionStore:
 
     def clear(self) -> None:
         self.path.unlink(missing_ok=True)
-        if sys.platform == "darwin":
-            subprocess.run(
-                [
-                    "security",
-                    "delete-generic-password",
-                    "-a",
-                    self._macos_keychain_account,
-                    "-s",
-                    "MPAU Agent",
-                ],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )

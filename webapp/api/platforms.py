@@ -5,23 +5,24 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from uploader.jd_uploader.main import (
+from uploader.jd_video_uploader.main import (
     JDVideo,
     cookie_auth as jd_cookie_auth,
     jd_setup,
 )
-from uploader.tmall_uploader.main import (
+from uploader.tmall_video_uploader.main import (
     TMALL_PUBLISH_STRATEGY_IMMEDIATE,
     TMALL_PUBLISH_STRATEGY_SCHEDULED,
     TmallVideo,
     cookie_auth as tmall_cookie_auth,
     tmall_setup,
 )
+from uploader.tmall_article_uploader.main import TmallArticle
 from webapp.workspaces.paths import UserDataPaths
 
 if TYPE_CHECKING:
-    from uploader.jd_uploader.session import JdSessionPool
-    from uploader.tmall_uploader.session import TmallSessionPool
+    from uploader.jd_session import JdSessionPool
+    from uploader.tmall_session import TmallSessionPool
 
 
 @dataclass(slots=True)
@@ -32,6 +33,26 @@ class TmallVideoUploadRequest:
     description: str
     tags: list[str]
     cover_image_file: Path | None = None
+    goods_id: str = ""
+    activity_topic: str = ""
+    music_name: str = ""
+    creator_declaration: str = ""
+    schedule: datetime | None = None
+    publish_strategy: str = TMALL_PUBLISH_STRATEGY_IMMEDIATE
+    debug: bool = True
+    headless: bool = True
+    dry_run: bool = False
+
+
+@dataclass(slots=True)
+class TmallArticleUploadRequest:
+    """Tmall article request using the verified local uploader flow."""
+
+    account_name: str
+    image_files: tuple[Path, ...]
+    title: str
+    description: str
+    tags: list[str]
     goods_id: str = ""
     activity_topic: str = ""
     music_name: str = ""
@@ -155,6 +176,46 @@ async def upload_tmall_video(
         async with session_pool.lease(
             account_file,
             headless=request.headless,
+        ) as session:
+            if not await tmall_setup(
+                str(account_file),
+                handle=False,
+                session=session,
+                auth_cache_seconds=5 * 60,
+            ):
+                raise RuntimeError("天猫 Cookie 不存在或已失效，请先在 Web 页面执行登录")
+            result = await uploader.upload_in_session(session)
+    finally:
+        secure_account_file(account_file)
+    return result if isinstance(result, dict) else {}
+
+
+async def upload_tmall_article(
+    request: TmallArticleUploadRequest,
+    *,
+    paths: UserDataPaths,
+    session_pool: TmallSessionPool,
+) -> dict:
+    """Publish an ordered Tmall article using the local-version uploader."""
+    account_file = resolve_account_file(paths, "tmall", request.account_name)
+    uploader = TmallArticle(
+        image_paths=tuple(str(path) for path in request.image_files),
+        title=request.title,
+        desc=request.description,
+        account_file=str(account_file),
+        tags=request.tags,
+        goods_id=request.goods_id,
+        activity_topic=request.activity_topic,
+        music_name=request.music_name,
+        creator_declaration=request.creator_declaration,
+        schedule=request.schedule,
+        publish_strategy=request.publish_strategy,
+        debug=request.debug,
+        dry_run=request.dry_run,
+    )
+    try:
+        async with session_pool.lease(
+            account_file, headless=request.headless
         ) as session:
             if not await tmall_setup(
                 str(account_file),

@@ -159,6 +159,23 @@ class AgentApiClient:
             progress=progress,
         )
 
+    def download_article_image(
+        self,
+        job_id: str,
+        agent_id: str,
+        index: int,
+        destination: Path,
+        *,
+        progress=None,
+    ) -> None:
+        self._download_file(
+            f"/api/agent/jobs/{quote(job_id)}/article-images/{index}",
+            agent_id,
+            destination,
+            resource_label="图文图片",
+            progress=progress,
+        )
+
     def _download_file(
         self,
         path: str,
