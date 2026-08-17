@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-uploader.jd_uploader.main 模块
+uploader.jd_video_uploader.main 模块
 
 京东京麦平台（dr.jd.com）视频发布器核心实现。
 
@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -34,7 +33,7 @@ from patchright.async_api import BrowserContext, Frame
 from uploader.errors import PublishResultUncertainError
 from utils.config import DEBUG_MODE
 from uploader.base_video import BaseVideoUploader
-from uploader.jd_uploader.session import JdBrowserSession
+from uploader.jd_session import JdBrowserSession
 from utils.log import jd_logger
 
 # 京东京麦发布中心 URL，用于 Cookie 校验与登录入口
@@ -58,11 +57,6 @@ class JdAuthenticationError(RuntimeError):
     上层会捕获此异常并将会话标记为未认证。
     """
     pass
-
-
-def _contains_exact_goods_id(value: str, goods_id: str) -> bool:
-    """Avoid associating a product when its ID only partially matches the result."""
-    return re.search(rf"(?<!\d){re.escape(goods_id)}(?!\d)", value) is not None
 
 
 def _msg(emoji: str, text: str) -> str:
@@ -349,7 +343,6 @@ class JDVideo(JDBaseUploader):
         schedule: datetime | None = None,
         original: bool = False,
         creator_declaration: str = "",
-        *,
         debug: bool = DEBUG_MODE,
         dry_run: bool = False,
     ):
@@ -799,7 +792,7 @@ class JDVideo(JDBaseUploader):
 
         jd_logger.warning(_msg("🔐", "检测到安全验证码，上传已暂停"))
 
-        is_tty = bool(sys.stdin and sys.stdin.isatty())
+        is_tty = sys.stdin.isatty()
 
         if is_tty:
             # 交互终端模式：等用户按回车再确认

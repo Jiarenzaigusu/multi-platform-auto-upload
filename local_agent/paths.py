@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import sys
 import tempfile
 import uuid
 
@@ -14,13 +13,10 @@ def default_data_root() -> Path:
     configured = os.getenv("MPAU_AGENT_DATA_DIR", "").strip()
     if configured:
         return Path(configured).expanduser().resolve()
-    if os.name == "nt":
-        base = os.getenv("LOCALAPPDATA") or os.getenv("APPDATA")
-        if base:
-            return (Path(base) / "MPAU-Agent").resolve()
-    if sys.platform == "darwin":
-        return (Path.home() / "Library/Application Support/MPAU-Agent").resolve()
-    return (Path.home() / ".local/share/mpau-agent").resolve()
+    base = os.getenv("LOCALAPPDATA") or os.getenv("APPDATA")
+    if base:
+        return (Path(base) / "MPAU-Agent").resolve()
+    return (Path.home() / ".mpau-agent").resolve()
 
 
 def secure_directory(path: Path) -> Path:

@@ -94,10 +94,9 @@ class BrowserRuntime:
         if not self.is_current_loop():
             raise RuntimeError("天猫会话池只能在浏览器运行时中使用")
         if self._tmall_sessions is None:
-            from uploader.tmall_uploader.session import TmallSessionPool
+            from uploader.tmall_session import TmallSessionPool
 
             self._tmall_sessions = TmallSessionPool(
-                logger=user_platform_logger("tmall", self.user_id),
                 idle_timeout_seconds=self.idle_timeout_seconds,
                 max_sessions=self.max_sessions,
             )
@@ -107,10 +106,9 @@ class BrowserRuntime:
         if not self.is_current_loop():
             raise RuntimeError("京东会话池只能在浏览器运行时中使用")
         if self._jd_sessions is None:
-            from uploader.jd_uploader.session import JdSessionPool
+            from uploader.jd_session import JdSessionPool
 
             self._jd_sessions = JdSessionPool(
-                logger=user_platform_logger("jd", self.user_id),
                 idle_timeout_seconds=self.idle_timeout_seconds,
                 max_sessions=self.max_sessions,
             )

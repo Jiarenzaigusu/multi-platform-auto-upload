@@ -30,7 +30,7 @@ mpau-agent ── HTTPS ──┘                    （不启动 Edge）
 ### 2.1 助手配对与连接
 
 1. 用户登录发布台网页；
-2. 首次使用时下载并安装与本机匹配的助手：Windows 下载 `MPAU-Agent-Setup.exe`，Apple Silicon Mac 下载 `MPAU-Agent-macOS-arm64.dmg`；不需要 Python、项目代码或命令行；
+2. 首次使用时下载并安装 Windows 助手 `MPAU-Agent-Setup.exe`；不需要 Python、项目代码或命令行；
 3. 用户在网页生成 5 分钟有效的一次性配对码，并输入本地助手窗口；
 4. 助手用配对码换取只允许访问代理接口的设备令牌，Windows 上通过当前用户 DPAPI 加密保存；
 5. 助手写入当前 Windows 用户登录启动项，以后自动连接；
@@ -124,8 +124,8 @@ mpau-agent ── HTTPS ──┘                    （不启动 Edge）
    ├─ uploads/                   # 单条发布临时视频
    ├─ media/                     # 批量视频素材
    ├─ job-logs/                  # 代理回传的任务日志
-   ├─ cookies/                   # 旧版兼容目录；本地代理模式不写新 Cookie
-   ├─ platform-logs/             # 旧版兼容目录
+   ├─ cookies/                   # 本地执行工作区的账号 Cookie 目录
+   ├─ platform-logs/             # 平台级回退日志
    └─ secrets/                   # 当前用户自己的 LLM 凭据
 ```
 
@@ -148,7 +148,7 @@ Windows 默认路径：
    └─ platform-logs\
 ```
 
-macOS 默认路径是 `~/Library/Application Support/MPAU-Agent/`，Linux 默认路径是 `~/.local/share/mpau-agent/`。可通过 `MPAU_AGENT_DATA_DIR` 或代理的 `--data-dir` 参数覆盖。
+Windows 助手默认将数据保存在当前用户的 Local AppData 目录。可通过 `MPAU_AGENT_DATA_DIR` 或代理的 `--data-dir` 参数覆盖。
 
 平台 Cookie 和浏览器日志不上传云端。删除云端用户不会自动擦除已离线电脑上的数据；应在用户仍可连接时从页面创建“删除本地账号”任务，或由终端管理策略清理代理目录。
 

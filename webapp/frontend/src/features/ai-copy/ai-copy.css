@@ -1,7 +1,7 @@
 /* ai-copy.css：AI 文案工坊专属样式表。
 
    珊瑚色（#f15b43）主调，双栏布局（左输入卡 + 右深色结果面板）。
-   含风格选择网格、字数限制 chips、自定义下拉、商品链接输入、
+   含风格选择网格、目标字数 chips、自定义下拉、商品链接输入、
    生成按钮（渐变黄绿）、结果展示、加载脉冲动画。
    支持 prefers-reduced-motion 与 1120px/640px 响应式断点。
 */
@@ -347,6 +347,7 @@
 .ai-copy-style-grid input { position: absolute; opacity: 0; }
 .ai-copy-style-grid i { color: #a5aca8; font: 700 9px/1 "SFMono-Regular", Consolas, monospace; font-style: normal; }
 .ai-copy-style-grid strong { font-size: 12px; }
+.ai-copy-custom-context { margin-top: 10px; }
 
 .ai-copy-limits {
   padding: 16px 16px 18px;
@@ -511,11 +512,35 @@
 .ai-copy-generating span:nth-child(3) { animation-delay: .36s; }
 .ai-copy-generating p { flex-basis: 100%; margin: 13px 0 0; color: #b8c8c3; font-size: 12px; }
 
-.ai-copy-output { position: relative; z-index: 1; margin-top: 18px; padding: 20px; border: 1px solid rgba(241, 238, 221, .17); border-radius: 15px; background: rgba(255, 255, 255, .055); backdrop-filter: blur(7px); }
+.ai-copy-output-group { position: relative; z-index: 1; margin-top: 18px; }
+.ai-copy-candidate-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 3px;
+}
+.ai-copy-candidate-heading > span { color: #dce761; font-size: 10px; font-weight: 800; letter-spacing: .12em; }
+.ai-copy-candidate-heading > small { color: #829b94; font-size: 9px; text-align: right; }
+.ai-copy-output { position: relative; margin-top: 9px; padding: 20px; border: 1px solid rgba(241, 238, 221, .17); border-radius: 15px; background: rgba(255, 255, 255, .055); backdrop-filter: blur(7px); }
+.ai-copy-output.selected { border-color: rgba(220, 231, 97, .62); background: rgba(220, 231, 97, .09); box-shadow: inset 0 0 0 1px rgba(220, 231, 97, .18); }
 .ai-copy-output-label span { color: #dce761; font-size: 10px; font-weight: 800; letter-spacing: .12em; }
 .ai-copy-output-label small { color: #829b94; font-size: 9px; }
+.ai-copy-candidate-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 14px;
+  color: #dce761;
+  font-size: 10px;
+  font-weight: 750;
+  cursor: pointer;
+}
+.ai-copy-candidate-select input { width: 14px; height: 14px; margin: 0; accent-color: #dce761; cursor: pointer; }
 .ai-copy-title-output h3 { margin: 20px 0 24px; font-family: Georgia, "Songti SC", serif; font-size: 25px; font-weight: 500; line-height: 1.4; }
+.ai-copy-title-output .ai-copy-candidate-select + h3 { margin-top: 12px; }
 .ai-copy-body-output p { margin: 18px 0 23px; color: #e1e8e4; font-size: 13px; line-height: 1.85; white-space: pre-wrap; }
+.ai-copy-body-output .ai-copy-candidate-select + p { margin-top: 12px; }
 .ai-copy-output button { width: 100%; padding: 10px 12px; color: #eaf0ed; background: rgba(255,255,255,.07); }
 .ai-copy-import {
   position: relative;

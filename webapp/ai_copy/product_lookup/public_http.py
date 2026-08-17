@@ -1,15 +1,26 @@
+"""webapp.ai_copy.product_lookup.public_http 模块：公开网页 HTTP 客户端基础设施。
+
+提供：
+- create_trusted_ssl_context(): 基于 certifi CA 包创建 SSL 上下文
+- validate_public_product_url(): SSRF 防护（DNS 解析校验，禁止内网/保留地址）
+- PinnedHTTPConnection/PinnedHTTPSConnection: DNS pinning（连接到指定 IP 避免 TOCTOU）
+- PublicPageHttpClient: 核心客户端，支持多 IP 尝试 + 重定向跟踪（最多 5 次）
+
+每次重定向都重新校验 URL 公开性，避免重定向到内网地址。
+"""
 from __future__ import annotations
 
+from dataclasses import dataclass
 import http.client
 import ipaddress
 import socket
 import ssl
-from dataclasses import dataclass
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import certifi
 
 from webapp.ai_copy.errors import ProductLookupError
+
 
 DEFAULT_PAGE_HEADERS = {
     "Accept": "text/html,application/xhtml+xml",
@@ -103,61 +114,6 @@ class PublicPageHttpClient:
         self._ssl_context = ssl_context or create_trusted_ssl_context()
         self._max_redirects = max_redirects
 
-    def _connection(self, parsed, address: str):
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        if parsed.scheme == "https":
-            return _PinnedHTTPSConnection(
-                parsed.hostname or "",
-                port,
-                address,
-                self._timeout_seconds,
-                self._ssl_context,
-            )
-        return _PinnedHTTPConnection(
-            parsed.hostname or "", port, address, self._timeout_seconds
-        )
-
-    def post_json(
-        self, endpoint_url: str, payload: bytes, *, headers: dict[str, str] | None = None
-    ) -> FetchedPage:
-        """POST to one public endpoint while pinning the validated DNS result."""
-        parsed = urlsplit(endpoint_url)
-        addresses = validate_public_product_url(endpoint_url)
-        target = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
-        request_headers = {"Content-Type": "application/json", **(headers or {})}
-        last_error: Exception | None = None
-
-        for address in addresses:
-            connection = self._connection(parsed, address)
-            try:
-                connection.request("POST", target, body=payload, headers=request_headers)
-                response = connection.getresponse()
-                if response.status in {301, 302, 303, 307, 308}:
-                    response.read(1024)
-                    raise ProductLookupError("商品搜索服务不允许重定向")
-                if response.status >= 400:
-                    raise ProductLookupError(
-                        f"商品搜索服务返回 HTTP {response.status}"
-                    )
-                content_type = response.headers.get_content_type()
-                charset = response.headers.get_content_charset() or "utf-8"
-                raw = response.read(self._max_bytes + 1)
-                if len(raw) > self._max_bytes:
-                    raise ProductLookupError("商品搜索服务响应超过读取大小限制")
-                return FetchedPage(raw, content_type, charset, endpoint_url)
-            except ProductLookupError:
-                raise
-            except (
-                OSError,
-                TimeoutError,
-                ssl.SSLError,
-                http.client.HTTPException,
-            ) as exc:
-                last_error = exc
-            finally:
-                connection.close()
-        raise ProductLookupError(f"无法连接商品搜索服务：{last_error}") from last_error
-
     def get(
         self, product_url: str, *, headers: dict[str, str] | None = None
     ) -> FetchedPage:
@@ -167,12 +123,24 @@ class PublicPageHttpClient:
         for redirect_count in range(self._max_redirects + 1):
             parsed = urlsplit(current_url)
             addresses = validate_public_product_url(current_url)
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
             target = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
             last_error: Exception | None = None
             redirect_url: str | None = None
 
             for address in addresses:
-                connection = self._connection(parsed, address)
+                if parsed.scheme == "https":
+                    connection = _PinnedHTTPSConnection(
+                        parsed.hostname or "",
+                        port,
+                        address,
+                        self._timeout_seconds,
+                        self._ssl_context,
+                    )
+                else:
+                    connection = _PinnedHTTPConnection(
+                        parsed.hostname or "", port, address, self._timeout_seconds
+                    )
                 try:
                     connection.request("GET", target, headers=request_headers)
                     response = connection.getresponse()

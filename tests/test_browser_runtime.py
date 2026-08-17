@@ -11,8 +11,8 @@ from unittest.mock import AsyncMock, patch
 
 from loguru import logger
 
-from uploader.jd_uploader.session import JdSessionPool
-from uploader.tmall_uploader.session import TmallSessionPool
+from uploader.jd_session import JdSessionPool
+from uploader.tmall_session import TmallSessionPool
 from webapp.api.browser_runtime import BrowserRuntime
 from webapp.api.models import validate_publish_request
 from webapp.api.platforms import TmallVideoUploadRequest, upload_tmall_video

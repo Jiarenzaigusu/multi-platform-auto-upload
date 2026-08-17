@@ -14,6 +14,7 @@ dependencies = [
   "certifi>=2024.8.30,<2027",
   "loguru==0.7.3",
   "patchright==1.58.2",
+  "pillow>=10,<13",
   "pydantic>=2.9,<3",
 ]
 
@@ -30,7 +31,6 @@ web = [
   "uvicorn[standard]>=0.30,<1",
 ]
 desktop = [
-  "pillow>=10,<13",
   "pystray>=0.19,<1",
 ]
 build = [

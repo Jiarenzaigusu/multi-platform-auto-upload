@@ -21,6 +21,7 @@ from webapp.api.browser_runtime import BrowserRuntime
 from webapp.api.models import MIN_SCHEDULE_LEAD_TIME
 from webapp.api.platforms import (
     JdVideoUploadRequest,
+    TmallArticleUploadRequest,
     TmallVideoUploadRequest,
     check_jd_account,
     check_tmall_account,
@@ -29,6 +30,7 @@ from webapp.api.platforms import (
     resolve_account_file,
     tmall_publish_strategy,
     upload_jd_video,
+    upload_tmall_article,
     upload_tmall_video,
 )
 from webapp.workspaces.paths import UserDataPaths
@@ -68,10 +70,11 @@ class AgentJobRunner:
         job: dict[str, Any],
         video_path: Path | None,
         cover_image_path: Path | None = None,
+        image_paths: tuple[Path, ...] = (),
     ) -> Future[dict[str, Any]]:
         self._attach_job_log(job)
         return self.runtime.submit(
-            self._run_contextualized(job, video_path, cover_image_path)
+            self._run_contextualized(job, video_path, cover_image_path, image_paths)
         )
 
     async def _run_contextualized(
@@ -79,6 +82,7 @@ class AgentJobRunner:
         job: dict[str, Any],
         video_path: Path | None,
         cover_image_path: Path | None,
+        image_paths: tuple[Path, ...] = (),
     ) -> dict[str, Any]:
         job_id = job["id"]
         task = asyncio.current_task()
@@ -92,6 +96,10 @@ class AgentJobRunner:
             task.cancel()
         try:
             with logger.contextualize(job_id=job_id, user_id=self.user_id):
+                if image_paths:
+                    return await self._run_job(
+                        job, video_path, cover_image_path, image_paths
+                    )
                 return await self._run_job(job, video_path, cover_image_path)
         finally:
             with self._task_guard:
@@ -116,6 +124,7 @@ class AgentJobRunner:
         job: dict[str, Any],
         video_path: Path | None,
         cover_image_path: Path | None = None,
+        image_paths: tuple[Path, ...] = (),
     ) -> dict[str, Any]:
         platform = job["platform"]
         account = job["account"]
@@ -139,7 +148,7 @@ class AgentJobRunner:
                 timeout_seconds=20,
                 max_bytes=1_500_000,
             )
-            fetched_page = await fetcher.get_async(product_url)
+            fetched_page = await fetcher._get(product_url)
 
             class _FetchedPageReader:
                 def get(self, _product_url: str):
@@ -198,8 +207,13 @@ class AgentJobRunner:
 
         if job["kind"] != "publish":
             raise RuntimeError(f"未知本地代理任务类型：{job['kind']}")
-        if video_path is None or not video_path.is_file():
+        content_type = payload.get("content_type", "video")
+        if content_type == "video" and (video_path is None or not video_path.is_file()):
             raise RuntimeError("任务视频没有下载到用户电脑")
+        if content_type == "article" and (
+            platform != "tmall" or not image_paths or any(not path.is_file() for path in image_paths)
+        ):
+            raise RuntimeError("任务图文图片没有完整下载到用户电脑")
 
         schedule = (
             datetime.fromisoformat(payload["schedule"])
@@ -211,7 +225,27 @@ class AgentJobRunner:
             if schedule <= now + MIN_SCHEDULE_LEAD_TIME:
                 raise RuntimeError("定时发布时间距离当前不足 2 小时，请重新创建任务")
 
-        if platform == "tmall":
+        if platform == "tmall" and content_type == "article":
+            request = TmallArticleUploadRequest(
+                account_name=account,
+                image_files=image_paths,
+                title=payload["title"],
+                description=payload["description"],
+                tags=list(payload["tags"]),
+                goods_id=payload["goods_id"],
+                activity_topic=payload["activity_topic"],
+                music_name=payload.get("music_name", ""),
+                creator_declaration=payload.get("creator_declaration", "内容无需标注"),
+                schedule=schedule,
+                publish_strategy=tmall_publish_strategy(schedule),
+                debug=True,
+                headless=not headed,
+                dry_run=bool(payload["dry_run"]),
+            )
+            platform_result = await upload_tmall_article(
+                request, paths=self.paths, session_pool=session_pool
+            )
+        elif platform == "tmall":
             request = TmallVideoUploadRequest(
                 account_name=account,
                 video_file=video_path,

@@ -217,7 +217,8 @@ class TaskManager:
         definitions: list[dict[str, Any]] = []
         for request, source_row in requests:
             payload = asdict(request)
-            payload["video_path"] = str(request.video_path)
+            payload["video_path"] = str(request.video_path) if request.video_path else None
+            payload["image_paths"] = [str(path) for path in request.image_paths]
             payload["cover_image_path"] = (
                 str(request.cover_image_path) if request.cover_image_path else None
             )
@@ -682,6 +683,7 @@ class TaskManager:
         # Import lazily so API startup does not initialize browser automation.
         from webapp.api.platforms import (
             JdVideoUploadRequest,
+            TmallArticleUploadRequest,
             TmallVideoUploadRequest,
             check_jd_account,
             check_tmall_account,
@@ -689,6 +691,7 @@ class TaskManager:
             login_tmall_account,
             tmall_publish_strategy,
             upload_jd_video,
+            upload_tmall_article,
             upload_tmall_video,
         )
 
@@ -756,10 +759,38 @@ class TaskManager:
                 raise RuntimeError("定时发布时间已过，请重新创建任务")
             if schedule <= now + MIN_SCHEDULE_LEAD_TIME:
                 raise RuntimeError("定时发布时间距离当前不足 2 小时，请重新创建任务")
-        video_path = Path(payload["video_path"])
-        if not video_path.is_file():
+        content_type = payload.get("content_type", "video")
+        video_path = Path(payload["video_path"]) if payload.get("video_path") else None
+        image_paths = tuple(Path(path) for path in payload.get("image_paths") or [])
+        if content_type == "video" and (video_path is None or not video_path.is_file()):
             raise RuntimeError("视频文件在任务执行前已被移动或删除")
-        if platform == "tmall":
+        if content_type == "article" and (
+            not image_paths or any(not path.is_file() for path in image_paths)
+        ):
+            raise RuntimeError("图文图片在任务执行前已被移动或删除")
+        if platform == "tmall" and content_type == "article":
+            if session_pool is None:
+                raise RuntimeError("天猫任务必须通过 BrowserRuntime 会话池运行")
+            request = TmallArticleUploadRequest(
+                account_name=account,
+                image_files=image_paths,
+                title=payload["title"],
+                description=payload["description"],
+                tags=list(payload["tags"]),
+                goods_id=payload["goods_id"],
+                activity_topic=payload["activity_topic"],
+                music_name=payload.get("music_name", ""),
+                creator_declaration=payload.get("creator_declaration", "内容无需标注"),
+                schedule=schedule,
+                publish_strategy=tmall_publish_strategy(schedule),
+                debug=True,
+                headless=not headed,
+                dry_run=bool(payload["dry_run"]),
+            )
+            platform_result = await upload_tmall_article(
+                request, paths=self.paths, session_pool=session_pool
+            )
+        elif platform == "tmall":
             if session_pool is None:
                 raise RuntimeError("天猫任务必须通过 BrowserRuntime 会话池运行")
             request = TmallVideoUploadRequest(

@@ -54,8 +54,13 @@ def _validate_agent_id(agent_id: str) -> str:
 
 def _agent_job_response(job: dict[str, Any]) -> dict[str, Any]:
     payload = dict(job.get("payload") or {})
-    payload.pop("video_path", None)
-    cover_image_path = payload.pop("cover_image_path", None)
+    managed_upload = bool(payload.get("managed_upload"))
+    image_paths = payload.get("image_paths")
+    cover_image_path = payload.get("cover_image_path")
+    if managed_upload:
+        payload.pop("video_path", None)
+        payload.pop("image_paths", None)
+        payload.pop("cover_image_path", None)
     response = {
         key: value
         for key, value in job.items()
@@ -63,7 +68,13 @@ def _agent_job_response(job: dict[str, Any]) -> dict[str, Any]:
     }
     response["payload"] = payload
     if job["kind"] == "publish":
-        response["video_download_url"] = f"/api/agent/jobs/{job['id']}/video"
+        if payload.get("content_type", "video") == "article" and managed_upload:
+            payload["image_filenames"] = [Path(path).name for path in image_paths or []]
+            response["article_image_download_url"] = (
+                f"/api/agent/jobs/{job['id']}/article-images/{{index}}"
+            )
+        elif managed_upload:
+            response["video_download_url"] = f"/api/agent/jobs/{job['id']}/video"
         if cover_image_path:
             payload["cover_image_filename"] = Path(cover_image_path).name
             response["cover_image_download_url"] = (
@@ -77,7 +88,6 @@ def create_agent_router(
     workspace_for_user: Callable[[str], UserWorkspace],
     auth_service: AuthService,
     installer_path: Path | None = None,
-    mac_installer_path: Path | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/agent", tags=["local-agent"])
 
@@ -209,12 +219,6 @@ def create_agent_router(
                     "available": bool(installer_path and installer_path.is_file()),
                     "download_url": "/downloads/MPAU-Agent-Setup.exe",
                 },
-                "macos_arm64": {
-                    "available": bool(
-                        mac_installer_path and mac_installer_path.is_file()
-                    ),
-                    "download_url": "/downloads/MPAU-Agent-macOS-arm64.dmg",
-                },
             }
         }
 
@@ -332,6 +336,48 @@ def create_agent_router(
             or not path.is_file()
         ):
             raise HTTPException(status_code=404, detail="任务封面图片不存在")
+        return FileResponse(
+            path,
+            media_type="application/octet-stream",
+            filename=path.name,
+        )
+
+    @router.get("/jobs/{job_id}/article-images/{index}")
+    def download_article_image(
+        job_id: str,
+        index: int,
+        agent_id: str,
+        request: Request,
+    ) -> FileResponse:
+        authenticated = authenticated_agent(request)
+        workspace = workspace_for_user(authenticated.user.id)
+        manager = remote_manager(request)
+        selected_agent = bound_agent_id(request, agent_id)
+        try:
+            job = manager.get_claimed_job(job_id, selected_agent)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="任务不存在") from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        payload = job.get("payload") or {}
+        image_paths = payload.get("image_paths") or []
+        if (
+            job["kind"] != "publish"
+            or payload.get("content_type") != "article"
+            or index < 0
+            or index >= len(image_paths)
+        ):
+            raise HTTPException(status_code=404, detail="任务图文图片不存在")
+        path = Path(image_paths[index]).resolve()
+        allowed_roots = (workspace.paths.uploads.resolve(), workspace.paths.media.resolve())
+        if (
+            not any(path.is_relative_to(root) for root in allowed_roots)
+            or path.suffix.lower() not in SUPPORTED_COVER_IMAGE_EXTENSIONS
+            or not path.is_file()
+        ):
+            raise HTTPException(status_code=404, detail="任务图文图片不存在")
         return FileResponse(
             path,
             media_type="application/octet-stream",

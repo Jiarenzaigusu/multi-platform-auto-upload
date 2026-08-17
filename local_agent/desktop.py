@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
-import sys
 import threading
 import time
 
@@ -16,13 +16,9 @@ from local_agent.paths import default_data_root
 _WINDOWS_MUTEX = None
 
 
-def _platform_name() -> str:
-    return "Mac" if sys.platform == "darwin" else "Windows"
-
-
 def _acquire_single_instance() -> bool:
     global _WINDOWS_MUTEX
-    if sys.platform != "win32":
+    if os.name != "nt":
         return True
     import ctypes
 
@@ -59,7 +55,7 @@ def _pairing_dialog(
         root,
         text=(
             "在网页的“本地执行助手”面板生成配对码，然后填到这里。\n"
-            f"配对一次后会随{_platform_name()}登录自动连接，不再需要输入密码。"
+            "配对一次后会随 Windows 登录自动连接，不再需要输入密码。"
         ),
         justify="left",
         font=("Microsoft YaHei UI", 10),
@@ -265,6 +261,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run() -> None:
+    if os.name != "nt":
+        raise SystemExit("MPAU 本地执行助手仅支持 Windows")
     args = build_parser().parse_args()
     if not _acquire_single_instance():
         return

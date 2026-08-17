@@ -9,7 +9,15 @@ import UserManagementView from './features/users/UserManagementView.vue'
 
 const apiBase = import.meta.env.VITE_API_BASE_URL || ''
 const currentUser = ref(null)
-const agentSetupPlatform = ref('')
+const agentSetupOpen = ref(false)
+const agentStatus = reactive({
+  checked: false,
+  checking: false,
+  online: false,
+  deviceName: '',
+  system: '',
+  unavailable: false,
+})
 configureApiClient({ baseUrl: apiBase, onUnauthorized: endAuthenticatedSession })
 
 // === 发布草稿持久化（localStorage 文本 + IndexedDB 视频） ===
@@ -20,7 +28,7 @@ const DRAFT_VIDEO_MAX_BYTES = 100 * 1024 * 1024
 const MAX_COVER_IMAGE_BYTES = 20 * 1024 * 1024
 const creatorDeclarationOptions = [
   '内容无需标注',
-  '内容含营销广告',
+  '内容含营销信息',
   '含AI生成内容',
   '含虚构演绎内容',
   '内容为转载',
@@ -283,6 +291,8 @@ const activeView = ref('publish')
 const selectedJob = ref(null)
 const jobLogs = ref([])
 const videoInput = ref(null)
+const imageInput = ref(null)
+const imageFolderInput = ref(null)
 const coverImageInput = ref(null)
 const scheduleInput = ref(null)
 const batchWorkbookInput = ref(null)
@@ -302,8 +312,10 @@ const NOTICE_DISMISS_MS = 3000
 
 const form = reactive({
   platform: 'tmall',
+  contentType: 'video',
   account: '',
   video: null,
+  images: [],
   coverImage: null,
   title: '',
   description: '',
@@ -340,6 +352,7 @@ function applyPlatformDraft(platform) {
 
 const batchForm = reactive({
   platform: 'tmall',
+  contentType: 'video',
   account: '',
   workbook: null,
   dryRun: true,
@@ -347,10 +360,17 @@ const batchForm = reactive({
 })
 
 const isTmall = computed(() => form.platform === 'tmall')
+const isVideo = computed(() => form.contentType === 'video')
+const isArticle = computed(() => form.contentType === 'article')
 const isTmallBatch = computed(() => batchForm.platform === 'tmall')
+const isTmallArticleBatch = computed(() => isTmallBatch.value && batchForm.contentType === 'article')
 const isAdmin = computed(() => currentUser.value?.role === 'admin')
 const platformLabel = (platform) => (platform === 'tmall' ? '天猫光合' : '京东京麦')
 const batchPlatformLabel = computed(() => platformLabel(batchForm.platform))
+const batchContentTypeLabel = computed(() => batchForm.contentType === 'article' ? '图文' : '视频')
+const batchTemplateUrl = computed(() => apiUrl(
+  `/api/batch-templates-v2/${batchForm.platform}${batchForm.platform === 'tmall' ? `?content_type=${batchForm.contentType}` : ''}`,
+))
 const jobLabel = (kind) => ({ publish: '发布', login: '登录', check: '校验', delete_account: '删除本地账号' }[kind] || kind)
 const statusLabel = (status) => ({ queued: '排队中', running: '执行中', cancelling: '正在中断', cancelled: '已中断', succeeded: '已完成', failed: '失败', uncertain: '结果待核对' }[status] || status)
 const statusClass = (status) => `status status-${status}`
@@ -408,6 +428,18 @@ const jobsPageEnd = computed(() => Math.min(
 ))
 const hasPreviousJobs = computed(() => jobsOffset.value > 0)
 const hasMoreJobs = computed(() => jobsOffset.value + jobs.value.length < jobSummary.value.total)
+const agentStatusLabel = computed(() => {
+  if (!agentStatus.checked || agentStatus.checking) return '正在检查代理'
+  if (agentStatus.unavailable) return '代理状态未知'
+  if (!agentStatus.online) return '代理离线'
+  return agentStatus.deviceName ? `代理在线 · ${agentStatus.deviceName}` : '代理在线'
+})
+
+const agentStatusDescription = computed(() => {
+  if (agentStatus.unavailable) return '无法读取本地执行助手状态，请刷新后重试。'
+  if (!agentStatus.online) return '未检测到已配对的本地执行助手；登录和发布任务无法执行。'
+  return agentStatus.system || '本地执行助手已连接，可执行登录和发布任务。'
+})
 
 watch(() => form.platform, (platform, previousPlatform) => {
   if (isRestoringDraft.value) return
@@ -415,11 +447,25 @@ watch(() => form.platform, (platform, previousPlatform) => {
     snapshotPlatformDraft(previousPlatform)
     applyPlatformDraft(platform)
   }
+  if (platform === 'jd' && form.contentType === 'article') form.contentType = 'video'
+  publishError.value = ''
+  persistFormDraft()
+})
+
+watch(() => form.contentType, (contentType) => {
+  if (contentType === 'article') clearVideo()
+  else clearImages()
   publishError.value = ''
   persistFormDraft()
 })
 
 watch(() => batchForm.platform, () => {
+  if (batchForm.platform === 'jd') batchForm.contentType = 'video'
+  batchSubmitError.value = ''
+  clearBatchWorkbook()
+})
+
+watch(() => batchForm.contentType, () => {
   batchSubmitError.value = ''
   clearBatchWorkbook()
 })
@@ -455,6 +501,44 @@ function importAiCopyToWorkbench(draft) {
   activeView.value = 'publish'
 }
 
+function applyAgentStatus(result) {
+  const agent = Array.isArray(result?.agents) ? result.agents[0] : null
+  agentStatus.checked = true
+  agentStatus.checking = false
+  agentStatus.unavailable = false
+  agentStatus.online = Boolean(result?.online && agent)
+  agentStatus.deviceName = agent?.device_name || ''
+  agentStatus.system = agent?.system || ''
+}
+
+async function refreshAgentStatus() {
+  agentStatus.checking = true
+  try {
+    const result = await request('/api/agent/status')
+    applyAgentStatus(result)
+    return agentStatus.online
+  } catch {
+    agentStatus.checked = true
+    agentStatus.checking = false
+    agentStatus.online = false
+    agentStatus.deviceName = ''
+    agentStatus.system = ''
+    agentStatus.unavailable = true
+    return false
+  }
+}
+
+async function requireOnlineAgent(targetError = null) {
+  const online = await refreshAgentStatus()
+  if (online) return true
+  const message = agentStatus.unavailable
+    ? '无法确认本地执行助手状态，请刷新页面后重试。'
+    : '本地执行助手离线：请先启动并完成 Windows 助手配对。'
+  if (targetError) targetError.value = message
+  showNotice(message, 'error')
+  return false
+}
+
 async function refreshDashboard() {
   const userId = currentUser.value?.id
   if (!userId) return
@@ -462,9 +546,10 @@ async function refreshDashboard() {
   dashboardRefreshPromise = (async () => {
     try {
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const [jobsResult, accountsResult] = await Promise.all([
+        const [jobsResult, accountsResult, agentResult] = await Promise.all([
           request(`/api/jobs?limit=${jobsPageSize}&offset=${jobsOffset.value}`),
           request('/api/accounts'),
+          request('/api/agent/status').catch(() => null),
         ])
         if (currentUser.value?.id !== userId) return
         if (jobsResult.total > 0 && jobsOffset.value >= jobsResult.total) {
@@ -477,6 +562,15 @@ async function refreshDashboard() {
           statuses: jobsResult.status_counts || {},
         }
         accounts.value = accountsResult.accounts
+        if (agentResult) applyAgentStatus(agentResult)
+        else {
+          agentStatus.checked = true
+          agentStatus.checking = false
+          agentStatus.online = false
+          agentStatus.deviceName = ''
+          agentStatus.system = ''
+          agentStatus.unavailable = true
+        }
         syncJobSelection()
         if (selectedJob.value) await loadJob(selectedJob.value.id, false)
         break
@@ -621,6 +715,8 @@ async function onFileChange(event) {
 
 function onCoverImageChange(event) {
   const file = event.target.files?.[0] || null
+  // Selecting "Cancel" must not discard the previously selected cover.
+  if (!file) return
   form.coverImage = file
   publishError.value = ''
 }
@@ -632,6 +728,39 @@ function clearVideo() {
   draftRestoredVideoName.value = ''
 }
 
+function onImagesChange(event) {
+  form.images = Array.from(event.target.files || [])
+  if (imageFolderInput.value) imageFolderInput.value.value = ''
+  publishError.value = form.images.length > 9 ? '图片超过 9 张，请移除多余图片后重试' : ''
+}
+
+function onImageFolderChange(event) {
+  const images = Array.from(event.target.files || [])
+    .filter((file) => /\.(jpe?g|png|webp)$/i.test(file.name))
+    .sort((left, right) => left.name.localeCompare(right.name, 'zh-Hans-CN'))
+  form.images = images
+  if (imageInput.value) imageInput.value.value = ''
+  publishError.value = images.length > 9 ? '文件夹内图片超过 9 张，请移除多余图片后重试' : ''
+}
+
+function clearImages() {
+  form.images = []
+  if (imageInput.value) imageInput.value.value = ''
+  if (imageFolderInput.value) imageFolderInput.value.value = ''
+}
+
+function moveImage(index, direction) {
+  const target = index + direction
+  if (target < 0 || target >= form.images.length) return
+  const images = [...form.images]
+  ;[images[index], images[target]] = [images[target], images[index]]
+  form.images = images
+}
+
+function removeImage(index) {
+  form.images = form.images.filter((_, imageIndex) => imageIndex !== index)
+}
+
 function clearCoverImage() {
   form.coverImage = null
   if (coverImageInput.value) coverImageInput.value.value = ''
@@ -639,6 +768,7 @@ function clearCoverImage() {
 
 function clearPublishContent() {
   clearVideo()
+  clearImages()
   clearCoverImage()
   for (const platform of ['tmall', 'jd']) {
     Object.assign(platformDrafts[platform], createEmptyPlatformDraft())
@@ -686,8 +816,17 @@ async function submitPublish() {
     publishError.value = '请先选择或填写店铺账号标识'
     return
   }
-  if (!form.video) {
+  if (!await requireOnlineAgent(publishError)) return
+  if (isVideo.value && !form.video) {
     publishError.value = '请先重新选择一个视频文件'
+    return
+  }
+  if (isArticle.value && (!form.images.length || form.images.length > 9)) {
+    publishError.value = '天猫图文必须选择 1-9 张图片'
+    return
+  }
+  if (isArticle.value && form.images.some((image) => !/\.(jpe?g|png|webp)$/i.test(image.name))) {
+    publishError.value = '图文图片仅支持 JPG、PNG 或 WebP 格式'
     return
   }
   if (isTmall.value && form.coverImage && form.coverImage.size > MAX_COVER_IMAGE_BYTES) {
@@ -726,8 +865,10 @@ async function submitPublish() {
   const data = new FormData()
   data.append('platform', form.platform)
   data.append('account', form.account)
-  data.append('video', form.video)
-  if (isTmall.value && form.coverImage) data.append('cover_image', form.coverImage)
+  data.append('content_type', form.contentType)
+  if (isVideo.value) data.append('video', form.video)
+  else form.images.forEach((image) => data.append('images', image))
+  if (isTmall.value && isVideo.value && form.coverImage) data.append('cover_image', form.coverImage)
   data.append('title', form.title)
   data.append('description', isTmall.value ? form.description : '')
   data.append('tags', isTmall.value ? form.tags : '')
@@ -763,6 +904,7 @@ async function submitBatch() {
     batchSubmitError.value = `请先重新选择${batchPlatformLabel.value}批量发布 Excel 文件`
     return
   }
+  if (!await requireOnlineAgent(batchSubmitError)) return
 
   batchSubmitting.value = true
   batchErrors.value = []
@@ -770,6 +912,7 @@ async function submitBatch() {
   const data = new FormData()
   data.append('account', batchForm.account)
   data.append('workbook', batchForm.workbook)
+  data.append('content_type', batchForm.contentType)
   data.append('dry_run', String(batchForm.dryRun))
   data.append('headed', String(batchForm.headed))
 
@@ -793,6 +936,7 @@ async function accountAction(action, platform = form.platform, account = form.ac
     showNotice('请先填写店铺账号标识', 'error')
     return
   }
+  if (!await requireOnlineAgent()) return
   try {
     const query = action === 'login' ? '?headed=true' : ''
     const result = await request(`/api/accounts/${platform}/${encodeURIComponent(account)}/${action}${query}`, { method: 'POST' })
@@ -811,8 +955,10 @@ function resetUserInterface() {
   isRestoringDraft.value = true
   Object.assign(form, {
     platform: 'tmall',
+    contentType: 'video',
     account: '',
     video: null,
+    images: [],
     coverImage: null,
     title: '',
     description: '',
@@ -844,6 +990,12 @@ function resetUserInterface() {
   jobLogs.value = []
   batchErrors.value = []
   batchResult.value = null
+  agentStatus.checked = false
+  agentStatus.checking = false
+  agentStatus.online = false
+  agentStatus.deviceName = ''
+  agentStatus.system = ''
+  agentStatus.unavailable = false
   draftRestoredVideoName.value = ''
   draftRestoredAt.value = ''
   dashboardRefreshPromise = null
@@ -896,9 +1048,8 @@ onBeforeUnmount(() => {
   <AuthGate v-if="!currentUser" @authenticated="beginAuthenticatedSession" />
   <main v-else class="shell">
     <AgentSetupDialog
-      v-if="agentSetupPlatform"
-      :platform="agentSetupPlatform"
-      @close="agentSetupPlatform = ''"
+      v-if="agentSetupOpen"
+      @close="agentSetupOpen = false"
     />
     <aside class="rail">
       <div class="brand">
@@ -948,8 +1099,16 @@ onBeforeUnmount(() => {
         </div>
         <div class="session-actions">
           <span><strong>{{ currentUser.display_name }}</strong><small>{{ currentUser.username }} · {{ currentUser.role }}</small></span>
-          <button class="refresh agent-windows" type="button" @click="agentSetupPlatform = 'windows'">Windows 助手</button>
-          <button class="refresh agent-macos" type="button" @click="agentSetupPlatform = 'macos'">Mac 助手</button>
+          <button
+            class="agent-connection-status"
+            :class="{ online: agentStatus.online, offline: !agentStatus.online && agentStatus.checked && !agentStatus.unavailable, unknown: agentStatus.unavailable || !agentStatus.checked }"
+            :title="agentStatusDescription"
+            type="button"
+            @click="refreshAgentStatus"
+          >
+            <i aria-hidden="true"></i>{{ agentStatusLabel }}
+          </button>
+          <button class="refresh agent-windows" type="button" @click="agentSetupOpen = true">Windows 助手</button>
           <button v-if="!['ai-copy', 'llm-adapter', 'users'].includes(activeView)" class="refresh" @click="refreshDashboard">刷新状态</button>
           <button class="refresh logout" type="button" @click="logout">退出</button>
         </div>
@@ -965,12 +1124,17 @@ onBeforeUnmount(() => {
 
       <section v-else-if="activeView === 'publish'" class="publish-layout">
         <form class="editor-card" novalidate @submit.prevent="submitPublish">
-          <div class="section-heading"><span>01</span><div><h2>选择平台与店铺</h2><p>同一平台同一店铺会自动串行执行，避免 Cookie 状态冲突。</p></div></div>
+          <div class="section-heading"><span>01</span><div><h2>选择平台、内容与店铺</h2><p>同一平台同一店铺会自动串行执行，避免 Cookie 状态冲突。</p></div></div>
           <div class="platform-choice">
-            <label :class="{ selected: form.platform === 'tmall' }"><input v-model="form.platform" type="radio" value="tmall" /><span>天猫光合</span><small>视频、文案、标签、活动话题、音乐</small></label>
+            <label :class="{ selected: form.platform === 'tmall' }"><input v-model="form.platform" type="radio" value="tmall" /><span>天猫光合</span><small>支持视频与图文</small></label>
             <label :class="{ selected: form.platform === 'jd' }"><input v-model="form.platform" type="radio" value="jd" /><span>京东京麦</span><small>视频、标题、商品、原创声明</small></label>
           </div>
-          <p v-if="isTmall" class="workflow-tip"><strong>天猫实际步骤：</strong>上传视频 → 可选设置自定义封面 → 填写标题、文案和标签 → 参与话题 → 可选添加音乐 → 关联商品 → 设置定时 → 选择创作者声明 → 提交发布。</p>
+          <div class="platform-choice content-type-choice">
+            <label :class="{ selected: form.contentType === 'video' }"><input v-model="form.contentType" type="radio" value="video" /><span>视频</span><small>单视频，可选自定义封面</small></label>
+            <label :class="{ selected: form.contentType === 'article', disabled: !isTmall }"><input v-model="form.contentType" type="radio" value="article" :disabled="!isTmall" /><span>图文</span><small>{{ isTmall ? '1-9 张图片，按选择顺序发布' : '京东图文即将支持' }}</small></label>
+          </div>
+          <p v-if="isTmall && isVideo" class="workflow-tip"><strong>天猫视频步骤：</strong>上传视频 → 可选设置自定义封面 → 填写标题、文案和标签 → 参与话题 → 可选添加音乐 → 关联商品 → 设置定时 → 选择创作者声明 → 提交发布。</p>
+          <p v-else-if="isTmall" class="workflow-tip"><strong>天猫图文步骤：</strong>按顺序上传 1-9 张图片 → 填写标题、文案和标签 → 参与话题 → 可选添加音乐 → 关联商品 → 设置定时 → 选择创作者声明 → 提交发布。</p>
           <p v-else class="workflow-tip"><strong>京东实际步骤：</strong>上传视频 → 填写标题 → 关联商品 → 选择创作声明与自主原创 → 设置定时 → 提交发布；出现验证码时需要在 Edge 中手动完成验证。</p>
 
           <div class="field-row">
@@ -980,18 +1144,31 @@ onBeforeUnmount(() => {
 
           <div class="section-heading section-heading-with-action">
             <span>02</span>
-            <div><h2>内容素材</h2><p>视频会先存入本机运行目录，再由浏览器上传到平台。</p></div>
+            <div><h2>内容素材</h2><p>{{ isArticle ? '图片会按当前选择顺序暂存，再由浏览器批量上传到天猫。' : '视频会先存入本机运行目录，再由浏览器上传到平台。' }}</p></div>
             <button type="button" class="quiet danger section-heading-action" @click="clearPublishDraft">一键清空发布配置与素材</button>
           </div>
-          <div class="dropzone">
+          <div v-if="isVideo" class="dropzone">
             <input id="video-file" ref="videoInput" type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/x-m4v,video/x-msvideo,video/webm,.m4v,.avi" @change="onFileChange" />
             <label for="video-file"><strong>{{ form.video ? form.video.name : '选择视频文件' }}</strong><small>{{ form.video ? `${(form.video.size / 1024 / 1024).toFixed(1)} MB` : '支持 MP4、MOV、MKV、M4V、AVI、WebM' }}</small></label>
             <button v-if="form.video" class="clear-file" type="button" @click="clearVideo">移除视频</button>
           </div>
-          <div v-if="isTmall" class="field cover-image-field">
+          <div v-else class="field image-upload-field">
+            <span>图文图片 <em>必选，1-9 张</em></span>
+            <input id="article-image-files" ref="imageInput" class="native-file-input" type="file" multiple accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" @change="onImagesChange" />
+            <label class="cover-file-picker" :class="{ selected: form.images.length }" for="article-image-files"><span class="cover-file-action">{{ form.images.length ? '重新选择图片' : '选择图片文件' }}</span><span class="cover-file-name">{{ form.images.length ? `已选择 ${form.images.length} 张图片` : '按选择顺序上传，最多 9 张' }}</span></label>
+            <input id="article-image-folder" ref="imageFolderInput" class="native-file-input" type="file" multiple webkitdirectory directory @change="onImageFolderChange" />
+            <label class="cover-file-picker" for="article-image-folder"><span class="cover-file-action">选择图片文件夹</span><span class="cover-file-name">读取文件夹第一层图片，并按文件名顺序发布</span></label>
+            <ol v-if="form.images.length" class="image-file-list"><li v-for="(image, index) in form.images" :key="`${image.name}-${image.lastModified}-${index}`"><b>{{ index + 1 }}</b><span>{{ image.name }}</span><small>{{ (image.size / 1024 / 1024).toFixed(1) }} MB</small><div class="image-file-actions"><button type="button" :disabled="index === 0" @click="moveImage(index, -1)">上移</button><button type="button" :disabled="index === form.images.length - 1" @click="moveImage(index, 1)">下移</button><button type="button" @click="removeImage(index)">移除</button></div></li></ol>
+            <button v-if="form.images.length" class="clear-file" type="button" @click="clearImages">清空图文素材</button>
+          </div>
+          <div v-if="isTmall && isVideo" class="field cover-image-field">
             <span>自定义封面图片 <em>可选</em></span>
-            <input ref="coverImageInput" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" @change="onCoverImageChange" />
-            <small v-if="form.coverImage">{{ form.coverImage.name }} · {{ (form.coverImage.size / 1024 / 1024).toFixed(1) }} MB</small>
+            <input id="cover-image-file" ref="coverImageInput" class="native-file-input" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" @change="onCoverImageChange" />
+            <label class="cover-file-picker" :class="{ selected: form.coverImage }" for="cover-image-file">
+              <span class="cover-file-action">{{ form.coverImage ? '更换封面' : '选择封面图片' }}</span>
+              <span class="cover-file-name">{{ form.coverImage ? form.coverImage.name : '尚未选择封面图片' }}</span>
+            </label>
+            <small v-if="form.coverImage" class="cover-file-selected">已选择封面 · {{ form.coverImage.name }} · {{ (form.coverImage.size / 1024 / 1024).toFixed(1) }} MB</small>
             <small v-else class="field-hint">上传后会在视频上传完成时自动打开“编辑封面”，选择本地上传的图片；支持 JPG、PNG、WebP，最大 20 MiB，图片宽高均需至少 720 像素。未上传则跳过封面编辑。</small>
             <button v-if="form.coverImage" class="clear-file" type="button" @click="clearCoverImage">移除封面</button>
           </div>
@@ -1045,25 +1222,30 @@ onBeforeUnmount(() => {
         <form class="editor-card batch-card" novalidate @submit.prevent="submitBatch">
           <div class="section-heading"><span>01</span><div><h2>选择平台与店铺</h2><p>Excel 中不需要重复填写平台和店铺；切换平台后请使用对应的模板。</p></div></div>
           <div class="platform-choice batch-platform-choice">
-            <label :class="{ selected: batchForm.platform === 'tmall' }"><input v-model="batchForm.platform" type="radio" value="tmall" /><span>天猫光合</span><small>视频、标题、文案、标签、话题、音乐、商品</small></label>
+            <label :class="{ selected: batchForm.platform === 'tmall' }"><input v-model="batchForm.platform" type="radio" value="tmall" /><span>天猫光合</span><small>支持视频与图文，含标题、文案、标签、话题、音乐、商品</small></label>
             <label :class="{ selected: batchForm.platform === 'jd' }"><input v-model="batchForm.platform" type="radio" value="jd" /><span>京东京麦</span><small>视频、标题、商品、定时发布、自主原创</small></label>
+          </div>
+          <div v-if="isTmallBatch" class="content-choice batch-content-choice">
+            <label :class="{ selected: batchForm.contentType === 'video' }"><input v-model="batchForm.contentType" type="radio" value="video" /><span>视频发布</span><small>支持视频绝对路径与可选自定义封面路径</small></label>
+            <label :class="{ selected: batchForm.contentType === 'article' }"><input v-model="batchForm.contentType" type="radio" value="article" /><span>图文发布</span><small>每行填写一个图片文件夹，自动识别其中图片</small></label>
           </div>
           <div class="field-row">
             <label class="field"><span>店铺账号标识</span><input v-model="batchForm.account" list="batch-account-list" required placeholder="例如 shop1" /><datalist id="batch-account-list"><option v-for="item in batchAccounts" :key="`${batchForm.platform}-batch-${item.account}`" :value="item.account" /></datalist></label>
             <div class="account-actions"><span>账号状态</span><div><button type="button" class="quiet" @click="accountAction('check', batchForm.platform, batchForm.account)">校验 Cookie</button><button type="button" class="quiet" @click="accountAction('login', batchForm.platform, batchForm.account)">登录 / 重新登录</button><button type="button" class="quiet" @click="deleteAccount(batchForm.platform, batchForm.account)">删除账号</button></div></div>
           </div>
 
-          <div class="section-heading"><span>02</span><div><h2>导入{{ batchPlatformLabel }}内容表</h2><p>每个非空行都会生成一条任务；所有行先通过校验，才会一次性进入队列。</p></div></div>
+          <div class="section-heading"><span>02</span><div><h2>导入{{ batchPlatformLabel }}{{ batchContentTypeLabel }}内容表</h2><p>每个非空行都会生成一条任务；所有行先通过校验，才会一次性进入队列。</p></div></div>
           <div class="batch-guide">
-            <div><strong>Excel 列</strong><span>{{ isTmallBatch ? '视频路径、标题、文案、标签、商品ID、活动话题、音乐名称、定时发布、创作者声明' : '视频路径、标题、商品ID、定时发布、自主原创、创作者声明' }}</span></div>
-            <div><strong>视频路径</strong><span>仅填写本机视频文件的绝对路径（如 <code>/Users/your-name/Videos/video.mp4</code>）。</span></div>
+            <div><strong>Excel 列</strong><span>{{ isTmallArticleBatch ? '图片文件夹路径、标题、发布文案、标签、商品ID、活动话题、音乐名称、定时发布、创作者声明' : isTmallBatch ? '视频路径、自定义封面、标题、文案、标签、商品ID、活动话题、音乐名称、定时发布、创作者声明' : '视频路径、标题、商品ID、定时发布、自主原创、创作者声明' }}</span></div>
+            <div v-if="isTmallArticleBatch"><strong>图片文件夹路径</strong><span>填写本机图片文件夹的绝对路径；系统会识别该文件夹内全部 JPG、PNG 和 WebP 图片，并按文件名升序发布（最多 9 张）。</span></div>
+            <div v-else><strong>视频路径</strong><span>仅填写本机视频文件的绝对路径（如 <code>/Users/your-name/Videos/video.mp4</code>）。</span></div>
             <div v-if="isTmallBatch"><strong>天猫规则</strong><span>标题最多 30 字；标签最多 4 个；文案最多 1000 字；商品 ID 最多 6 个，以逗号或空格分隔；音乐名称可选，最多 100 字。</span></div>
             <div v-else><strong>京东规则</strong><span>标题为 5-27 字；“自主原创”填写“是”或“否”；当前上传器不支持文案、标签和活动话题。</span></div>
-            <a class="template-link" :href="apiUrl(`/api/batch-templates-v2/${batchForm.platform}`)">下载{{ batchPlatformLabel }} Excel 模板</a>
+            <a class="template-link" :href="batchTemplateUrl">下载{{ batchPlatformLabel }}{{ batchContentTypeLabel }} Excel 模板</a>
           </div>
           <div class="dropzone batch-dropzone">
             <input id="batch-workbook" ref="batchWorkbookInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" @change="onBatchWorkbookChange" />
-            <label for="batch-workbook"><strong>{{ batchForm.workbook ? batchForm.workbook.name : `选择${batchPlatformLabel}批量发布 Excel` }}</strong><small>{{ batchForm.workbook ? `${(batchForm.workbook.size / 1024).toFixed(0)} KB` : '仅支持 .xlsx；包含“视频路径”和“标题”表头，单次最多 200 行' }}</small></label>
+            <label for="batch-workbook"><strong>{{ batchForm.workbook ? batchForm.workbook.name : `选择${batchPlatformLabel}${batchContentTypeLabel}批量发布 Excel` }}</strong><small>{{ batchForm.workbook ? `${(batchForm.workbook.size / 1024).toFixed(0)} KB` : `仅支持 .xlsx；包含“${isTmallArticleBatch ? '图片文件夹路径' : '视频路径'}”和“标题”表头，单次最多 200 行` }}</small></label>
             <button v-if="batchForm.workbook" class="clear-file" type="button" @click="clearBatchWorkbook">移除表格</button>
           </div>
           <div v-if="batchErrors.length" class="batch-errors"><strong>以下内容未通过校验，未创建任何任务：</strong><p v-for="error in batchErrors" :key="`${error.row}-${error.field}-${error.message}`">第 {{ error.row }} 行 · {{ error.field }}：{{ error.message }}</p></div>

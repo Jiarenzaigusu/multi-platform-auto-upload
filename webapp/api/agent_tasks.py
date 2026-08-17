@@ -138,7 +138,7 @@ class AgentTaskManager:
 
     def submit_publish_tasks(
         self,
-        requests: list[tuple[PublishRequest, int | None]],
+        requests: list[tuple[PublishRequest, int | None] | tuple[PublishRequest, int | None, Path | None]],
         *,
         batch_id: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -146,9 +146,16 @@ class AgentTaskManager:
             return []
         self.start()
         definitions: list[dict[str, Any]] = []
-        for request, source_row in requests:
+        for item in requests:
+            request, source_row, image_folder_path = (
+                (*item, None) if len(item) == 2 else item
+            )
             payload = asdict(request)
-            payload["video_path"] = str(request.video_path)
+            payload["video_path"] = str(request.video_path) if request.video_path else None
+            payload["image_paths"] = [str(path) for path in request.image_paths]
+            payload["image_folder_path"] = (
+                str(image_folder_path) if image_folder_path else None
+            )
             payload["cover_image_path"] = (
                 str(request.cover_image_path) if request.cover_image_path else None
             )
@@ -515,12 +522,17 @@ class AgentTaskManager:
         payload = job.get("payload") or {}
         if not payload.get("managed_upload"):
             return
-        video_path = Path(payload["video_path"]).resolve()
-        parent = video_path.parent
+        source_path = payload.get("video_path") or next(
+            iter(payload.get("image_paths") or []), None
+        )
+        if not source_path:
+            raise ValueError("任务没有受管上传素材")
+        media_path = Path(source_path).resolve()
+        parent = media_path.parent
         if (
             parent.parent != self.managed_upload_root
             or not _UPLOAD_DIRECTORY_PATTERN.fullmatch(parent.name)
-            or not video_path.is_relative_to(self.managed_upload_root)
+            or not media_path.is_relative_to(self.managed_upload_root)
         ):
             raise ValueError("任务中的临时视频路径不属于受管上传目录")
         if parent.exists():
@@ -534,12 +546,14 @@ class AgentTaskManager:
 
     def _cleanup_orphaned_uploads(self, jobs: list[dict[str, Any]]) -> None:
         self.managed_upload_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        referenced = {
-            Path(job["payload"]["video_path"]).resolve().parent
-            for job in jobs
-            if job.get("payload", {}).get("managed_upload")
-            and job.get("payload", {}).get("video_path")
-        }
+        referenced = set()
+        for job in jobs:
+            payload = job.get("payload") or {}
+            source_path = payload.get("video_path") or next(
+                iter(payload.get("image_paths") or []), None
+            )
+            if payload.get("managed_upload") and source_path:
+                referenced.add(Path(source_path).resolve().parent)
         for child in self.managed_upload_root.iterdir():
             if (
                 child.is_dir()

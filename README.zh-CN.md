@@ -66,7 +66,7 @@ mpau-web
 .\deploy\windows\build-mpau-agent.ps1
 ```
 
-生成的 `deploy\windows\output\MPAU-Agent-Setup.exe` 放到云服务器默认路径，或通过 `MPAU_AGENT_INSTALLER_PATH` 指定。Apple Silicon Mac 可在 macOS 上执行 `./deploy/macos/build-mpau-agent.sh`，生成 `deploy/macos/output/MPAU-Agent-macOS-arm64.dmg`，并通过 `MPAU_MAC_AGENT_INSTALLER_PATH` 指定网页下载路径。用户登录网页后下载并安装一次，在网页生成配对码并输入助手窗口。Windows 使用 DPAPI、macOS 使用 Keychain 保存设备令牌，助手会随各自系统的当前用户登录自动启动，不保存应用密码。
+生成的 `deploy\windows\output\MPAU-Agent-Setup.exe` 放到云服务器默认路径，或通过 `MPAU_AGENT_INSTALLER_PATH` 指定。用户登录网页后下载并安装一次，在网页生成配对码并输入 Windows 助手窗口。Windows 助手使用 DPAPI 保存设备令牌，并随当前 Windows 用户登录自动启动，不保存应用密码。
 
 以后用户只打开云服务器域名；普通功能全部由云端响应，只有平台登录、Cookie 校验和发布任务会自动在用户电脑打开 Edge。Cookie、浏览器会话和平台日志默认保存在 `%LOCALAPPDATA%\MPAU-Agent\users\<user_uuid>\`。
 
@@ -152,11 +152,11 @@ $env:MPAU_MAX_MEDIA_TOTAL_BYTES = "107374182400"
 │  └─ auth.db                    # 用户、Session 和安全审计
 └─ users/<user_uuid>/
    ├─ runtime/                   # state.json 与任务管理器锁
-   ├─ cookies/{tmall,jd}/        # 旧版本兼容；本地代理模式不写新 Cookie
+   ├─ cookies/{tmall,jd}/        # 本地执行工作区的账号 Cookie 目录
    ├─ uploads/                   # 单条发布临时副本，终态自动清理
    ├─ media/                     # 用户上传的批量视频素材
    ├─ job-logs/                  # 每任务独立日志
-   ├─ platform-logs/             # 旧版兼容；本地代理模式不写新平台日志
+   ├─ platform-logs/             # 平台级回退日志
    └─ secrets/                   # 用户自己的 LLM 凭据
 ```
 

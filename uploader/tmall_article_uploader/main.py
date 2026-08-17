@@ -1,29 +1,16 @@
 # -*- coding: utf-8 -*-
-"""
-uploader.tmall_uploader.main 模块
+"""淘宝光合图文发布器。
 
-淘宝光合平台（creator.guanghe.taobao.com）视频发布器核心实现。
-
-主要功能：
-1. Cookie 校验：访问光合首页判断是否仍处于登录态
-2. 手动登录：打开可见浏览器，等待用户完成扫码/密码/短信等验证后保存 storage_state
-3. 视频发布：上传视频 → 设置封面 → 填写标题/描述/话题 → 参与活动 → 添加音乐 →
-            关联商品 → 设置定时/立即发布 → 选择创作者声明 → 点击发布按钮 → 等待确认
-
-注意事项：
-- 不绕过任何平台安全验证，验证码需人工完成
-- 图片库、裁剪层、花字层以独立 frame 呈现；所有操作都按其可见控件定位
-- 发布结果可能"不确定"（按钮已点但 30 秒内无明确信号），
-  此时会抛出 PublishResultUncertainError，由任务管理器标记为 uncertain 状态
+图文发布拥有独立的认证、字段校验、表单填写、图片上传和确认发布流程。
+它只复用天猫账号的浏览器会话池，不依赖视频发布模块或视频业务基类。
 """
 from __future__ import annotations
 
 import asyncio
 import inspect
-from io import BytesIO
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -34,324 +21,119 @@ from patchright.async_api import (
 )
 
 from uploader.errors import PublishResultUncertainError
+from uploader.tmall_session import TmallBrowserSession
 from utils.config import DEBUG_MODE
-from uploader.base_video import BaseVideoUploader
-from uploader.tmall_uploader.session import TmallBrowserSession
 from utils.log import tmall_logger
 
-
-# 淘宝光合创作者中心首页 URL，用于 Cookie 校验与登录入口
 TMALL_CREATOR_HOME_URL = "https://creator.guanghe.taobao.com/page/"
-# 淘宝光合视频发布页 URL，发布任务在此页面执行
-TMALL_VIDEO_PUBLISH_URL = "https://creator.guanghe.taobao.com/page/pubNew/video?pub_url=https%3A%2F%2Fhuodong.taobao.com%2Fwow%2Fz%2Fguang%2Fgg_publish%2Fgg-video%3Fugc_scene%3Dpc_newcreator_video%26pageType%3Dvideo%26site%3Dguangguang&pub_scene=gg"
-# 登录成功后的目标 host，URL 命中此 host 表示已进入光合后台
+TMALL_ARTICLE_PUBLISH_URL = (
+    "https://creator.guanghe.taobao.com/page/pubNew/pic?"
+    "pub_url=https%3A%2F%2Fhuodong.taobao.com%2Fwow%2Fz%2Fguang%2F"
+    "gg_publish%2Fgg-picture%3Fugc_scene%3Dpc_newcreator_pic%26"
+    "pageType%3Darticle%26site%3Dguangguang&pub_scene=gg"
+)
 TMALL_LOGIN_SUCCESS_HOST = "creator.guanghe.taobao.com"
-# 登录/鉴权相关 host，命中表示用户正在登录中（中间态）
 TMALL_AUTH_HOSTS = {"passport.taobao.com"}
-# 发布策略常量
 TMALL_PUBLISH_STRATEGY_IMMEDIATE = "immediate"
 TMALL_PUBLISH_STRATEGY_SCHEDULED = "scheduled"
-# 天猫一次最多关联的商品 ID 数量
 TMALL_MAX_GOODS_IDS = 6
-# 天猫自定义封面支持的图片格式
-TMALL_COVER_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
-# 天猫自定义封面最大字节数（20 MiB）
-TMALL_MAX_COVER_IMAGE_BYTES = 20 * 1024 * 1024
-# 商品搜索结果为空时平台给出的提示文案（用于判定"无结果"而非"还在加载"）
+TMALL_MAX_ARTICLE_IMAGES = 9
+TMALL_ARTICLE_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+TMALL_MAX_ARTICLE_IMAGE_BYTES = 20 * 1024 * 1024
 TMALL_EMPTY_PRODUCT_RESULT_HINTS = (
-    "暂无数据",
-    "没有找到",
-    "没有搜到",
-    "暂无商品",
-    "无结果",
-    "暂无结果",
+    "暂无数据", "没有找到", "没有搜到", "暂无商品", "无结果", "暂无结果",
 )
 
 
 class TmallAuthenticationError(RuntimeError):
-    """天猫 Cookie 已失效异常。
-
-    当发布或校验流程中发现页面被重定向到登录页/鉴权页时抛出，
-    上层会捕获此异常并将会话标记为未认证。
-    """
-    pass
+    """Raised when the shared Tmall browser session is no longer authenticated."""
 
 
 def _msg(emoji: str, text: str) -> str:
-    """统一日志格式：emoji + 文本。"""
     return f"{emoji} {text}"
 
 
-async def _click_visible_frame_button(
+def _article_image_count_has_updated(body_text: str, expected_images: int) -> bool:
+    """兼容图片计数旧版“(N/9)”和新版轮播“1/N”两种显示格式。"""
+    return f"({expected_images}/9)" in body_text or bool(
+        re.search(rf"(?<!\d)1\s*/\s*{expected_images}(?!\d)", body_text)
+    )
+
+
+async def _click_visible_article_frame_button(
     frames: tuple,
     names: tuple[str, ...],
     *,
     description: str,
-    timeout_seconds: int = 15,
-    top_overlay_only: bool = False,
+    timeout_seconds: int = 30,
 ) -> None:
-    """点击任一 frame 中当前可见的指定按钮，避免依赖浮层坐标。
+    """点击图文图片库当前可见的指定按钮。
 
-    光合的图片库、裁剪和花字模块会动态新建 iframe，且按钮的 class 会随版本
-    变化。调用方传入当前步骤所属的精确 frame，防止点击到已隐藏图库或底层表单中
-    的同名按钮；按可访问名称定位比固定视口坐标更能适应缩放与页面布局变化。
+    图文图片库是嵌套 iframe，且按钮文字 span 会覆盖 button 的命中区域。
+    这里先按可见、可用和文案精确确认目标，再用 force 点击该已确认的实际按钮，
+    避免依赖随页面缩放变化的坐标。
     """
     for _ in range(timeout_seconds * 2):
         for candidate in frames:
-            scope = candidate
-            if top_overlay_only:
-                opened = candidate.locator(".next-overlay-wrapper.opened")
-                if await opened.count() == 0:
-                    continue
-                scope = opened.last
-            buttons = scope.locator('button, [role="button"], a')
+            buttons = candidate.locator('button, [role="button"], a')
             for index in range(await buttons.count()):
                 button = buttons.nth(index)
-                if not await button.is_visible() or not await button.is_enabled():
+                if not await button.is_visible():
                     continue
                 actual_name = (await button.inner_text()).strip()
                 if not actual_name:
                     actual_name = (await button.get_attribute("aria-label") or "").strip()
-                # 图库确认会显示“确定（1）”，括号数字是已选素材数，不属于操作名称。
-                normalized_name = re.sub(r"（\d+）$", "", actual_name).strip()
-                if normalized_name in names:
-                    await button.click()
+                normalized_name = re.sub(r"\s+", "", actual_name)
+                normalized_name = re.sub(r"[（(]\d+[）)]$", "", normalized_name).strip()
+                if normalized_name in names and await button.is_enabled():
+                    await button.click(force=True)
                     return
         await asyncio.sleep(0.5)
-    # 平台改版时保留可见操作文案，便于只调整语义名称，不需要恢复坐标点击。
+    expected = "、".join(f"“{name}”" for name in names)
     visible_actions: list[str] = []
     for candidate in frames:
-        try:
-            scope = candidate
-            if top_overlay_only:
-                opened = candidate.locator(".next-overlay-wrapper.opened")
-                if await opened.count() == 0:
-                    continue
-                scope = opened.last
-            actions = await scope.evaluate(
-                """() => [...document.querySelectorAll('button, [role="button"], a')]
-                    .filter(element => {
-                        const style = getComputedStyle(element);
-                        const rect = element.getBoundingClientRect();
-                        return style.display !== 'none' && style.visibility !== 'hidden'
-                            && rect.width > 0 && rect.height > 0;
-                    })
-                    .map(element => (element.innerText || element.getAttribute('aria-label') || '')
-                        .trim().replace(/\\s+/g, ' '))
-                    .filter(Boolean).slice(0, 30)"""
-            )
-            if actions:
-                visible_actions.extend(actions)
-        except Exception:
-            continue
-    expected = "、".join(f"“{name}”" for name in names)
-    available = "、".join(dict.fromkeys(visible_actions)) or "无可访问操作文案"
+        actions = candidate.locator('button, [role="button"], a')
+        for index in range(await actions.count()):
+            action = actions.nth(index)
+            if not await action.is_visible():
+                continue
+            action_name = (await action.inner_text()).strip()
+            if not action_name:
+                action_name = (await action.get_attribute("aria-label") or "").strip()
+            if action_name:
+                visible_actions.append(
+                    f"{re.sub(r'\s+', '', action_name)}（{'可用' if await action.is_enabled() else '禁用'}）"
+                )
+    available = "、".join(dict.fromkeys(visible_actions)) or "无可见操作"
     raise RuntimeError(
-        f"未找到可点击的{description}按钮（期望 {expected}；当前可见操作：{available}）"
+        f"未找到可点击的天猫图文{description}按钮（期望 {expected}；当前 {available}）"
     )
 
 
-def _is_cover_card_gray(red: int, green: int, blue: int) -> bool:
-    """返回截图中光合未选中比例卡片的背景色是否命中。"""
-    return max(red, green, blue) - min(red, green, blue) <= 4 and 207 <= red <= 225
-
-
-def _is_tmall_orange(red: int, green: int, blue: int) -> bool:
-    """返回截图中光合主操作按钮、选中边框的橙色是否命中。"""
-    return red >= 225 and 35 <= green <= 145 and blue <= 95 and red - green >= 105
-
-
-def _find_cover_ratio_cards(screenshot: bytes) -> tuple[tuple[float, float, float, float], ...] | None:
-    """从临时内存页面图像中找到“原始 / 3:4 / 1:1”三个比例卡片。
-
-    这层由平台渲染在 Patchright 不能访问的页面层中，不能通过 DOM 文本定位。
-    这里仅识别三张并排、同尺寸的灰色卡片，不使用固定的屏幕坐标；页面缩放、
-    窗口大小或弹窗位置变化时，点击位置会随图像重新计算。
-    """
-    try:
-        from PIL import Image
-    except ImportError as exc:  # pragma: no cover - dependency is declared in pyproject.toml
-        raise RuntimeError("缺少 Pillow，无法识别天猫封面比例卡片") from exc
-
-    image = Image.open(BytesIO(screenshot)).convert("RGB")
-    width, height = image.size
-    min_card_width = max(24, width // 45)
-    candidates: list[tuple[int, tuple[tuple[int, int], ...]]] = []
-
-    # 比例卡片位于弹窗内容区，排除顶部导航与底部按钮区域可降低误判概率。
-    for y in range(height // 4, height * 4 // 5, max(1, height // 700)):
-        runs: list[tuple[int, int]] = []
-        start = None
-        for x in range(width):
-            if _is_cover_card_gray(*image.getpixel((x, y))):
-                if start is None:
-                    start = x
-            elif start is not None:
-                if x - start >= min_card_width:
-                    runs.append((start, x - 1))
-                start = None
-        if start is not None and width - start >= min_card_width:
-            runs.append((start, width - 1))
-
-        for index in range(len(runs) - 2):
-            group = tuple(runs[index:index + 3])
-            card_widths = [end - start + 1 for start, end in group]
-            average_width = sum(card_widths) / 3
-            gaps = [group[item + 1][0] - group[item][1] - 1 for item in range(2)]
-            # 真实卡片是三个近似等宽、间隔适中的相邻矩形；同时限制在中右侧
-            # 以避免把封面预览、页面侧边栏等灰色区域识别为比例设置。
-            if (
-                min(card_widths) >= average_width * 0.75
-                and max(card_widths) <= average_width * 1.3
-                and all(average_width * 0.15 <= gap <= average_width * 1.5 for gap in gaps)
-                and group[0][0] >= width * 0.3
-                and group[-1][1] <= width * 0.93
-            ):
-                candidates.append((y, group))
-
-    if not candidates:
-        return None
-
-    # 同一组卡片会在许多相邻扫描行重复命中。选出横向总宽度最大的完整三卡组，
-    # 可避开文字和图标把卡片背景切成小段的扫描行，再用所有同组行的中位数确定
-    # 纵向点击位置，确保落在实心区域而不是边框上。
-    candidate_y, candidate_runs = max(
-        candidates,
-        key=lambda item: sum(end - start + 1 for start, end in item[1]),
-    )
-    same_runs_y = sorted(
-        y
-        for y, runs in candidates
-        if all(
-            abs(runs[index][0] - candidate_runs[index][0]) <= 2
-            and abs(runs[index][1] - candidate_runs[index][1]) <= 2
-            for index in range(3)
-        )
-    )
-    if same_runs_y:
-        candidate_y = same_runs_y[len(same_runs_y) // 2]
-    return tuple((float(start), float(candidate_y), float(end), float(candidate_y)) for start, end in candidate_runs)
-
-
-def _find_cover_next_button(screenshot: bytes) -> tuple[float, float] | None:
-    """从临时内存页面图像定位“下一步”按钮中心，避免固定坐标点击。"""
-    try:
-        from PIL import Image
-    except ImportError as exc:  # pragma: no cover - dependency is declared in pyproject.toml
-        raise RuntimeError("缺少 Pillow，无法识别天猫封面下一步按钮") from exc
-
-    image = Image.open(BytesIO(screenshot)).convert("RGB")
-    width, height = image.size
-    min_segment_width = max(28, width // 70)
-    rows: list[tuple[int, int, int]] = []
-    for y in range(height // 2, height):
-        longest = (0, 0)
-        start = None
-        for x in range(width):
-            if _is_tmall_orange(*image.getpixel((x, y))):
-                if start is None:
-                    start = x
-            elif start is not None:
-                if x - start > longest[1] - longest[0]:
-                    longest = (start, x)
-                start = None
-        if start is not None and width - start > longest[1] - longest[0]:
-            longest = (start, width)
-        if longest[1] - longest[0] >= min_segment_width:
-            rows.append((y, longest[0], longest[1]))
-
-    # 选中比例卡片只有细橙色边框；“下一步”是连续多行的实心橙色区域。
-    groups: list[list[tuple[int, int, int]]] = []
-    for row in rows:
-        if groups and row[0] <= groups[-1][-1][0] + 2:
-            groups[-1].append(row)
-        else:
-            groups.append([row])
-    filled_groups = [group for group in groups if len(group) >= max(8, height // 100)]
-    if not filled_groups:
-        return None
-    button_rows = max(filled_groups, key=len)
-    return (
-        sum((start + end) / 2 for _, start, end in button_rows) / len(button_rows),
-        sum(y for y, _, _ in button_rows) / len(button_rows),
-    )
-
-
-def _ratio_card_is_selected(
-    screenshot: bytes,
-    card: tuple[float, float, float, float],
-) -> bool:
-    """确认动态定位到的 1:1 卡片周边出现了平台的橙色选中边框。"""
-    try:
-        from PIL import Image
-    except ImportError as exc:  # pragma: no cover - dependency is declared in pyproject.toml
-        raise RuntimeError("缺少 Pillow，无法确认天猫封面比例") from exc
-
-    image = Image.open(BytesIO(screenshot)).convert("RGB")
-    width, height = image.size
-    left, center_y, right, _ = card
-    margin = max(4, int((right - left + 1) * 0.08))
-    top = max(0, int(center_y - (right - left + 1) * 0.8))
-    bottom = min(height, int(center_y + (right - left + 1) * 0.8))
-    orange_pixels = 0
-    for y in range(top, bottom):
-        for x in range(max(0, int(left) - margin), min(width, int(right) + margin + 1)):
-            if _is_tmall_orange(*image.getpixel((x, y))):
-                orange_pixels += 1
-                if orange_pixels >= max(10, int(right - left + 1) // 3):
-                    return True
-    return False
-
-
-async def _select_square_cover_ratio_and_continue(page: Page) -> None:
-    """动态选择 1:1 比例并确认裁剪页，任何视觉信号缺失时安全停止。"""
-    screenshot = await page.screenshot(type="png")
-    cards = _find_cover_ratio_cards(screenshot)
-    if cards is None:
-        raise RuntimeError("未识别到天猫封面比例卡片，已停止避免使用固定坐标")
-
-    # 平台展示顺序固定为“原始 / 3:4 / 1:1”，选择动态识别出的最右卡片。
-    square_card = cards[-1]
-    viewport = await page.evaluate("() => ({ width: window.innerWidth, height: window.innerHeight })")
-    try:
-        from PIL import Image
-    except ImportError as exc:  # pragma: no cover - dependency is declared in pyproject.toml
-        raise RuntimeError("缺少 Pillow，无法识别天猫封面比例卡片") from exc
-    image_width, image_height = Image.open(BytesIO(screenshot)).size
-    square_x = (square_card[0] + square_card[2]) / 2 * viewport["width"] / image_width
-    square_y = square_card[1] * viewport["height"] / image_height
-    await page.mouse.click(square_x, square_y, delay=150)
-    await asyncio.sleep(1)
-
-    selected_screenshot = await page.screenshot(type="png")
-    if not _ratio_card_is_selected(selected_screenshot, square_card):
-        raise RuntimeError("未确认已选择 1:1 封面比例，已停止避免继续错误裁剪")
-
-    next_button = _find_cover_next_button(selected_screenshot)
-    if next_button is None:
-        raise RuntimeError("未识别到天猫封面裁剪页的“下一步”按钮，已停止避免使用固定坐标")
-    next_x = next_button[0] * viewport["width"] / image_width
-    next_y = next_button[1] * viewport["height"] / image_height
-    await page.mouse.click(next_x, next_y, delay=150)
-    # 平台切换至花字确认层需要短暂动画；不再重复采集临时页面图像。
-    await asyncio.sleep(1.5)
-
-
-async def _upload_picker_file(page: Page, picker_frame, cover_path: Path) -> None:
-    """点击图库 iframe 内的“本地上传”控件并向文件选择器设置封面。"""
+async def _upload_article_picker_files(page: Page, picker_frame, image_paths: list[str]) -> None:
+    """在天猫图文图片库中向一次文件选择器传入所有图片。"""
     upload_button = picker_frame.get_by_text("本地上传", exact=True).first
     try:
         async with page.expect_file_chooser(timeout=10000) as chooser_info:
-            await upload_button.click(timeout=10000)
+            await upload_button.click(force=True, timeout=10000)
         file_chooser = await chooser_info.value
-        await file_chooser.set_files(str(cover_path))
-    except PlaywrightTimeoutError as exc:
-        raise RuntimeError("天猫图片库的“本地上传”控件未打开文件选择器") from exc
+        await file_chooser.set_files(image_paths)
+    except PlaywrightTimeoutError:
+        # 当前页面也会出现“本地上传”先打开“上传素材”对话框的状态；此时必须
+        # 继续点击其中的批量导入按钮。两种入口均属于同一个天猫图文图片库流程。
+        nested_upload_button = picker_frame.locator("#sucai-tu-upload")
+        try:
+            await nested_upload_button.wait_for(state="visible", timeout=10000)
+            async with page.expect_file_chooser(timeout=10000) as chooser_info:
+                await nested_upload_button.click(force=True, timeout=10000)
+            file_chooser = await chooser_info.value
+            await file_chooser.set_files(image_paths)
+        except PlaywrightTimeoutError as nested_exc:
+            raise RuntimeError("天猫图文图片库的“本地上传”控件未打开文件选择器") from nested_exc
 
-
-async def _hover_page_point(page: Page, x: int, y: int) -> None:
-    """Compatibility wrapper for callers that need a hover before clicking."""
-    await page.mouse.move(x, y, steps=10)
+    # 天猫收到文件后会异步把全部图片加载进素材库。等待不足就点“完成”会让
+    # 先加载的少数图片进入图库；该阶段按实测固定等待 3.5 秒。
+    await asyncio.sleep(3.5)
 
 
 async def _emit_qrcode_callback(qrcode_callback, payload: dict):
@@ -664,51 +446,20 @@ async def tmall_cookie_gen(
     return await run_with_context(context)
 
 
-class TmallBaseUploader(BaseVideoUploader):
-    """天猫上传器基类。
-
-    提供账号文件存在性校验，被 TmallVideo 继承。
-    """
-
-    def __init__(
-        self,
-        account_file,
-        debug: bool = DEBUG_MODE,
-    ):
-        """初始化基类。
-
-        :param account_file: 账号 Cookie 文件路径
-        :param debug: 是否调试模式
-        """
-        self.account_file = account_file
-        self.debug = debug
-
-    async def validate_base_args(self):
-        """校验账号 Cookie 文件存在。"""
-        if not os.path.exists(self.account_file):
-            raise RuntimeError(f"cookie文件不存在，请先完成淘宝光合平台登录: {self.account_file}")
 
 
-class TmallVideo(TmallBaseUploader):
-    """淘宝光合视频发布器。
+class TmallArticle:
+    """淘宝光合图文发布器，完整流程不依赖视频发布器。"""
 
-    完整发布流程：
-    1. validate_upload_args: 校验所有参数（视频、标题、描述、商品、定时时间等）
-    2. 打开发布页 → 定位发布 iframe → 上传视频文件
-    3. 等待视频上传完成 → 设置自定义封面（可选）
-    4. 填写标题/描述/话题标签
-    5. 参与活动话题（可选）→ 添加音乐（可选）→ 关联商品
-    6. 设置定时/立即发布 → 选择创作者声明 → 点击发布按钮
-    7. 等待平台成功/失败/跳转信号，30 秒内无信号则抛 PublishResultUncertainError
-    """
+    MIN_SCHEDULE_LEAD_TIME = timedelta(hours=2)
 
     def __init__(
         self,
-        file_path,
+        image_paths: list[str] | tuple[str, ...],
         title: str,
         desc: str | None,
-        account_file,
-        cover_image_path: str | None = None,
+        account_file: str,
+        *,
         tags: list[str] | None = None,
         goods_id: str | None = None,
         activity_topic: str | None = None,
@@ -716,316 +467,77 @@ class TmallVideo(TmallBaseUploader):
         creator_declaration: str = "",
         schedule: datetime | None = None,
         publish_strategy: str = TMALL_PUBLISH_STRATEGY_IMMEDIATE,
-        *,
         debug: bool = DEBUG_MODE,
         dry_run: bool = False,
-    ):
-        """初始化发布参数。
-
-        :param file_path: 视频文件路径
-        :param title: 视频标题（最多 30 字）
-        :param desc: 视频描述/文案（最多 1000 字，含话题标签）
-        :param account_file: 账号 Cookie 文件路径
-        :param cover_image_path: 自定义封面图片路径（可选）
-        :param tags: 话题标签列表（最多 4 个）
-        :param goods_id: 商品 ID 字符串（多个用逗号/空格/换行分隔，最多 6 个）
-        :param activity_topic: 活动话题关键词（可选，留空表示不参加）
-        :param music_name: 音乐名称（可选，留空跳过）
-        :param creator_declaration: 创作者声明（必填）
-        :param schedule: 定时发布时间（None 立即发布）
-        :param publish_strategy: 发布策略 immediate/scheduled
-        :param debug: 调试模式
-        :param dry_run: True 只走流程不点发布按钮（流程验证）
-        """
-        super().__init__(account_file=account_file, debug=debug)
-        self.file_path = file_path
-        self.cover_image_path = cover_image_path
+    ) -> None:
+        self.image_paths = [str(path) for path in image_paths]
         self.title = title
         self.desc = desc or ""
+        self.account_file = account_file
         self.tags = tags or []
-        # 商品 ID 解析为元组（去重保序）
         self.goods_ids = _normalized_goods_ids(goods_id or "")
-        # 兼容外部读取的字符串形式
         self.goods_id = ",".join(self.goods_ids)
         self.activity_topic = activity_topic or ""
         self.music_name = (music_name or "").strip()
         self.creator_declaration = creator_declaration.strip()
-        self.dry_run = dry_run
         self.schedule = schedule
         self.publish_strategy = publish_strategy
+        self.debug = debug
+        self.dry_run = dry_run
 
-    async def validate_upload_args(self):
-        """校验所有发布参数，在执行浏览器自动化前完成基础校验。"""
-        await self.validate_base_args()
-        # 校验视频文件
-        self.file_path = str(self.validate_video_file(self.file_path))
-        # 校验封面图片（可选）
-        if self.cover_image_path:
-            cover_path = Path(self.cover_image_path)
-            if not cover_path.is_file():
-                raise ValueError("天猫封面图片不存在或上传未完成")
-            if cover_path.suffix.lower() not in TMALL_COVER_IMAGE_EXTENSIONS:
-                raise ValueError("天猫封面图片仅支持 JPG、PNG 或 WebP 格式")
-            if cover_path.stat().st_size == 0:
-                raise ValueError("天猫封面图片为空")
-            if cover_path.stat().st_size > TMALL_MAX_COVER_IMAGE_BYTES:
-                raise ValueError("天猫封面图片不能超过 20 MiB")
-            self.cover_image_path = str(cover_path.resolve())
-        # 标题校验
+    @classmethod
+    def validate_publish_date(cls, publish_date: datetime | int | None) -> datetime | int:
+        if publish_date in (None, 0):
+            return 0
+        if not isinstance(publish_date, datetime):
+            raise TypeError("publish_date 必须是 datetime 类型或 0")
+        now = datetime.now(tz=publish_date.tzinfo) if publish_date.tzinfo else datetime.now()
+        if publish_date <= now:
+            raise ValueError("定时发布时间必须晚于当前时间")
+        if publish_date <= now + cls.MIN_SCHEDULE_LEAD_TIME:
+            raise ValueError("定时发布时间必须大于当前时间 2 小时")
+        return publish_date
+
+    async def validate_upload_args(self) -> None:
+        if not os.path.exists(self.account_file):
+            raise RuntimeError(f"cookie文件不存在，请先完成淘宝光合平台登录: {self.account_file}")
+        if not 1 <= len(self.image_paths) <= TMALL_MAX_ARTICLE_IMAGES:
+            raise ValueError("天猫图文必须上传 1-9 张图片")
+        normalized_paths: list[str] = []
+        for image_path in self.image_paths:
+            path = Path(image_path)
+            if not path.is_file():
+                raise ValueError(f"天猫图文图片不存在或上传未完成: {path}")
+            if path.suffix.lower() not in TMALL_ARTICLE_IMAGE_EXTENSIONS:
+                raise ValueError("天猫图文图片仅支持 JPG、PNG 或 WebP 格式")
+            if path.stat().st_size == 0:
+                raise ValueError("天猫图文图片不能为空")
+            if path.stat().st_size > TMALL_MAX_ARTICLE_IMAGE_BYTES:
+                raise ValueError("天猫图文单张图片不能超过 20 MiB")
+            normalized_paths.append(str(path.resolve()))
+        self.image_paths = normalized_paths
         if not self.title:
-            raise ValueError("天猫光合视频标题不能为空")
+            raise ValueError("天猫光合图文标题不能为空")
         if len(self.title) > 30:
-            raise ValueError("天猫光合视频标题不能超过30字")
-        # 描述 + 话题总长度校验
-        if not self.goods_id and not self.tags:
-            desc_for_check = self.desc or ""
-        else:
-            # 描述框最终内容 = 描述 + 每个话题前一个空格 + "#" + tag
-            tag_text = "".join(f" #{t}" for t in self._normalized_tags())
-            desc_for_check = (self.desc or "") + tag_text
-        if len(desc_for_check) > 1000:
-            raise ValueError("天猫光合视频描述不能超过1000字")
-        # 话题标签最多 4 个，超出截取前 4 个
+            raise ValueError("天猫光合图文标题不能超过30字")
         if len(self.tags) > 4:
-            tmall_logger.warning(_msg("⚠️", f"话题标签最多4个，已自动截取前4个（传入了 {len(self.tags)} 个）"))
+            tmall_logger.warning(
+                _msg("⚠️", f"话题标签最多4个，已自动截取前4个（传入了 {len(self.tags)} 个）")
+            )
             self.tags = self.tags[:4]
-        # 商品 ID 校验
+        tag_text = "".join(f" #{tag}" for tag in self._normalized_tags())
+        if len(self.desc + tag_text) > 1000:
+            raise ValueError("天猫光合图文描述不能超过1000字")
         if len(self.goods_ids) > TMALL_MAX_GOODS_IDS:
             raise ValueError(f"天猫一次最多关联 {TMALL_MAX_GOODS_IDS} 个商品ID")
         if any(not goods_id.isdigit() for goods_id in self.goods_ids):
             raise ValueError("天猫光合商品ID必须为数字，多个ID请使用逗号或换行分隔")
-        # 音乐名称长度校验
         if len(self.music_name) > 100:
             raise ValueError("天猫音乐名称不能超过100个字符")
-        # 定时发布时间校验
         if self.schedule:
             self.validate_publish_date(self.schedule)
-        # 创作者声明必填
         if not self.creator_declaration:
             raise ValueError("天猫创作者声明不能为空")
-
-    async def _find_publish_frame(self, page: Page):
-        """定位淘宝光合视频发布 iframe。
-
-        发布页通过 iframe 嵌入真实表单，iframe URL 含 gg_publish/gg-video。
-        最多等待 30 秒。
-        """
-        for _ in range(30):
-            for frame in page.frames:
-                if "gg_publish/gg-video" in frame.url:
-                    return frame
-            await asyncio.sleep(1)
-        raise RuntimeError("未找到淘宝光合视频发布 iframe")
-
-    async def _wait_for_upload_ready(self, frame, timeout_seconds: int = 180):
-        """等待视频上传完成，发布表单可编辑。
-
-        判定信号：页面出现"重新上传"且包含"视频封面"字样。
-        若出现"上传失败"或"失败"字样则抛出异常。
-        超时 180 秒。
-        """
-        for i in range(timeout_seconds // 2):
-            body = await frame.locator("body").inner_text(timeout=3000)
-            if "上传失败" in body or "失败" in body:
-                raise RuntimeError("视频上传失败，请检查页面提示")
-            if "重新上传" in body and "视频封面" in body:
-                tmall_logger.success(_msg("🥳", "视频上传完成，发布表单已可编辑"))
-                return
-            if i % 5 == 0:
-                tmall_logger.info(_msg("🏃", "小人正在等待视频上传完成"))
-            await asyncio.sleep(2)
-        raise RuntimeError("等待视频上传完成超时")
-
-    async def _set_custom_cover(self, frame, page: Page) -> None:
-        """通过创作者页面的本地上传工作流设置自定义封面。
-
-        流程：
-        1. 点击"编辑"封面按钮（等待智能封面生成完成）
-        2. 在弹窗中点击"本地上传" → 通过跨层图库选择本地文件
-        3. 等待上传完成 → 点击"完成" → 选中刚上传的图片
-        4. 点击"确定" → 动态识别并选择 1:1 裁剪比例 → 处理花字确认层
-        5. 回到主表单
-
-        图片库、裁剪层、花字层以独立 frame 呈现；通过可见控件的语义定位完成
-        操作。新增图片和选中状态必须在图库 iframe 内确认，不能依赖素材卡片或
-        视口坐标。
-        """
-        if not self.cover_image_path:
-            return
-
-        cover_path = Path(self.cover_image_path)
-        tmall_logger.info(_msg("🖼️", f"准备设置自定义封面: {cover_path.name}"))
-        # 等待"编辑"封面按钮可点击
-        edit_button = frame.locator('[data-autolog-container="coverOperate_edit"]').first
-        await edit_button.wait_for(state="visible", timeout=90000)
-
-        # "编辑"提前显示时智能封面可能仍在慢加载，点击会被忽略
-        smart_cover_loading = frame.get_by_text("智能封面图生成中", exact=False).first
-        try:
-            await smart_cover_loading.wait_for(state="hidden", timeout=90000)
-        except PlaywrightTimeoutError:
-            tmall_logger.warning(_msg("⚠️", "智能封面生成超时，尝试继续设置本地封面"))
-        await asyncio.sleep(3)
-
-        # 弹窗内部 class 会变，但顶层弹窗始终有 .next-overlay-wrapper.opened 遮罩层。
-        # 通过 opened 数量变化判断点击是否生效，避免重复点击。
-        opened_overlays = frame.locator(".next-overlay-wrapper.opened")
-
-        async def wait_for_new_overlay(previous_count: int, timeout_seconds: int) -> int | None:
-            """等待新的遮罩层出现（表示弹窗已打开）。"""
-            for _ in range(timeout_seconds * 2):
-                current_count = await opened_overlays.count()
-                if current_count > previous_count:
-                    return current_count
-                await asyncio.sleep(0.5)
-            return None
-
-        initial_overlay_count = await opened_overlays.count()
-        cover_overlay_count = None
-        # 最多重试 3 次点击"编辑"按钮
-        for attempt in range(3):
-            current_overlay_count = await opened_overlays.count()
-            if current_overlay_count > initial_overlay_count:
-                cover_overlay_count = current_overlay_count
-                break
-            try:
-                await edit_button.click(timeout=10000)
-            except PlaywrightTimeoutError as exc:
-                current_overlay_count = await opened_overlays.count()
-                if current_overlay_count > initial_overlay_count:
-                    cover_overlay_count = current_overlay_count
-                    break
-                if attempt == 2:
-                    raise RuntimeError("天猫封面编辑入口点击后未打开弹窗") from exc
-
-            cover_overlay_count = await wait_for_new_overlay(initial_overlay_count, 15)
-            if cover_overlay_count is not None:
-                break
-            if attempt < 2:
-                tmall_logger.info(_msg("🏃", "封面模块仍在加载，15 秒后重试编辑"))
-                await asyncio.sleep(15)
-        if cover_overlay_count is None:
-            raise RuntimeError("天猫封面编辑入口点击后未打开弹窗")
-
-        # nth() 固定本次新增的遮罩层；顶层弹窗关闭后该 locator 变 hidden
-        cover_dialog = opened_overlays.nth(initial_overlay_count)
-
-        # 第一个入口"本地上传"打开平台图片库（不直接打开系统文件选择器）
-        await cover_dialog.get_by_text("本地上传", exact=False).last.click()
-
-        # 图库嵌在独立 iframe 中，其内部控件及素材卡片均通过 frame DOM 识别。
-        await asyncio.sleep(2)
-
-        # 素材库会在上传时把文件重命名为内部素材名，不能通过本地文件名查找。
-        # 先记录图库已有缩略图，上传返回后以图片 URL 差集唯一确认本次新增卡片。
-        picker_frame = None
-        for _ in range(20):
-            picker_frame = next(
-                (
-                    candidate
-                    for candidate in page.frames
-                    if "sucai-selector-ng" in candidate.url
-                ),
-                None,
-            )
-            if picker_frame is not None:
-                break
-            await asyncio.sleep(0.5)
-        if picker_frame is None:
-            raise RuntimeError("未找到天猫图片库 iframe，无法上传自定义封面")
-
-        existing_image_urls = await picker_frame.evaluate(
-            """() => [...document.images].map(image => {
-                try {
-                    const url = new URL(image.currentSrc || image.src || '', location.href);
-                    url.search = '';
-                    return url.href;
-                } catch { return ''; }
-            }).filter(Boolean)"""
-        )
-        await _upload_picker_file(page, picker_frame, cover_path)
-
-        # 文件上传成功后先进入"上传结果"，点击"完成"才回到图片库
-        await asyncio.sleep(10)
-        await _click_visible_frame_button(
-            (picker_frame,), ("完成",), description="图片上传完成"
-        )
-        await asyncio.sleep(2)
-
-        selected_cover = None
-        for _ in range(20):
-            selected_cover = await picker_frame.evaluate(
-                """(beforeUrls) => {
-                    const normalizeUrl = (raw) => {
-                        try {
-                            const url = new URL(raw || '', location.href);
-                            url.search = '';
-                            return url.href;
-                        } catch { return ''; }
-                    };
-                    const before = new Set(beforeUrls);
-                    const image = [...document.images].find(item => {
-                        const src = normalizeUrl(item.currentSrc || item.src);
-                        return src && !before.has(src) && item.getClientRects().length > 0;
-                    });
-                    if (!image) return { found: false };
-
-                    let card = image;
-                    for (let i = 0; i < 10 && card.parentElement; i += 1) {
-                        const control = card.querySelector(
-                            'input[type="checkbox"], input[type="radio"]'
-                        );
-                        if (control) {
-                            card.setAttribute('data-mpau-new-cover', 'true');
-                            control.setAttribute('data-mpau-new-cover-control', 'true');
-                            return { found: true, hasControl: true, checked: control.checked };
-                        }
-                        card = card.parentElement;
-                    }
-                    return { found: true, hasControl: false };
-                }""",
-                existing_image_urls,
-            )
-            if selected_cover.get("found"):
-                break
-            await asyncio.sleep(0.5)
-        if not selected_cover or not selected_cover.get("found"):
-            raise RuntimeError(
-                "图片库未出现本次上传新增的封面缩略图，已停止避免选择错误图片。"
-            )
-        if not selected_cover.get("hasControl"):
-            raise RuntimeError(
-                "已定位本次上传封面，但图库未暴露可访问的选择控件，已停止避免选择错误图片。"
-            )
-        selected_control = picker_frame.locator('[data-mpau-new-cover-control="true"]')
-        if not selected_cover.get("checked"):
-            # Next 组件会隐藏原生 input，Playwright 的 check() 因而无法点击它。
-            # 对已精确定位的 input 调用原生 click()，可按平台自身事件链切换选中状态。
-            await selected_control.evaluate("(control) => control.click()")
-        if not await selected_control.is_checked():
-            raise RuntimeError("本次上传封面未进入选中状态，已停止避免选择错误图片。")
-        tmall_logger.info(_msg("🖼️", "已精确选中本次上传的封面素材"))
-
-        await _click_visible_frame_button(
-            (picker_frame,), ("确定",), description="图片库确认"
-        )
-        await asyncio.sleep(2)
-
-        # “原始”比例是视频比例而不是图片比例。比例卡片属于不可访问的渲染层，
-        # 只能从实时内存页面图像动态识别其位置，绝不能回退为固定坐标。
-        await _select_square_cover_ratio_and_continue(page)
-        await asyncio.sleep(2)
-
-        # 进入可选的花字确认层；不选模板也要确认，封面才会写回主表单。
-        await _click_visible_frame_button(
-            tuple(reversed(page.frames)),
-            ("下一步", "完成", "确定"),
-            description="花字确认",
-        )
-        await asyncio.sleep(2)
-        await cover_dialog.wait_for(state="hidden", timeout=10000)
-        tmall_logger.success(_msg("🖼️", f"自定义封面已设置: {cover_path.name}"))
-
     def _build_description(self) -> str:
         """返回纯描述文本。
 
@@ -1044,7 +556,7 @@ class TmallVideo(TmallBaseUploader):
         return cleaned
 
     async def _fill_title_and_desc(self, frame, page: Page):
-        """填写视频标题与描述，并逐个输入话题标签。
+        """填写内容标题与描述，并逐个输入话题标签。
 
         描述区是淘宝"仓颉"富文本编辑器（contenteditable div），不是真正的 textarea。
         直接用 fill() 改 textarea.value 不会触发 hashtag 识别，必须 click 聚焦后
@@ -1054,7 +566,7 @@ class TmallVideo(TmallBaseUploader):
         title_input = frame.locator('input[placeholder="加个标题让内容更吸引人"]').first
         await title_input.wait_for(state="visible", timeout=10000)
         await title_input.fill(self.title[:30])
-        tmall_logger.info(_msg("✍️", f"视频标题已填写: {self.title[:30]}"))
+        tmall_logger.info(_msg("✍️", f"内容标题已填写: {self.title[:30]}"))
 
         # 定位仓颉富文本编辑器
         desc_editor = frame.locator('div[data-cangjie-content="true"]').first
@@ -1069,7 +581,7 @@ class TmallVideo(TmallBaseUploader):
         desc = self._build_description()
         if desc:
             await page.keyboard.type(desc[:1000])
-            tmall_logger.info(_msg("✍️", f"视频描述已填写: {desc[:30]}"))
+            tmall_logger.info(_msg("✍️", f"内容描述已填写: {desc[:30]}"))
 
         # 逐个输入话题标签
         tags = self._normalized_tags()
@@ -1108,7 +620,8 @@ class TmallVideo(TmallBaseUploader):
         tmall_logger.info(
             _msg("🛒", f"小人准备添加 {len(self.goods_ids)} 个商品: {', '.join(self.goods_ids)}")
         )
-        await frame.get_by_text("添加商品", exact=True).first.click()
+        # 不同内容表单的文字节点可能被子元素覆盖，强制点击语义入口以兼容布局差异。
+        await frame.get_by_text("添加商品", exact=True).first.click(force=True)
         dialog = frame.locator(".next-dialog").filter(has_text="关联商品").first
         await dialog.wait_for(state="visible", timeout=10000)
 
@@ -1121,18 +634,24 @@ class TmallVideo(TmallBaseUploader):
             ).first
             before_result_text = await result_area.inner_text(timeout=3000)
 
-            # 填入商品 ID 并触发搜索
-            search = dialog.locator('input[placeholder="输入商品关键词或商品ID"]').first
-            await search.fill(goods_id)
-            # 输入结束后额外触发 Enter，避免平台只更新输入框内容却没刷新商品列表
-            await search.press("Enter")
-
-            # 点击搜索图标按钮
-            search_icon = dialog.locator(
-                'i[role="button"][aria-label="搜索"].next-search-icon'
+            # 填入商品 ID 并触发搜索。
+            search = dialog.locator(
+                'input[placeholder="输入商品关键词或商品ID"], '
+                'input[placeholder="搜索"], input[type="search"]'
             ).first
-            await search_icon.wait_for(state="visible", timeout=5000)
-            await search_icon.click()
+            await search.wait_for(state="visible", timeout=5000)
+            await search.click()
+            await search.fill(goods_id)
+            # 首次搜索的“本店商品”列表尚未初始化：先用 Enter 提交输入值，
+            # 等平台接收该值后再点搜索图标，避免第一次搜索未触发。
+            await search.press("Enter")
+            if goods_index == 1:
+                await asyncio.sleep(1.5)
+                search_icon = dialog.locator(
+                    'i[role="button"][aria-label="搜索"].next-search-icon'
+                ).first
+                await search_icon.wait_for(state="visible", timeout=5000)
+                await search_icon.click()
             tmall_logger.info(
                 _msg(
                     "🔎",
@@ -1306,7 +825,7 @@ class TmallVideo(TmallBaseUploader):
             return
 
         tmall_logger.info(_msg("🎵", f"准备添加音乐: {self.music_name}"))
-        # 视频上传后标签从"点击添加音乐"变为"更多音乐"
+        # 表单选中音乐后，入口标签可能从“点击添加音乐”变为“更多音乐”。
         trigger = frame.locator('[data-autolog*="key=music_selector_card"]').first
         # 与商品选择器一样，正常 locator 点击会等待卡片并滚动到可见位置
         await trigger.click()
@@ -1393,18 +912,8 @@ class TmallVideo(TmallBaseUploader):
                 "snippet": "",
             }
 
-        # 只有平台明确给出"暂无结果"提示时才认定找不到该音乐
-        if search_state["hasNoResultHint"]:
-            hint_text = next(
-                (h for h in music_no_result_hints if h in search_state["snippet"]),
-                "暂无结果",
-            )
-            raise ValueError(
-                f"音乐“{self.music_name}”搜索无结果（页面提示：{hint_text}）。"
-                f"请核实音乐名是否正确，或留空 --music 使用平台推荐音乐。"
-            )
-
-        # 选中第一个歌曲名完全相同的结果（归一化空白与括号后比较）
+        # 平台可能在“暂无结果”下展示热榜；先从所有可见卡片中找精确匹配。
+        # 例如搜索词未命中索引时，热榜仍可能包含用户指定的同名歌曲。
         selection = await dialog.evaluate(
             r"""(element, expectedTitle) => {
               const normalize = (value) => (value || '')
@@ -1433,6 +942,16 @@ class TmallVideo(TmallBaseUploader):
             self.music_name,
         )
         if not selection["selected"]:
+            if search_state["hasNoResultHint"]:
+                hint_text = next(
+                    (h for h in music_no_result_hints if h in search_state["snippet"]),
+                    "暂无结果",
+                )
+                raise ValueError(
+                    f"音乐“{self.music_name}”搜索无结果（页面提示：{hint_text}），"
+                    "且热榜中没有同名歌曲卡片。"
+                    "请核实音乐名是否正确，或留空 --music 使用平台推荐音乐。"
+                )
             available_titles = "、".join(selection["availableTitles"])
             raise ValueError(
                 f"音乐“{self.music_name}”搜索后没有同名歌曲卡片。"
@@ -1771,7 +1290,7 @@ class TmallVideo(TmallBaseUploader):
         page: Page,
         frame,
         *,
-        initial_url: str | None = None,
+        initial_url: str,
         before_text: str,
         timeout_seconds: int = 30,
     ) -> str:
@@ -1792,8 +1311,7 @@ class TmallVideo(TmallBaseUploader):
             current_url = page.url
             # 页面跳转到非登录/鉴权页视为成功
             if (
-                initial_url is not None
-                and current_url != initial_url
+                current_url != initial_url
                 and not _is_login_page_url(current_url)
                 and not _is_auth_page_url(current_url)
             ):
@@ -1822,56 +1340,238 @@ class TmallVideo(TmallBaseUploader):
             "已点击天猫发布按钮，但 30 秒内没有检测到明确成功或失败信号"
         )
 
+    async def _find_publish_frame(self, page: Page):
+        """定位包含图文发布表单的 gg-picture iframe。"""
+        for _ in range(30):
+            for frame in page.frames:
+                if "gg_publish/gg-picture" in frame.url:
+                    return frame
+            await asyncio.sleep(1)
+        raise RuntimeError("未找到淘宝光合图文发布 iframe")
 
-    async def _upload_in_context(
-        self,
-        context: BrowserContext,
-    ) -> dict:
-        """在指定 BrowserContext 中执行完整的发布流程。
+    async def _upload_images(self, frame, page: Page) -> None:
+        """通过天猫图片库上传并精确勾选本次图文图片。
 
-        流程：
-        1. 校验参数
-        2. 打开发布页 → 定位 iframe
-        3. 上传视频 → 设置封面 → 填写标题/描述 → 参与活动 → 添加音乐 →
-           关联商品 → 设置定时 → 选择创作者声明
-        4. dry_run 跳过发布；否则点击发布按钮并等待确认
-        5. 成功后保存 storage_state；页面保留供人工复核
-
-        :returns: 发布结果 dict（含 mode/confirmation/final_url）
-        :raises TmallAuthenticationError: Cookie 失效
-        :raises PublishResultUncertainError: 发布结果不确定
-        :raises Exception: 其他发布失败
+        图文发布器本身不含 file input。真实流程必须经由独立图片库完成：打开
+        图库、批量本地上传、在上传结果页确认、只选中本次新增素材、图库确认，
+        最后等待主表单回写图片数量。该流程不调用视频封面模块。
         """
-        tmall_logger.info(_msg("🧍", "小人先检查 cookie 和视频文件"))
-        await self.validate_upload_args()
-        tmall_logger.info(_msg("🥳", "上传前检查通过"))
+        uploader = frame.locator("#picture-upload-wrapper .next-picture-uploader").first
+        await uploader.wait_for(state="visible", timeout=15000)
+        # 已实际确认该组件的 ::before 会截获普通点击；定位到唯一上传容器后强制点击。
+        await uploader.click(force=True)
 
+        picker_frame = None
+        for _ in range(40):
+            picker_frame = next(
+                (
+                    candidate
+                    for candidate in page.frames
+                    if "sucai-selector-ng" in candidate.url
+                ),
+                None,
+            )
+            if picker_frame is not None:
+                break
+            await asyncio.sleep(0.5)
+        if picker_frame is None:
+            raise RuntimeError("未找到天猫图文图片库 iframe，无法上传图片")
+
+        await _upload_article_picker_files(page, picker_frame, self.image_paths)
+
+        # 文件传输完成会先显示上传结果，“完成”后才会返回可勾选的图片库。
+        await _click_visible_article_frame_button(
+            (picker_frame,), ("完成",), description="图片上传完成", timeout_seconds=120
+        )
+
+        expected_images = len(self.image_paths)
+        expected_image_stems = [Path(image_path).stem.casefold() for image_path in self.image_paths]
+        selected_images = None
+        # “完成”后图库仍会逐张回写。持续等待每个唯一文件名真实出现，不能以
+        # 固定时长代替这个确认，避免只选到先挂载的一部分图片。
+        for _ in range(120):
+            selected_images = await picker_frame.evaluate(
+                r"""(expectedStems) => {
+                    // 图库会在新图片之间插入历史素材，不能按卡片位置选择。Web
+                    // 暂存层已将每张图改为含任务唯一标识的文件名；这里必须只接受
+                    // 卡片文本中恰好出现一个完整文件名 stem 的素材，命中不唯一就中止。
+                    const cards = [...document.querySelectorAll('label')].filter(card =>
+                        card.querySelector('.PicList_pic_imgBox__c0HXw img')
+                        && card.querySelector('input[type="checkbox"], input[type="radio"]')
+                    );
+                    const usedCards = new Set();
+                    const controls = [];
+                    const missing = [];
+                    const ambiguous = [];
+                    const matchingCards = {};
+                    for (const expectedStem of expectedStems) {
+                        const matches = cards.filter(candidate => {
+                            if (usedCards.has(candidate)) return false;
+                            const cardText = (candidate.parentElement?.innerText || candidate.innerText || '')
+                                .toLocaleLowerCase();
+                            return cardText.includes(expectedStem);
+                        });
+                        matchingCards[expectedStem] = matches.map(candidate =>
+                            (candidate.parentElement?.innerText || candidate.innerText || '')
+                                .replace(/\s+/g, ' ').trim()
+                        );
+                        if (matches.length !== 1) {
+                            missing.push(expectedStem);
+                            if (matches.length > 1) ambiguous.push(expectedStem);
+                            continue;
+                        }
+                        const card = matches[0];
+                        const control = card.querySelector(
+                            'input[type="checkbox"], input[type="radio"]'
+                        );
+                        if (!control) {
+                            missing.push(expectedStem);
+                            continue;
+                        }
+                        usedCards.add(card);
+                        controls.push(control);
+                    }
+                    for (const control of controls) {
+                        control.setAttribute('data-mpau-new-article-image', 'true');
+                    }
+                    return {
+                        count: controls.length,
+                        missing,
+                        ambiguous,
+                        matchingCards,
+                    };
+                }""",
+                expected_image_stems,
+            )
+            if selected_images and selected_images.get("count") == expected_images:
+                break
+            await asyncio.sleep(0.5)
+        if not selected_images or selected_images.get("count") != expected_images:
+            actual = selected_images.get("count", 0) if selected_images else 0
+            missing = ", ".join(selected_images.get("missing", []) if selected_images else [])
+            ambiguous = ", ".join(selected_images.get("ambiguous", []) if selected_images else [])
+            matching_cards = selected_images.get("matchingCards", {}) if selected_images else {}
+            observed = " | ".join(
+                f"{stem}: {' / '.join(card_texts) or '未出现在图库'}"
+                for stem, card_texts in matching_cards.items()
+            )
+            raise RuntimeError(
+                f"图片库未精确识别本次上传的 {expected_images} 张图文图片（识别到 {actual} 张），"
+                f"未找到或重复的文件名：{missing or '未知'}"
+                f"{f'；重复命中：{ambiguous}' if ambiguous else ''}；图库匹配详情："
+                f"{observed or '未获得'}，已停止避免选择错误素材。"
+            )
+
+        selected_controls = picker_frame.locator('input[data-mpau-new-article-image="true"]')
+        for index in range(expected_images):
+            control = selected_controls.nth(index)
+            if not await control.is_checked():
+                # Next 组件隐藏原生 checkbox；只对本次唯一文件名锁定的控件触发事件。
+                await control.evaluate("(control) => control.click()")
+            if not await control.is_checked():
+                raise RuntimeError("本次上传图文图片未进入选中状态，已停止避免选择错误素材。")
+
+        await _click_visible_article_frame_button(
+            (picker_frame,), ("确定",), description="图片库确认", timeout_seconds=30
+        )
+
+        for _ in range(90):
+            body_text = await frame.locator("body").inner_text(timeout=3000)
+            if "上传失败" in body_text or "上传出错" in body_text:
+                raise RuntimeError("天猫图文图片上传失败，请检查页面提示")
+            if _article_image_count_has_updated(body_text, expected_images):
+                tmall_logger.success(_msg("🖼️", f"已上传并选中 {expected_images} 张图文图片"))
+                return
+            await asyncio.sleep(2)
+        raise RuntimeError("天猫图文图片库确认后未回写图片数量")
+
+    async def _crop_uploaded_images_to_three_four(self, frame) -> None:
+        """将刚上传的全部图文图片逐张裁剪为 3:4 并确认。
+
+        发布器需先悬浮缩略图，图片上的“裁剪”操作才会显示。裁剪弹窗虽提示
+        支持批量操作，但实测图片缩略图每次只保留单选状态，因此这里逐张选中
+        并设置 3:4，避免只裁剪当前第一张图片。
+        """
+        expected_images = len(self.image_paths)
+        crop_entries = frame.get_by_text("裁剪", exact=True)
+        for _ in range(30):
+            if await crop_entries.count() == expected_images:
+                break
+            await asyncio.sleep(0.5)
+        else:
+            actual_entries = await crop_entries.count()
+            raise RuntimeError(
+                f"图片上传后未找到全部裁剪入口（期望 {expected_images} 个，实际 {actual_entries} 个）"
+            )
+
+        first_crop_entry = crop_entries.first
+        await first_crop_entry.hover()
+        await first_crop_entry.click(force=True)
+
+        crop_dialog = frame.get_by_role("dialog", name="裁剪图片")
+        await crop_dialog.wait_for(state="visible", timeout=15000)
+        thumbnails = crop_dialog.locator('div[class*="picture-upload--image--"]')
+        for _ in range(30):
+            if await thumbnails.count() == expected_images:
+                break
+            await asyncio.sleep(0.5)
+        else:
+            actual_thumbnails = await thumbnails.count()
+            raise RuntimeError(
+                f"裁剪弹窗未加载全部图片（期望 {expected_images} 张，实际 {actual_thumbnails} 张）"
+            )
+
+        # 3:4 同时有卡片外层和文字内层；平台在实际运行时只会稳定响应文字
+        # 内层的点击。比例的激活样式位于其父卡片上。
+        three_to_four_ratio_text = crop_dialog.locator(
+            'div[class*="picture-upload--ratio_text--"]'
+        ).filter(has_text=re.compile(r"^3:4$"))
+        for index in range(expected_images):
+            thumbnail = thumbnails.nth(index)
+            # 图片缩略图由内部 img 接收鼠标事件，比例和确认按钮也会被子 span 覆盖。
+            await thumbnail.click(force=True)
+            for _ in range(20):
+                if await thumbnail.locator('div[class*="image_active_border"]').count():
+                    break
+                await asyncio.sleep(0.2)
+            else:
+                raise RuntimeError(f"第 {index + 1} 张图文图片未成功选中以进行裁剪")
+
+            # 缩略图选中后，平台会异步重建左侧裁剪画布；只等激活边框出现还不够。
+            # 留出画布切换时间后点击比例文字，让事件冒泡至比例卡片。
+            await asyncio.sleep(0.5)
+            await three_to_four_ratio_text.click(force=True)
+            for _ in range(20):
+                is_three_to_four = await three_to_four_ratio_text.evaluate(
+                    "(text) => text.parentElement.className.includes('ratio_active')"
+                )
+                if is_three_to_four:
+                    break
+                await asyncio.sleep(0.2)
+            else:
+                raise RuntimeError(f"第 {index + 1} 张图文图片未成功设置为 3:4 裁剪比例")
+
+        confirm_button = crop_dialog.get_by_role("button", name="确定", exact=True)
+        await confirm_button.click(force=True)
+        await crop_dialog.wait_for(state="hidden", timeout=15000)
+        tmall_logger.success(_msg("✂️", f"已将 {expected_images} 张图文图片裁剪为 3:4"))
+
+    async def _upload_in_context(self, context: BrowserContext) -> dict:
+        """执行完整的天猫图文发布流程。"""
+        tmall_logger.info(_msg("🧍", "小人先检查 cookie 和图文图片"))
+        await self.validate_upload_args()
         success = False
         submitted = False
         page = None
-
         try:
             page = await context.new_page()
-            await page.goto(TMALL_VIDEO_PUBLISH_URL, wait_until="domcontentloaded")
+            await page.goto(TMALL_ARTICLE_PUBLISH_URL, wait_until="domcontentloaded")
             if _is_login_page_url(page.url) or _is_auth_page_url(page.url):
                 raise TmallAuthenticationError("天猫 Cookie 已失效，请重新登录")
-            tmall_logger.info(_msg("🧭", "小人正在赶往淘宝光合发视频页面"))
-            try:
-                frame = await self._find_publish_frame(page)
-            except RuntimeError as exc:
-                # iframe 未找到时再次检查是否被踢到登录页
-                if _is_login_page_url(page.url) or _is_auth_page_url(page.url):
-                    raise TmallAuthenticationError("天猫 Cookie 已失效，请重新登录") from exc
-                raise
+            frame = await self._find_publish_frame(page)
             await asyncio.sleep(3)
-
-            # 上传视频文件
-            tmall_logger.info(_msg("🏃", f"小人开始上传视频: {Path(self.file_path).name}"))
-            file_input = frame.locator('input[type="file"]').first
-            await file_input.set_input_files(self.file_path)
-            await self._wait_for_upload_ready(frame)
-            # 各步骤依次执行
-            await self._set_custom_cover(frame, page)
+            await self._upload_images(frame, page)
+            await self._crop_uploaded_images_to_three_four(frame)
             await self._fill_title_and_desc(frame, page)
             await self._add_activity_topic(frame, page)
             await self._add_music(frame)
@@ -1880,71 +1580,38 @@ class TmallVideo(TmallBaseUploader):
             await self._select_creator_declaration(frame)
 
             if self.dry_run:
-                tmall_logger.info(_msg("🧪", "Dry run 模式：跳过发布，所有基础设置已完成"))
                 success = True
+                tmall_logger.info(_msg("🧪", "图文 Dry run 模式：跳过正式发布"))
                 return {"mode": "dry_run"}
 
-            # 真实发布：根据策略点对应按钮
-            if self.schedule:
-                publish_btn = frame.locator("button.next-btn-primary").filter(has_text="定时发布").first
-                tmall_logger.info(_msg("🚀", f"点击定时发布按钮: {self.schedule}"))
-            else:
-                publish_btn = frame.locator("button.next-btn-primary").filter(has_text="立即发布").first
-                tmall_logger.info(_msg("🚀", "点击立即发布按钮"))
-            # 记录点击前的页面文本，用于后续检测新出现的成功/失败提示
-            before_frame_text = await frame.locator("body").inner_text(timeout=3000)
-            before_page_text = await page.locator("body").inner_text(timeout=3000)
-            before_submit_text = f"{before_page_text}\n{before_frame_text}"
+            button_text = "定时发布" if self.schedule else "立即发布"
+            publish_button = frame.locator("button.next-btn-primary").filter(has_text=button_text).first
+            before_text = "\n".join((
+                await page.locator("body").inner_text(timeout=3000),
+                await frame.locator("body").inner_text(timeout=3000),
+            ))
             initial_url = page.url
-            await publish_btn.click()
+            await publish_button.click()
             submitted = True
             confirmation = await self._wait_for_publish_confirmation(
-                page,
-                frame,
-                initial_url=initial_url,
-                before_text=before_submit_text,
+                page, frame, initial_url=initial_url, before_text=before_text
             )
-            tmall_logger.success(_msg("🥳", f"视频发布已确认（{confirmation}）"))
             success = True
-            return {
-                "mode": "publish",
-                "confirmation": confirmation,
-                "final_url": page.url,
-            }
+            return {"mode": "publish", "confirmation": confirmation, "final_url": page.url}
         except asyncio.CancelledError as exc:
-            # 已点击发布按钮但被中断 → 结果不确定
             if submitted:
                 raise PublishResultUncertainError(
-                    "天猫发布按钮已经点击，但任务在取得平台确认前被中断"
+                    "天猫图文发布按钮已点击，但任务在确认前被中断"
                 ) from exc
             raise
-        except Exception as exc:
-            tmall_logger.error(_msg("❌", f"UPLOAD_FAILED: {exc}"))
-            raise
         finally:
-            # 成功后保存 storage_state（更新 Cookie）
             if success:
                 await context.storage_state(path=self.account_file)
-                tmall_logger.success(_msg("🥳", "cookie 更新完毕"))
-            # 页面保留供人工复核
-            if page:
-                try:
-                    if not page.is_closed():
-                        tmall_logger.info(
-                            _msg(
-                                "📌",
-                                f"发布页面已保留供人工复核；当前账号共保留 {len(context.pages)} 个页面",
-                            )
-                        )
-                except Exception:
-                    pass
+            if page and not page.is_closed():
+                tmall_logger.info(_msg("📌", "图文发布页面已保留供人工复核"))
 
     async def upload_in_session(self, session: TmallBrowserSession) -> dict:
-        """通过浏览器会话执行发布流程。
-
-        会话校验 Cookie 后调用 _upload_in_context。
-        若抛出 TmallAuthenticationError 则标记会话未认证。
-        """
+        """通过天猫共享浏览器会话执行图文发布。"""
         context = await session.ensure_open()
         try:
             result = await self._upload_in_context(context)

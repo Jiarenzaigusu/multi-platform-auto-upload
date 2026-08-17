@@ -173,22 +173,37 @@ class GenerateCopyRequest(BaseModel):
 
     selling_point_catalog_id: str = Field(min_length=16, max_length=64)  # 卖点目录 ID
     product_identifiers: list[str] = Field(min_length=1, max_length=20)  # 商品 ID/货号列表
-    style: CopyStyle                          # 文案风格
-    scene: ContentScene                       # 内容场景
+    style: CopyStyle | None = None            # 文案风格；与自定义风格二选一
+    scene: ContentScene | None = None          # 内容场景；与自定义场景二选一
     festival: str | None = Field(default=None, max_length=40)  # 可选节日氛围
+    custom_style: str | None = Field(default=None, max_length=100)  # 自定义文案风格，与预设互斥
+    custom_scene: str | None = Field(default=None, max_length=100)  # 自定义内容场景，与预设互斥
+    custom_festival: str | None = Field(default=None, max_length=80)  # 自定义节日氛围，与预设互斥
     product_urls: list[AnyHttpUrl] = Field(default_factory=list, max_length=20)  # 可选商品链接
     product_search: ProductSearchConfig = Field(default_factory=ProductSearchConfig)  # 可选搜索服务
-    title_max_chars: int | None = Field(      # 标题字符上限
+    title_max_chars: int | None = Field(      # 标题目标字符数（字段名为兼容旧客户端保留）
         default=None,
         ge=2,
         le=100,
-        description="生成标题的字符上限（按汉字、英文字母、标点等逐字符计算）",
+        description="生成标题的目标字符数（结果会接近该值，按汉字、英文字母、标点等逐字符计算）",
     )
-    body_max_chars: int | None = Field(       # 正文字符上限
+    body_max_chars: int | None = Field(       # 正文目标字符数（字段名为兼容旧客户端保留）
         default=None,
         ge=10,
         le=1000,
-        description="生成正文的字符上限（按汉字、英文字母、标点等逐字符计算）",
+        description="生成正文的目标字符数（结果会接近该值，按汉字、英文字母、标点等逐字符计算）",
+    )
+    title_count: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+        description="需要生成的标题候选数量",
+    )
+    body_count: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+        description="需要生成的正文候选数量",
     )
 
     @field_validator("selling_point_catalog_id")
@@ -237,9 +252,19 @@ class GenerateCopyRequest(BaseModel):
         """去首尾空白。"""
         return _trimmed(value)
 
+    @field_validator("custom_style", "custom_scene", "custom_festival")
+    @classmethod
+    def normalize_custom_copy_context(cls, value: str | None) -> str | None:
+        """去除自定义生成条件的首尾空白，空输入不覆盖预设。"""
+        return _trimmed(value)
+
     @model_validator(mode="after")
     def require_product_for_search_config(self) -> "GenerateCopyRequest":
-        """配置搜索服务前必须先填写至少一个商品链接。"""
+        """校验必填生成条件以及商品搜索服务配置。"""
+        if not self.style and not self.custom_style:
+            raise ValueError("请选择或填写文案风格")
+        if not self.scene and not self.custom_scene:
+            raise ValueError("请选择或填写内容场景")
         if not self.product_urls and (
             self.product_search.endpoint_url or self.product_search.api_key
         ):
@@ -250,21 +275,41 @@ class GenerateCopyRequest(BaseModel):
 class GeneratedCopyDraft(BaseModel):
     """LLM 生成的文案草稿（用于解析 LLM 返回的 JSON）。
 
-    静态上限故意放宽，覆盖业务允许的最大字符数；
-    真正的上限由 GenerateCopyRequest.title_max_chars / body_max_chars
-    在 AiCopyService._validate_draft_length 中按请求逐次校验。
+    固定上下限用于限制单次模型响应的体积；不按用户选择的目标字数校验结果。
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    title: str = Field(min_length=2, max_length=200)
-    body: str = Field(min_length=10, max_length=2000)
+    titles: list[str] = Field(min_length=1, max_length=10)
+    bodies: list[str] = Field(min_length=1, max_length=10)
 
-    @field_validator("title", "body")
+    @field_validator("titles")
     @classmethod
-    def normalize_text(cls, value: str) -> str:
-        """去首尾空白。"""
-        return value.strip()
+    def normalize_titles(cls, values: list[str]) -> list[str]:
+        """去除标题首尾空白并维持单条标题的固定长度边界。"""
+        return cls._normalize_candidates(values, "标题", minimum=2, maximum=200)
+
+    @field_validator("bodies")
+    @classmethod
+    def normalize_bodies(cls, values: list[str]) -> list[str]:
+        """去除正文首尾空白并维持单条正文的固定长度边界。"""
+        return cls._normalize_candidates(values, "正文", minimum=10, maximum=2000)
+
+    @staticmethod
+    def _normalize_candidates(
+        values: list[str], label: str, *, minimum: int, maximum: int
+    ) -> list[str]:
+        normalized: list[str] = []
+        for index, value in enumerate(values, start=1):
+            text = value.strip()
+            if not text:
+                raise ValueError(f"第 {index} 条{label}不能为空")
+            if not minimum <= len(text) <= maximum:
+                raise ValueError(
+                    f"第 {index} 条{label}长度必须在 {minimum}-{maximum} 个字符之间"
+                )
+            normalized.append(text)
+        return normalized
 
 
 class GenerateCopyResponse(BaseModel):
@@ -272,9 +317,13 @@ class GenerateCopyResponse(BaseModel):
 
     title: str                              # 生成的标题
     body: str                               # 生成的正文
+    titles: list[str]                       # 全部标题候选
+    bodies: list[str]                       # 全部正文候选
     provider: str                           # 使用的供应商
     model: str                              # 使用的模型
     selling_point_references: list[SellingPointReference]  # 引用的卖点
     product_references: list[ProductReference] = Field(default_factory=list)  # 引用的商品资料
-    title_max_chars: int                    # 标题字符上限
-    body_max_chars: int                     # 正文字符上限
+    title_max_chars: int                    # 标题目标字符数（兼容旧字段名）
+    body_max_chars: int                     # 正文目标字符数（兼容旧字段名）
+    title_count: int                        # 标题候选数量
+    body_count: int                         # 正文候选数量

@@ -18,8 +18,8 @@ from loguru import logger
 from openpyxl import Workbook, load_workbook
 
 from uploader.errors import PublishResultUncertainError
-from uploader.jd_uploader.main import JDVideo, _contains_exact_goods_id
-from uploader.tmall_uploader.main import (
+from uploader.jd_video_uploader.main import JDVideo
+from uploader.tmall_video_uploader.main import (
     TmallVideo,
     _contains_exact_product_id,
     _has_explicit_empty_product_result,
@@ -29,8 +29,8 @@ from uploader.tmall_uploader.main import (
 )
 from utils.files import validate_media_filename
 from webapp.api.batch import BatchValidationError
-from webapp.api.batch_jd import parse_jd_batch_workbook
-from webapp.api.batch_tmall import parse_tmall_batch_workbook
+from webapp.api.batch_jd_video import parse_jd_video_batch_workbook
+from webapp.api.batch_tmall_video import parse_tmall_video_batch_workbook
 from webapp.api.main import WebSettings
 from webapp.api.main import create_app as _create_app
 from webapp.api.models import ValidationError, validate_publish_request
@@ -251,11 +251,6 @@ class PublishRequestValidationTests(unittest.TestCase):
         self.assertFalse(_contains_exact_product_id('data-item-id="1234"', "123"))
         self.assertFalse(_contains_exact_product_id('data-item-id="9123"', "123"))
 
-    def test_jd_product_id_matching_uses_numeric_boundaries(self):
-        self.assertTrue(_contains_exact_goods_id("商品编号 123，¥99", "123"))
-        self.assertFalse(_contains_exact_goods_id("商品编号 1234，¥99", "123"))
-        self.assertFalse(_contains_exact_goods_id("商品编号 9123，¥99", "123"))
-
     def test_video_filename_is_portable_to_windows_agent(self):
         with self.assertRaisesRegex(ValueError, "Windows 保留名称"):
             validate_media_filename("CON.mp4")
@@ -329,7 +324,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         self.assertEqual(_two_character_chunks("夏日好物"), ("夏日", "好物"))
         self.assertEqual(_two_character_chunks("abcde"), ("ab", "cd", "e"))
 
-    def test_tmall_custom_cover_uses_the_reference_image_library_flow(self):
+    def test_tmall_custom_cover_uses_the_current_two_dialog_flow(self):
         cover = Path(self.temp_dir.name) / "20260811-093942.jpeg"
         cover.write_bytes(b"cover")
         uploader = object.__new__(TmallVideo)
@@ -364,43 +359,65 @@ class PublishRequestValidationTests(unittest.TestCase):
         )
         frame.get_by_text.return_value = query(smart_cover_loading)
 
-        selected_control = MagicMock()
-        selected_control.is_checked = AsyncMock(return_value=True)
-        picker_frame = MagicMock()
-        picker_frame.url = "https://example.test/sucai-selector-ng"
-        picker_frame.evaluate = AsyncMock(
-            side_effect=[[], {"found": True, "hasControl": True, "checked": True}]
-        )
-        picker_frame.locator.return_value = selected_control
         page = MagicMock()
-        page.frames = [MagicMock(url="https://example.test/main"), picker_frame]
+        picker_frame = MagicMock()
+        picker_frame.url = "https://market.m.taobao.com/app/crs-qn/sucai-selector-ng/index"
+        picker_frame.evaluate = AsyncMock(
+            return_value={"count": 1, "checked": False, "matchingCards": ["new cover"]}
+        )
+        selected_control = MagicMock()
+        selected_control.evaluate = AsyncMock()
+        selected_control.is_checked = AsyncMock(return_value=True)
+        picker_frame.locator.return_value = selected_control
+        page.frames = [picker_frame]
+
+        upload_picker_file = AsyncMock()
+        click_visible_frame_button = AsyncMock()
+        select_three_to_four_cover_ratio_and_continue = AsyncMock()
 
         with (
             patch(
-                "uploader.tmall_uploader.main.asyncio.sleep",
+                "uploader.tmall_video_uploader.main.asyncio.sleep",
                 new=AsyncMock(),
             ),
             patch(
-                "uploader.tmall_uploader.main._upload_picker_file",
-                new=AsyncMock(),
-            ) as upload_picker_file,
+                "uploader.tmall_video_uploader.main._upload_picker_file",
+                new=upload_picker_file,
+            ),
             patch(
-                "uploader.tmall_uploader.main._select_square_cover_ratio_and_continue",
-                new=AsyncMock(),
-            ) as select_square_cover,
+                "uploader.tmall_video_uploader.main._cover_picker_upload_name",
+                return_value="mpau-cover-20260817-091530-a1b2c3d4e5f6.jpeg",
+            ),
             patch(
-                "uploader.tmall_uploader.main._click_visible_frame_button",
-                new=AsyncMock(),
-            ) as click_visible_button,
+                "uploader.tmall_video_uploader.main._click_visible_frame_button",
+                new=click_visible_frame_button,
+            ),
+            patch(
+                "uploader.tmall_video_uploader.main._select_three_to_four_cover_ratio_and_continue",
+                new=select_three_to_four_cover_ratio_and_continue,
+            ),
         ):
             asyncio.run(uploader._set_custom_cover(frame, page))
 
         edit.click.assert_awaited_once_with(timeout=10000)
         cover_upload.click.assert_awaited_once_with()
-        upload_picker_file.assert_awaited_once_with(page, picker_frame, cover)
-        select_square_cover.assert_awaited_once_with(page)
-        self.assertEqual(click_visible_button.await_count, 3)
-        cover_dialog.wait_for.assert_awaited_once_with(state="hidden", timeout=10000)
+        upload_picker_file.assert_awaited_once()
+        uploaded_cover_path = upload_picker_file.await_args.args[2]
+        self.assertEqual(uploaded_cover_path.name, "mpau-cover-20260817-091530-a1b2c3d4e5f6.jpeg")
+        select_three_to_four_cover_ratio_and_continue.assert_awaited_once_with(page)
+        selection_script, selection_stem = picker_frame.evaluate.await_args.args
+        self.assertIn("expectedStem", selection_script)
+        self.assertEqual(selection_stem, "mpau-cover-20260817-091530-a1b2c3d4e5f6")
+        self.assertNotIn("document.images", selection_script)
+        selected_control.evaluate.assert_awaited_once_with("(control) => control.click()")
+        self.assertEqual(
+            [call.args for call in click_visible_frame_button.await_args_list],
+            [
+                ((picker_frame,), ("完成",)),
+                ((picker_frame,), ("确定",)),
+                ((picker_frame,), ("下一步", "完成", "确定")),
+            ],
+        )
         frame.get_by_text.assert_called_once_with("智能封面图生成中", exact=False)
 
     def test_unknown_tmall_navigation_is_not_publish_confirmation(self):
@@ -415,11 +432,15 @@ class PublishRequestValidationTests(unittest.TestCase):
                 return Body()
 
         uploader = object.__new__(TmallVideo)
-        with patch("uploader.tmall_uploader.main.asyncio.sleep", new=AsyncMock()):
+        with patch("uploader.tmall_video_uploader.main.asyncio.sleep", new=AsyncMock()):
             with self.assertRaises(PublishResultUncertainError):
                 asyncio.run(
                     uploader._wait_for_publish_confirmation(
-                        Surface(), Surface(), before_text="", timeout_seconds=1
+                        Surface(),
+                        Surface(),
+                        initial_url=Surface.url,
+                        before_text="",
+                        timeout_seconds=1,
                     )
                 )
 
@@ -427,8 +448,8 @@ class PublishRequestValidationTests(unittest.TestCase):
         uploader = object.__new__(JDVideo)
         frame = SimpleNamespace(evaluate=AsyncMock(side_effect=[True, False]))
         with (
-            patch("uploader.jd_uploader.main.sys.stdin", None),
-            patch("uploader.jd_uploader.main.asyncio.sleep", new=AsyncMock()),
+            patch("uploader.jd_video_uploader.main.sys.stdin", SimpleNamespace(isatty=lambda: False)),
+            patch("uploader.jd_video_uploader.main.asyncio.sleep", new=AsyncMock()),
         ):
             asyncio.run(uploader._handle_captcha(frame))
 
@@ -1008,7 +1029,7 @@ class TmallBatchWorkbookTests(unittest.TestCase):
             [[str(self.video), "夏季女鞋穿搭", "轻盈舒适", "女鞋，夏季穿搭", "12345，67890", "夏日上新", ""]]
         )
 
-        rows = parse_tmall_batch_workbook(
+        rows = parse_tmall_video_batch_workbook(
             content,
             account="shop1",
             dry_run=True,
@@ -1031,14 +1052,14 @@ class TmallBatchWorkbookTests(unittest.TestCase):
         workbook.save(output)
         workbook.close()
 
-        rows = parse_tmall_batch_workbook(
+        rows = parse_tmall_video_batch_workbook(
             output.getvalue(),
             account="shop1",
             dry_run=True,
             headed=True,
         )
 
-        self.assertEqual(rows[0].request.creator_declaration, "内容含营销广告")
+        self.assertEqual(rows[0].request.creator_declaration, "内容含营销信息")
 
     def test_music_name_maps_to_tmall_publish_request(self):
         workbook = Workbook()
@@ -1049,7 +1070,7 @@ class TmallBatchWorkbookTests(unittest.TestCase):
         workbook.save(output)
         workbook.close()
 
-        rows = parse_tmall_batch_workbook(
+        rows = parse_tmall_video_batch_workbook(
             output.getvalue(),
             account="shop1",
             dry_run=True,
@@ -1064,9 +1085,10 @@ class TmallBatchWorkbookTests(unittest.TestCase):
         try:
             worksheet = workbook.active
             self.assertEqual(
-                [worksheet.cell(1, column).value for column in range(1, 10)],
+                [worksheet.cell(1, column).value for column in range(1, 11)],
                 [
                     "视频路径",
+                    "自定义封面",
                     "标题",
                     "文案",
                     "标签",
@@ -1077,11 +1099,11 @@ class TmallBatchWorkbookTests(unittest.TestCase):
                     "创作者声明",
                 ],
             )
-            self.assertEqual(worksheet["G2"].value, "默契")
+            self.assertEqual(worksheet["H2"].value, "默契")
             self.assertFalse(list(worksheet.merged_cells.ranges))
             validations = worksheet.data_validations.dataValidation
             self.assertEqual(len(validations), 1)
-            self.assertEqual(str(validations[0].sqref), "I2:I201")
+            self.assertEqual(str(validations[0].sqref), "J2:J201")
         finally:
             workbook.close()
 
@@ -1095,7 +1117,7 @@ class TmallBatchWorkbookTests(unittest.TestCase):
         workbook.close()
 
         with self.assertRaises(BatchValidationError) as context:
-            parse_tmall_batch_workbook(
+            parse_tmall_video_batch_workbook(
                 output.getvalue(),
                 account="shop1",
                 dry_run=True,
@@ -1117,7 +1139,7 @@ class TmallBatchWorkbookTests(unittest.TestCase):
         workbook.save(content)
         workbook.close()
 
-        rows = parse_tmall_batch_workbook(
+        rows = parse_tmall_video_batch_workbook(
             content.getvalue(),
             account="shop1",
             dry_run=True,
@@ -1130,7 +1152,7 @@ class TmallBatchWorkbookTests(unittest.TestCase):
         content = self.build_workbook([[str(self.base_dir / "missing.mp4"), "", "", "", "", "", ""]])
 
         with self.assertRaises(BatchValidationError) as context:
-            parse_tmall_batch_workbook(
+            parse_tmall_video_batch_workbook(
                 content,
                 account="shop1",
                 dry_run=False,
@@ -1138,13 +1160,13 @@ class TmallBatchWorkbookTests(unittest.TestCase):
             )
 
         self.assertEqual(context.exception.errors[0].row, 2)
-        self.assertIn("标题不能为空", context.exception.errors[0].message)
+        self.assertIn("视频文件不存在", context.exception.errors[0].message)
 
     def test_parent_directory_escape_is_reported_as_a_row_error(self):
         content = self.build_workbook([["demo.mp4", "夏季女鞋穿搭", "", "", "", "", ""]])
 
         with self.assertRaises(BatchValidationError) as context:
-            parse_tmall_batch_workbook(
+            parse_tmall_video_batch_workbook(
                 content,
                 account="shop1",
                 dry_run=True,
@@ -1182,7 +1204,7 @@ class JdBatchWorkbookTests(unittest.TestCase):
             [[str(self.video), "京东视频标题示例", "12345", "", "是"]]
         )
 
-        rows = parse_jd_batch_workbook(
+        rows = parse_jd_video_batch_workbook(
             content,
             account="shop1",
             dry_run=True,
@@ -1205,7 +1227,7 @@ class JdBatchWorkbookTests(unittest.TestCase):
         workbook.save(output)
         workbook.close()
 
-        rows = parse_jd_batch_workbook(
+        rows = parse_jd_video_batch_workbook(
             output.getvalue(),
             account="shop1",
             dry_run=True,
@@ -1224,7 +1246,7 @@ class JdBatchWorkbookTests(unittest.TestCase):
         workbook.close()
 
         with self.assertRaises(BatchValidationError) as context:
-            parse_jd_batch_workbook(
+            parse_jd_video_batch_workbook(
                 output.getvalue(),
                 account="shop1",
                 dry_run=True,
@@ -1240,7 +1262,7 @@ class JdBatchWorkbookTests(unittest.TestCase):
         )
 
         with self.assertRaises(BatchValidationError) as context:
-            parse_jd_batch_workbook(
+            parse_jd_video_batch_workbook(
                 content,
                 account="shop1",
                 dry_run=False,
@@ -1340,8 +1362,9 @@ class TmallBatchApiTests(unittest.TestCase):
                 )
                 body = json.loads(response.body)
 
-                self.assertEqual(response.status_code, 202)
-                self.assertEqual(body["created_count"], 2)
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(body["detail"], "Excel 内容校验失败，未创建任何发布任务")
+                self.assertEqual(len(manager.store.list_jobs(limit=None)), 0)
             finally:
                 manager.shutdown()
 
