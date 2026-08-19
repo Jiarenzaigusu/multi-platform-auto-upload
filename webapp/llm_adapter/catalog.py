@@ -72,10 +72,10 @@ ADAPTER_CATALOG: dict[AdapterKind, AdapterDefinition] = {
     AdapterKind.DEEPSEEK: AdapterDefinition(
         kind=AdapterKind.DEEPSEEK,
         label="DeepSeek",
-        description="官方深度推理模型，增强复杂中文写作与结构化生成。",
+        description="官方 V4 Flash 模型，兼顾低延迟与中文商品文案、结构化内容生成。",
         base_url="https://api.deepseek.com/v1",
-        model="deepseek-reasoner",
-        model_label="DeepSeek Reasoner",
+        model="deepseek-v4-flash",
+        model_label="DeepSeek V4 Flash",
         key_hint="sk-...",
     ),
     AdapterKind.QWEN: AdapterDefinition(

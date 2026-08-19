@@ -610,7 +610,7 @@ watch(() => props.active, (active) => {
       <div class="ai-copy-intro">
         <div>
           <p>01 / CREATIVE BRIEF</p>
-          <h2>把卖点交给文字</h2>
+          <h2>把卖点交给AI</h2>
         </div>
         <span class="ai-copy-model" :class="{ offline: !options.llm.ready }">
           {{ options.llm.ready ? `${options.llm.provider} · ${options.llm.model}` : 'LLM 待配置' }}

@@ -297,6 +297,7 @@ const coverImageInput = ref(null)
 const scheduleInput = ref(null)
 const batchWorkbookInput = ref(null)
 const submitting = ref(false)
+const localUploadStatus = ref('')
 const publishError = ref('')
 const batchSubmitting = ref(false)
 const batchSubmitError = ref('')
@@ -314,6 +315,7 @@ const form = reactive({
   platform: 'tmall',
   contentType: 'video',
   account: '',
+  sourceMode: 'agent',
   video: null,
   images: [],
   coverImage: null,
@@ -770,6 +772,7 @@ function clearPublishContent() {
   clearVideo()
   clearImages()
   clearCoverImage()
+  form.sourceMode = 'agent'
   for (const platform of ['tmall', 'jd']) {
     Object.assign(platformDrafts[platform], createEmptyPlatformDraft())
   }
@@ -866,9 +869,6 @@ async function submitPublish() {
   data.append('platform', form.platform)
   data.append('account', form.account)
   data.append('content_type', form.contentType)
-  if (isVideo.value) data.append('video', form.video)
-  else form.images.forEach((image) => data.append('images', image))
-  if (isTmall.value && isVideo.value && form.coverImage) data.append('cover_image', form.coverImage)
   data.append('title', form.title)
   data.append('description', isTmall.value ? form.description : '')
   data.append('tags', isTmall.value ? form.tags : '')
@@ -882,6 +882,29 @@ async function submitPublish() {
   data.append('headed', String(form.headed))
 
   try {
+    if (form.sourceMode === 'agent') {
+      localUploadStatus.value = '正在将素材传给 Windows 助手…'
+      if (isVideo.value) {
+        const [videoAsset, coverAsset] = await Promise.all([
+          uploadFileToAgent(form.video, 'video'),
+          isTmall.value && form.coverImage
+            ? uploadFileToAgent(form.coverImage, 'cover')
+            : Promise.resolve(null),
+        ])
+        data.append('video_asset_id', videoAsset.asset_id)
+        if (coverAsset) data.append('cover_asset_id', coverAsset.asset_id)
+      } else {
+        const imageAssets = await Promise.all(
+          form.images.map((image) => uploadFileToAgent(image, 'article-image')),
+        )
+        data.append('image_asset_ids', JSON.stringify(imageAssets.map((asset) => asset.asset_id)))
+      }
+      localUploadStatus.value = '素材已到达 Windows 助手，正在创建任务…'
+    } else {
+      if (isVideo.value) data.append('video', form.video)
+      else form.images.forEach((image) => data.append('images', image))
+      if (isTmall.value && isVideo.value && form.coverImage) data.append('cover_image', form.coverImage)
+    }
     const result = await request('/api/jobs/publish', { method: 'POST', body: data })
     showNotice(`${platformLabel(form.platform)}${form.dryRun ? '流程验证' : '发布'}任务已创建，配置已保留可继续修改后再次发布`, 'success')
     await refreshDashboard()
@@ -891,7 +914,34 @@ async function submitPublish() {
     showNotice(error.message, 'error')
   } finally {
     submitting.value = false
+    localUploadStatus.value = ''
   }
+}
+
+async function uploadFileToAgent(file, kind) {
+  const ticket = await request('/api/agent/local-upload-ticket', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filename: file.name, size: file.size, kind }),
+  })
+  const separator = ticket.upload_url.includes('?') ? '&' : '?'
+  let response
+  try {
+    response = await fetch(`${ticket.upload_url}${separator}ticket=${encodeURIComponent(ticket.ticket)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+      body: file,
+      mode: 'cors',
+      cache: 'no-store',
+    })
+  } catch (error) {
+    throw new Error('无法连接 Windows 助手本机上传服务，请更新并重启助手后重试')
+  }
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok || !body.asset) {
+    throw new Error(body.detail || 'Windows 助手接收素材失败')
+  }
+  return body.asset
 }
 
 async function submitBatch() {
@@ -957,6 +1007,7 @@ function resetUserInterface() {
     platform: 'tmall',
     contentType: 'video',
     account: '',
+    sourceMode: 'agent',
     video: null,
     images: [],
     coverImage: null,
@@ -1144,14 +1195,20 @@ onBeforeUnmount(() => {
 
           <div class="section-heading section-heading-with-action">
             <span>02</span>
-            <div><h2>内容素材</h2><p>{{ isArticle ? '图片会按当前选择顺序暂存，再由浏览器批量上传到天猫。' : '视频会先存入本机运行目录，再由浏览器上传到平台。' }}</p></div>
+            <div><h2>内容素材</h2><p>{{ form.sourceMode === 'agent' ? '浏览器选择的文件会直接传给当前 Windows 助手，服务器不保存素材。' : '素材会先上传到服务器，再由 Windows 助手下载并发布。' }}</p></div>
             <button type="button" class="quiet danger section-heading-action" @click="clearPublishDraft">一键清空发布配置与素材</button>
           </div>
-          <div v-if="isVideo" class="dropzone">
-            <input id="video-file" ref="videoInput" type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/x-m4v,video/x-msvideo,video/webm,.m4v,.avi" @change="onFileChange" />
-            <label for="video-file"><strong>{{ form.video ? form.video.name : '选择视频文件' }}</strong><small>{{ form.video ? `${(form.video.size / 1024 / 1024).toFixed(1)} MB` : '支持 MP4、MOV、MKV、M4V、AVI、WebM' }}</small></label>
-            <button v-if="form.video" class="clear-file" type="button" @click="clearVideo">移除视频</button>
+          <div class="platform-choice content-type-choice source-mode-choice">
+            <label :class="{ selected: form.sourceMode === 'agent' }"><input v-model="form.sourceMode" type="radio" value="agent" /><span>直传 Windows 助手</span><small>浏览器选文件，不经过服务器</small></label>
+            <label :class="{ selected: form.sourceMode === 'upload' }"><input v-model="form.sourceMode" type="radio" value="upload" /><span>上传到服务器</span><small>跨设备使用或兼容旧版助手</small></label>
           </div>
+          <template v-if="isVideo">
+            <div class="dropzone">
+              <input id="video-file" ref="videoInput" type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/x-m4v,video/x-msvideo,video/webm,.m4v,.avi" @change="onFileChange" />
+              <label for="video-file"><strong>{{ form.video ? form.video.name : '选择视频文件' }}</strong><small>{{ form.video ? `${(form.video.size / 1024 / 1024).toFixed(1)} MB` : '支持 MP4、MOV、MKV、M4V、AVI、WebM' }}</small></label>
+              <button v-if="form.video" class="clear-file" type="button" @click="clearVideo">移除视频</button>
+            </div>
+          </template>
           <div v-else class="field image-upload-field">
             <span>图文图片 <em>必选，1-9 张</em></span>
             <input id="article-image-files" ref="imageInput" class="native-file-input" type="file" multiple accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" @change="onImagesChange" />
@@ -1203,7 +1260,7 @@ onBeforeUnmount(() => {
           </div>
           <p class="uploader-note"><strong>创作者声明：</strong>必须根据视频和发布内容实际情况选择；如平台账号没有对应选项，任务会在点击发布前停止。</p>
           <p v-if="publishError" class="publish-error" role="alert">{{ publishError }}</p>
-          <button class="primary" :disabled="submitting" type="submit">{{ submitting ? '正在创建任务…' : form.dryRun ? '创建流程验证任务' : '创建正式发布任务' }}</button>
+          <button class="primary" :disabled="submitting" type="submit">{{ submitting ? (localUploadStatus || '正在创建任务…') : form.dryRun ? '创建流程验证任务' : '创建正式发布任务' }}</button>
         </form>
 
         <aside class="summary-panel">

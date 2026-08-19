@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
+import secrets
 import shutil
 import threading
 import time
@@ -19,6 +21,7 @@ from webapp.api.tasks import RuntimeInstanceLock
 from webapp.workspaces.paths import UserDataPaths
 
 _UPLOAD_DIRECTORY_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+_ASSET_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
 
 class AgentTaskManager:
@@ -47,7 +50,10 @@ class AgentTaskManager:
         self.job_log_dir = paths.job_logs
         self.lease_seconds = max(30, lease_seconds)
         self._guard = threading.RLock()
+        self._job_waiters: set[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = set()
         self._agents: dict[str, dict[str, Any]] = {}
+        self._local_upload_tickets: dict[str, dict[str, Any]] = {}
+        self._local_assets: dict[str, dict[str, Any]] = {}
         self._maintenance_errors: list[str] = []
         self._started = False
         self._closed = False
@@ -125,6 +131,7 @@ class AgentTaskManager:
             payload={"headed": headed},
             message="任务正在等待用户电脑上的本地执行代理领取",
         )
+        self._notify_job_available()
         return job
 
     def submit_publish_task(
@@ -133,14 +140,18 @@ class AgentTaskManager:
         *,
         batch_id: str | None = None,
         source_row: int | None = None,
+        local_assets: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return self.submit_publish_tasks([(request, source_row)], batch_id=batch_id)[0]
+        return self.submit_publish_tasks(
+            [(request, source_row)], batch_id=batch_id, local_assets=local_assets
+        )[0]
 
     def submit_publish_tasks(
         self,
         requests: list[tuple[PublishRequest, int | None] | tuple[PublishRequest, int | None, Path | None]],
         *,
         batch_id: str | None = None,
+        local_assets: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         if not requests:
             return []
@@ -161,6 +172,12 @@ class AgentTaskManager:
             )
             payload["schedule"] = request.schedule.isoformat() if request.schedule else None
             payload["tags"] = list(request.tags)
+            if local_assets:
+                payload["video_path"] = None
+                payload["image_paths"] = []
+                payload["cover_image_path"] = None
+                payload["local_assets"] = dict(local_assets)
+                payload["managed_upload"] = False
             definitions.append(
                 {
                     "kind": "publish",
@@ -172,7 +189,134 @@ class AgentTaskManager:
                     "message": "任务正在等待用户电脑上的本地执行代理领取",
                 }
             )
-        return self.store.create_jobs(definitions)
+        jobs = self.store.create_jobs(definitions)
+        self._notify_job_available()
+        return jobs
+
+    def issue_local_upload_ticket(
+        self,
+        *,
+        agent_id: str,
+        origin: str,
+        filename: str,
+        size: int,
+        kind: str,
+        max_size: int,
+    ) -> dict[str, Any]:
+        """Create a short-lived browser-to-Agent upload ticket."""
+        if kind not in {"video", "cover", "article-image"}:
+            raise ValueError("素材类型不受支持")
+        if not origin or len(origin) > 512:
+            raise ValueError("浏览器来源无效")
+        if not isinstance(size, int) or size <= 0 or size > max_size:
+            raise ValueError("素材大小超过允许范围")
+        clean_name = Path(filename or "").name
+        if not clean_name or clean_name in {".", ".."}:
+            raise ValueError("素材文件名无效")
+        suffix = Path(clean_name).suffix.lower()
+        allowed = {
+            "video": {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm"},
+            "cover": {".jpg", ".jpeg", ".png", ".webp"},
+            "article-image": {".jpg", ".jpeg", ".png", ".webp"},
+        }[kind]
+        if suffix not in allowed:
+            raise ValueError("素材格式不受支持")
+        now = time.time()
+        with self._guard:
+            self._drop_expired_local_uploads_locked(now)
+            agent = self._agents.get(agent_id)
+            if not agent:
+                raise ValueError("本地执行助手未在线")
+            ticket = secrets.token_urlsafe(32)
+            asset_id = secrets.token_hex(16)
+            record = {
+                "ticket": ticket,
+                "asset_id": asset_id,
+                "agent_id": agent_id,
+                "user_id": self.user_id,
+                "origin": origin.rstrip("/"),
+                "filename": clean_name,
+                "size": size,
+                "kind": kind,
+                "expires_at": now + 10 * 60,
+                "reserved": False,
+                "completed": False,
+            }
+            self._local_upload_tickets[ticket] = record
+        return {
+            "ticket": ticket,
+            "asset_id": asset_id,
+            "filename": clean_name,
+            "size": size,
+            "kind": kind,
+            "expires_at": datetime.fromtimestamp(record["expires_at"], timezone.utc).isoformat(),
+            "upload_url": "http://127.0.0.1:48765/v1/upload",
+        }
+
+    def _drop_expired_local_uploads_locked(self, now: float) -> None:
+        for ticket, record in tuple(self._local_upload_tickets.items()):
+            expires_at = (
+                record.get("completed_at", 0) + 2 * 60 * 60
+                if record.get("completed")
+                else record["expires_at"]
+            )
+            if expires_at <= now:
+                self._local_upload_tickets.pop(ticket, None)
+                self._local_assets.pop(record["asset_id"], None)
+
+    def authorize_local_upload(
+        self, *, ticket: str, agent_id: str, origin: str, reserve: bool
+    ) -> dict[str, Any]:
+        with self._guard:
+            self._drop_expired_local_uploads_locked(time.time())
+            record = self._local_upload_tickets.get(ticket)
+            if not record:
+                raise KeyError("上传票据不存在或已过期")
+            if record["agent_id"] != agent_id:
+                raise PermissionError("上传票据与设备不匹配")
+            if record["origin"] != origin.rstrip("/"):
+                raise PermissionError("上传来源不匹配")
+            if record["completed"] or (reserve and record["reserved"]):
+                raise ValueError("上传票据已经使用")
+            if reserve:
+                record["reserved"] = True
+            return dict(record)
+
+    def complete_local_upload(
+        self,
+        *,
+        ticket: str,
+        agent_id: str,
+        origin: str,
+        sha256: str,
+        size: int,
+    ) -> dict[str, Any]:
+        with self._guard:
+            checked = self.authorize_local_upload(
+                ticket=ticket, agent_id=agent_id, origin=origin, reserve=False
+            )
+            if not checked["reserved"]:
+                raise ValueError("上传尚未授权")
+            if size != checked["size"] or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+                raise ValueError("上传素材校验失败")
+            record = self._local_upload_tickets[ticket]
+            record["completed"] = True
+            record["sha256"] = sha256
+            record["completed_at"] = time.time()
+            self._local_assets[record["asset_id"]] = dict(record)
+            return dict(record)
+
+    def get_local_asset(self, asset_id: str, *, agent_id: str) -> dict[str, Any]:
+        if not _ASSET_ID_PATTERN.fullmatch(asset_id):
+            raise ValueError("素材 ID 无效")
+        with self._guard:
+            self._drop_expired_local_uploads_locked(time.time())
+            record = self._local_assets.get(asset_id)
+            if not record or not record.get("completed"):
+                raise KeyError("本机素材不存在或已过期")
+            if record["agent_id"] != agent_id:
+                raise PermissionError("素材与设备不匹配")
+            return dict(record)
 
     def inspect_tmall_product(
         self, product_url: str, *, timeout_seconds: float
@@ -189,6 +333,7 @@ class AgentTaskManager:
             message="正在等待本地执行助手读取天猫商品",
             remember_account=False,
         )
+        self._notify_job_available()
         deadline = time.monotonic() + max(10.0, timeout_seconds)
         terminal: dict[str, Any] | None = None
         while time.monotonic() < deadline:
@@ -233,6 +378,7 @@ class AgentTaskManager:
         device_name: str,
         system: str,
         version: str,
+        capabilities: list[str] | tuple[str, ...] = (),
     ) -> dict[str, Any]:
         self.start()
         now = time.monotonic()
@@ -253,11 +399,52 @@ class AgentTaskManager:
                 "device_name": device_name,
                 "system": system,
                 "version": version,
+                "capabilities": list(capabilities)[:20],
                 "connected_at": connected_at,
                 "last_seen_at": datetime.now(timezone.utc).isoformat(),
                 "last_seen_monotonic": now,
             }
-            return self._public_agent(self._agents[agent_id], online=True)
+            connected = self._public_agent(self._agents[agent_id], online=True)
+        self._notify_job_available()
+        return connected
+
+    def _notify_job_available(self) -> None:
+        """Wake async claim requests without creating idle polling traffic."""
+        with self._guard:
+            waiters = tuple(self._job_waiters)
+        for loop, event in waiters:
+            try:
+                loop.call_soon_threadsafe(event.set)
+            except RuntimeError:
+                continue
+
+    async def wait_for_claimable_job(
+        self, agent_id: str, timeout_seconds: float
+    ) -> dict[str, Any] | None:
+        """Atomically claim now or wait for a new job notification."""
+        immediate = self.claim_next_job(agent_id)
+        if immediate is not None or timeout_seconds <= 0:
+            return immediate
+
+        loop = asyncio.get_running_loop()
+        event = asyncio.Event()
+        waiter = (loop, event)
+        with self._guard:
+            self._job_waiters.add(waiter)
+        try:
+            # Close the registration race: a job may have arrived after the
+            # first claim and before this waiter was visible.
+            immediate = self.claim_next_job(agent_id)
+            if immediate is not None:
+                return immediate
+            try:
+                await asyncio.wait_for(event.wait(), timeout=timeout_seconds)
+            except TimeoutError:
+                return None
+            return self.claim_next_job(agent_id)
+        finally:
+            with self._guard:
+                self._job_waiters.discard(waiter)
 
     def agent_status(self) -> dict[str, Any]:
         self.start()
@@ -571,4 +758,6 @@ class AgentTaskManager:
                 return
             self._closed = True
             self._agents.clear()
+            self._local_upload_tickets.clear()
+            self._local_assets.clear()
             self._instance_lock.release()

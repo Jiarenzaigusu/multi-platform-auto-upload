@@ -168,7 +168,8 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
         payload = json.loads(request.data)
         self.assertEqual(request.full_url, "https://api.deepseek.com/v1/chat/completions")
         self.assertEqual(request.get_header("Authorization"), "Bearer deepseek-secret")
-        self.assertEqual(payload["model"], "deepseek-reasoner")
+        self.assertEqual(payload["model"], "deepseek-v4-flash")
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
         self.assertEqual(message["content"], "ok")
         self.assertIsInstance(build.call_args.args[0], _NoRedirectHandler)
         https_handler = next(
@@ -278,6 +279,7 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
             first_payload["tool_choice"],
             {"type": "function", "function": {"name": "inspect_product_link"}},
         )
+        self.assertNotIn("thinking", first_payload)
         self.assertEqual(assistant["tool_calls"][0]["id"], "call-product-1")
 
         opener.open.return_value = _FakeResponse(
@@ -315,6 +317,44 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
         self.assertEqual(second_payload["messages"][3]["role"], "tool")
         self.assertEqual(second_payload["response_format"], {"type": "json_object"})
         self.assertEqual(message["content"], '{"title":"标题","body":"正文"}')
+
+    def test_deepseek_disables_thinking_for_forced_tool_calls(self):
+        registry = LLMAdapterRegistry()
+        registry.activate(AdapterKind.DEEPSEEK, "deepseek-secret")
+        provider = OpenAICompatibleProvider(registry)
+        opener = Mock()
+        opener.open.return_value = _FakeResponse(
+            {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+        )
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "inspect_product_link",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+
+        with patch(
+            "webapp.llm_adapter.provider.build_opener", return_value=opener
+        ):
+            provider.chat(
+                [{"role": "user", "content": "读取商品"}],
+                tools=tools,
+                tool_choice={
+                    "type": "function",
+                    "function": {"name": "inspect_product_link"},
+                },
+            )
+
+        payload = json.loads(opener.open.call_args.args[0].data)
+        self.assertEqual(payload["tools"], tools)
+        self.assertEqual(
+            payload["tool_choice"],
+            {"type": "function", "function": {"name": "inspect_product_link"}},
+        )
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
 
     def test_probe_uses_prepared_workspace_credentials_without_activating_them(self):
         registry = LLMAdapterRegistry()

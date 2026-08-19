@@ -54,7 +54,7 @@ async function copyCode() {
       <ol>
         <li>在 Windows 电脑下载并安装助手。</li>
         <li>打开“MPAU 本地执行助手”，填入发布台地址和下方配对码。</li>
-        <li>配对完成后助手自动保持连接；登录平台和上传任务会在该电脑的 Edge 中执行。</li>
+        <li>配对完成后助手自动保持连接；登录平台和上传任务会在该电脑的 Edge 中执行。单条发布的文件选择框会直传到最新助手。</li>
       </ol>
       <a class="agent-download" :href="apiUrl(installerUrl)">下载 {{ installerName }}</a>
       <button class="agent-code-button" :disabled="busy" type="button" @click="generateCode">

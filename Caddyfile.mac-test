@@ -1,0 +1,19 @@
+# Local-network HTTPS entry point for testing the Windows agent against this Mac.
+https://10.31.108.221:8443 {
+    tls internal
+
+    encode zstd gzip
+
+    request_body {
+        max_size 20GB
+    }
+
+    reverse_proxy 127.0.0.1:8788
+
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "same-origin"
+    }
+}

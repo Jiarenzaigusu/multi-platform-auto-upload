@@ -6,7 +6,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,6 +26,7 @@ class AgentHello(BaseModel):
     device_name: str = Field(min_length=1, max_length=120)
     system: str = Field(min_length=1, max_length=200)
     version: str = Field(min_length=1, max_length=40)
+    capabilities: list[str] = Field(default_factory=list, max_length=20)
 
 
 class AgentIdentity(BaseModel):
@@ -44,6 +45,28 @@ class AgentCompletion(AgentIdentity):
     error: str = Field(default="", max_length=4000)
     result: dict[str, Any] = Field(default_factory=dict)
     logs: list[str] = Field(default_factory=list, max_length=500)
+
+
+class LocalUploadTicketRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str = Field(min_length=1, max_length=255)
+    size: int = Field(gt=0)
+    kind: Literal["video", "cover", "article-image"]
+
+
+class LocalUploadAuthorization(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ticket: str = Field(min_length=20, max_length=200)
+    origin: str = Field(min_length=1, max_length=512)
+    reserve: bool = True
+
+
+class LocalUploadCompletion(LocalUploadAuthorization):
+    asset_id: str = Field(min_length=32, max_length=32)
+    sha256: str = Field(min_length=64, max_length=64)
+    size: int = Field(gt=0)
 
 
 def _validate_agent_id(agent_id: str) -> str:
@@ -88,6 +111,8 @@ def create_agent_router(
     workspace_for_user: Callable[[str], UserWorkspace],
     auth_service: AuthService,
     installer_path: Path | None = None,
+    max_video_bytes: int = 4 * 1024 * 1024 * 1024,
+    max_image_bytes: int = 20 * 1024 * 1024,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/agent", tags=["local-agent"])
 
@@ -222,6 +247,86 @@ def create_agent_router(
             }
         }
 
+    @router.post("/local-upload-ticket")
+    def local_upload_ticket(
+        payload: LocalUploadTicketRequest, request: Request
+    ) -> dict[str, Any]:
+        workspace = workspace_resolver(request)
+        manager = workspace.task_manager
+        if not getattr(manager, "remote_execution", False):
+            raise HTTPException(status_code=409, detail="当前服务未启用 Windows 助手直传")
+        status = manager.agent_status()
+        agents = status.get("agents") or []
+        if not agents:
+            raise HTTPException(status_code=409, detail="本地执行助手未在线")
+        if "local_upload" not in (agents[0].get("capabilities") or []):
+            raise HTTPException(status_code=409, detail="Windows 助手版本过旧，请更新后重启")
+        origin = request.headers.get("origin", "").strip().rstrip("/")
+        if not origin:
+            raise HTTPException(status_code=400, detail="浏览器没有提供安全来源信息")
+        try:
+            return manager.issue_local_upload_ticket(
+                agent_id=agents[0]["agent_id"],
+                origin=origin,
+                filename=payload.filename,
+                size=payload.size,
+                kind=payload.kind,
+                max_size=max_video_bytes if payload.kind == "video" else max_image_bytes,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.post("/local-upload/authorize")
+    def authorize_local_upload(
+        payload: LocalUploadAuthorization, request: Request
+    ) -> dict[str, Any]:
+        authenticated = authenticated_agent(request)
+        manager = remote_manager(request)
+        try:
+            record = manager.authorize_local_upload(
+                ticket=payload.ticket,
+                agent_id=authenticated.device.agent_id,
+                origin=payload.origin,
+                reserve=payload.reserve,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            key: record[key]
+            for key in ("asset_id", "filename", "size", "kind")
+        }
+
+    @router.post("/local-upload/complete")
+    def complete_local_upload(
+        payload: LocalUploadCompletion, request: Request
+    ) -> dict[str, Any]:
+        authenticated = authenticated_agent(request)
+        manager = remote_manager(request)
+        try:
+            record = manager.complete_local_upload(
+                ticket=payload.ticket,
+                agent_id=authenticated.device.agent_id,
+                origin=payload.origin,
+                sha256=payload.sha256,
+                size=payload.size,
+            )
+            if record["asset_id"] != payload.asset_id:
+                raise PermissionError("素材 ID 与上传票据不匹配")
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            key: record[key]
+            for key in ("asset_id", "filename", "size", "kind", "sha256")
+        }
+
     @router.post("/connect")
     def connect(payload: AgentHello, request: Request) -> dict[str, Any]:
         manager = remote_manager(request)
@@ -233,6 +338,7 @@ def create_agent_router(
                 device_name=payload.device_name,
                 system=payload.system,
                 version=payload.version,
+                capabilities=payload.capabilities,
             )
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -240,6 +346,7 @@ def create_agent_router(
             "agent": agent,
             "lease_seconds": manager.lease_seconds,
             "poll_seconds": 2,
+            "claim_wait_seconds": 25,
             "user": {
                 "id": authenticated.user.id,
                 "username": authenticated.user.username,
@@ -249,11 +356,15 @@ def create_agent_router(
         }
 
     @router.post("/claim")
-    def claim(payload: AgentIdentity, request: Request) -> dict[str, Any]:
+    async def claim(
+        payload: AgentIdentity,
+        request: Request,
+        wait_seconds: float = Query(25, ge=0, le=30),
+    ) -> dict[str, Any]:
         manager = remote_manager(request)
         agent_id = bound_agent_id(request, payload.agent_id)
         try:
-            job = manager.claim_next_job(agent_id)
+            job = await manager.wait_for_claimable_job(agent_id, wait_seconds)
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {

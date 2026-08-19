@@ -65,10 +65,10 @@ class AgentApiClient:
         except (URLError, TimeoutError, OSError) as exc:
             raise AgentApiError(f"无法连接发布服务：{exc}") from exc
 
-    def connect(self, hello: dict[str, str]) -> dict[str, Any]:
+    def connect(self, hello: dict[str, Any]) -> dict[str, Any]:
         return self.request_json("/api/agent/connect", method="POST", payload=hello)
 
-    def pair(self, hello: dict[str, str], pairing_code: str) -> dict[str, Any]:
+    def pair(self, hello: dict[str, Any], pairing_code: str) -> dict[str, Any]:
         response = self.request_json(
             "/api/agent/pair",
             method="POST",
@@ -82,9 +82,12 @@ class AgentApiClient:
         self.user = response.get("user")
         return response
 
-    def claim(self, agent_id: str) -> dict[str, Any] | None:
+    def claim(
+        self, agent_id: str, *, wait_seconds: float = 0
+    ) -> dict[str, Any] | None:
+        query = urlencode({"wait_seconds": max(0.0, min(30.0, wait_seconds))})
         response = self.request_json(
-            "/api/agent/claim",
+            f"/api/agent/claim?{query}",
             method="POST",
             payload={"agent_id": agent_id},
         )
@@ -95,6 +98,37 @@ class AgentApiClient:
             f"/api/agent/jobs/{quote(job_id)}/heartbeat",
             method="POST",
             payload={"agent_id": agent_id},
+        )
+
+    def authorize_local_upload(
+        self, ticket: str, origin: str, *, reserve: bool = True
+    ) -> dict[str, Any]:
+        return self.request_json(
+            "/api/agent/local-upload/authorize",
+            method="POST",
+            payload={"ticket": ticket, "origin": origin, "reserve": reserve},
+        )
+
+    def complete_local_upload(
+        self,
+        ticket: str,
+        origin: str,
+        *,
+        asset_id: str,
+        sha256: str,
+        size: int,
+    ) -> dict[str, Any]:
+        return self.request_json(
+            "/api/agent/local-upload/complete",
+            method="POST",
+            payload={
+                "ticket": ticket,
+                "origin": origin,
+                "reserve": False,
+                "asset_id": asset_id,
+                "sha256": sha256,
+                "size": size,
+            },
         )
 
     def revoke_device(self, agent_id: str) -> None:

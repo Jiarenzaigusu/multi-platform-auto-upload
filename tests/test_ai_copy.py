@@ -23,6 +23,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from starlette.datastructures import UploadFile
 
 from webapp.ai_copy.contracts import (
+    GeneratedCopyDraft,
     GenerateCopyRequest,
     ProductReference,
     ProductReferencesRequest,
@@ -263,9 +264,31 @@ class AiCopyServiceTests(unittest.TestCase):
         )
 
         system_prompt = messages[0]["content"]
-        self.assertIn("商品编号ID、阿拉伯数字", system_prompt)
-        self.assertNotIn("不要使用功效词汇", system_prompt)
+        self.assertIn("阿拉伯数字", system_prompt)
+        self.assertIn("功效", system_prompt)
         self.assertIn("100%", system_prompt)
+
+    def test_custom_copy_context_overrides_the_preset_in_the_prompt(self):
+        request = GenerateCopyRequest(
+            selling_point_catalog_id="a" * 16,
+            product_identifiers=["SKU-001"],
+            style=None,
+            scene=None,
+            festival=None,
+            custom_style="松弛的法式随笔",
+            custom_scene="雨天咖啡馆约会",
+            custom_festival="品牌周年庆",
+        )
+
+        messages = AiCopyService._initial_messages(
+            request,
+            [SellingPointReference(identifier="SKU-001", selling_point="轻量透气，适合日常通勤")],
+        )
+
+        prompt = messages[1]["content"]
+        self.assertIn("文案风格：松弛的法式随笔", prompt)
+        self.assertIn("内容场景：雨天咖啡馆约会", prompt)
+        self.assertIn("节日氛围：品牌周年庆", prompt)
 
     def test_llm_cannot_change_the_requested_product_url(self):
         provider = FakeChatProvider(tool_url="https://attacker.example/private")
@@ -311,7 +334,12 @@ class AiCopyServiceTests(unittest.TestCase):
         service = AiCopyService(provider, FakeProductTool())
 
         result = service.generate(
-            self.make_request(service, "鞋面含棉99%，适合日常通勤")
+            self.make_request(
+                service,
+                "鞋面含棉99%，适合日常通勤",
+                title_max_chars=5,
+                body_max_chars=19,
+            )
         )
 
         self.assertIn("99%", result.body)
@@ -419,8 +447,65 @@ class AiCopyServiceTests(unittest.TestCase):
         prompt = provider.calls[0]["messages"][1]["content"]
         self.assertIn("SKU-001：轻量透气", prompt)
         self.assertIn("SKU-002：柔软百搭", prompt)
-        self.assertIn("标题和正文的参考", prompt)
+        self.assertIn("标题和正文的参考，生成的标题文案结果中引用该核心卖点的文字占比约50%", prompt)
         self.assertEqual(len(result.selling_point_references), 2)
+
+    def test_generated_copy_allows_target_length_deviation(self):
+        provider = FakeChatProvider(
+            draft={"title": "夏鞋", "body": "舒适好搭，日常通勤穿着轻松。"}
+        )
+        service = AiCopyService(provider, FakeProductTool())
+
+        result = service.generate(
+            self.make_request(
+                service,
+                "轻盈透气，适合日常通勤",
+                title_max_chars=15,
+                body_max_chars=100,
+            )
+        )
+
+        self.assertEqual(result.title, "夏鞋")
+        self.assertEqual(result.body, "舒适好搭，日常通勤穿着轻松。")
+        instruction = provider.calls[0]["messages"][-1]["content"]
+        self.assertIn("每条标题至少 15 个字符，优先写到 17到18 个字符", instruction)
+        self.assertIn("每条正文至少 100 个字符，优先写到 110到120 个字符", instruction)
+        self.assertIn("按界面显示的字符数逐个计算", instruction)
+        self.assertIn("绝不能少于界面目标字数", instruction)
+        self.assertIn("任何一条未达到最低字数时，补充具体场景、卖点与搭配描述", instruction)
+
+    def test_generated_copy_returns_the_requested_candidate_counts(self):
+        provider = FakeChatProvider(
+            draft={
+                "titles": ["轻盈通勤鞋", "自在日常鞋", "夏日好搭鞋"],
+                "bodies": [
+                    "轻盈透气的鞋款，适合日常通勤与自在搭配。",
+                    "简约鞋型自然好搭，让出行与休闲都更轻松。",
+                ],
+            }
+        )
+        service = AiCopyService(provider, FakeProductTool())
+
+        result = service.generate(
+            self.make_request(service, "轻盈透气，适合日常通勤", title_count=3, body_count=2)
+        )
+
+        self.assertEqual(result.titles, ["轻盈通勤鞋", "自在日常鞋", "夏日好搭鞋"])
+        self.assertEqual(len(result.bodies), 2)
+        self.assertEqual(result.title_count, 3)
+        self.assertEqual(result.body_count, 2)
+        instruction = provider.calls[0]["messages"][-1]["content"]
+        self.assertIn("titles 必须且只能包含 3 条不同标题", instruction)
+        self.assertIn("bodies 必须且只能包含 2 条不同正文", instruction)
+
+    def test_generated_copy_rejects_a_wrong_candidate_count(self):
+        draft = GeneratedCopyDraft(
+            titles=["轻盈通勤鞋", "自在日常鞋"],
+            bodies=["轻盈透气的鞋款，适合日常通勤与自在搭配。"],
+        )
+
+        with self.assertRaisesRegex(LLMResponseError, "标题数量不正确"):
+            AiCopyService._validate_draft_counts(draft, title_count=3, body_count=1)
 
 
 class _FakeHeaders:

@@ -101,6 +101,24 @@ class AgentTaskManagerTests(unittest.TestCase):
             self.manager.job_log_path(job["id"]).read_text(encoding="utf-8"),
         )
 
+    def test_agent_claim_wait_is_woken_when_a_job_is_created(self):
+        self.connect()
+
+        async def scenario():
+            waiter = asyncio.create_task(
+                self.manager.wait_for_claimable_job(AGENT_ID, timeout_seconds=1)
+            )
+            await asyncio.sleep(0.01)
+            created = self.manager.submit_account_task(
+                kind="check", platform="tmall", account="shop1", headed=False
+            )
+            claimed = await waiter
+            return created, claimed
+
+        created, claimed = asyncio.run(scenario())
+        self.assertIsNotNone(claimed)
+        self.assertEqual(claimed["id"], created["id"])
+
     def test_publish_lease_expiry_becomes_uncertain_and_cleans_upload(self):
         video_dir = self.paths.uploads / ("d" * 32)
         video_dir.mkdir()
@@ -155,6 +173,55 @@ class AgentTaskManagerTests(unittest.TestCase):
 
         self.assertEqual(len(jobs), 200)
         self.assertEqual(write.call_count, 1)
+
+    def test_browser_direct_asset_job_persists_ids_without_local_paths_or_ticket(self):
+        self.connect()
+        ticket = self.manager.issue_local_upload_ticket(
+            agent_id=AGENT_ID,
+            origin="https://console.example",
+            filename="demo.mp4",
+            size=5,
+            kind="video",
+            max_size=100,
+        )
+        authorized = self.manager.authorize_local_upload(
+            ticket=ticket["ticket"],
+            agent_id=AGENT_ID,
+            origin="https://console.example",
+            reserve=True,
+        )
+        completed = self.manager.complete_local_upload(
+            ticket=ticket["ticket"],
+            agent_id=AGENT_ID,
+            origin="https://console.example",
+            sha256="a" * 64,
+            size=5,
+        )
+        fixture = self.paths.runtime / "validation.mp4"
+        fixture.write_bytes(b"video")
+        request = validate_publish_request(
+            platform="tmall",
+            account="shop1",
+            video_path=fixture,
+            original_filename="demo.mp4",
+            title="本机直传任务",
+        )
+        public_asset = {
+            key: completed[key]
+            for key in ("asset_id", "filename", "size", "kind", "sha256")
+        }
+
+        job = self.manager.submit_publish_task(
+            request,
+            local_assets={"video": public_asset, "cover": None, "images": []},
+        )
+
+        payload = self.store.get_job(job["id"])["payload"]
+        self.assertIsNone(payload["video_path"])
+        self.assertEqual(payload["image_paths"], [])
+        self.assertIsNone(payload["cover_image_path"])
+        self.assertEqual(payload["local_assets"]["video"]["asset_id"], authorized["asset_id"])
+        self.assertNotIn(ticket["ticket"], str(payload))
 
     def test_tmall_product_lookup_round_trips_through_agent_job(self):
         self.connect()

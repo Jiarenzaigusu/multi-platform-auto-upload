@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import platform
+import re
 import shutil
 import signal
 import socket
@@ -16,6 +17,7 @@ from urllib.parse import urlsplit
 from local_agent import __version__
 from local_agent.client import AgentApiClient, AgentApiError
 from local_agent.credentials import AgentConnectionStore
+from local_agent.local_upload import LocalUploadServer
 from local_agent.paths import (
     default_data_root,
     load_or_create_agent_id,
@@ -26,6 +28,27 @@ from local_agent.runner import AgentJobRunner
 from uploader.errors import PublishResultUncertainError
 from utils.files import validate_cover_image_filename, validate_media_filename
 from webapp.api.models import SUPPORTED_COVER_IMAGE_EXTENSIONS
+
+_LOCAL_ASSET_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _local_asset_path(asset_root: Path, asset: object, expected_kind: str) -> Path:
+    if not isinstance(asset, dict) or asset.get("kind") != expected_kind:
+        raise RuntimeError("任务中的本机素材类型无效")
+    asset_id = str(asset.get("asset_id") or "")
+    if not _LOCAL_ASSET_ID_PATTERN.fullmatch(asset_id):
+        raise RuntimeError("任务中的本机素材 ID 无效")
+    filename = Path(str(asset.get("filename") or "")).name
+    if not filename:
+        raise RuntimeError("任务中的本机素材文件名无效")
+    path = asset_root / f"{asset_id}{Path(filename).suffix.lower()}"
+    try:
+        expected_size = int(asset.get("size") or 0)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("任务中的本机素材大小无效") from exc
+    if not path.is_file() or expected_size <= 0 or path.stat().st_size != expected_size:
+        raise RuntimeError(f"本机素材不存在或不完整：{filename}")
+    return path
 
 
 class AgentJobCancelledError(RuntimeError):
@@ -74,15 +97,18 @@ class LocalAgentApplication:
         self.data_root = secure_directory(data_root)
         self.agent_id = load_or_create_agent_id(self.data_root)
         self.poll_seconds = max(1.0, poll_seconds)
+        self.claim_wait_seconds = 0.0
         self.lease_seconds = 45.0
         self.stopping = False
         self.authorization_failed = False
         self.runner: AgentJobRunner | None = None
+        self.local_upload_server: LocalUploadServer | None = None
         self.hello = {
             "agent_id": self.agent_id,
             "device_name": socket.gethostname() or "Local PC",
             "system": platform.platform()[:200],
             "version": __version__,
+            "capabilities": ["local_upload"],
         }
 
     def stop(self, *_args) -> None:
@@ -95,9 +121,20 @@ class LocalAgentApplication:
         if self.runner is not None and self.runner.user_id != user["id"]:
             self.runner.shutdown()
             self.runner = None
+            if self.local_upload_server is not None:
+                self.local_upload_server.stop()
+                self.local_upload_server = None
         if self.runner is None:
             self.runner = AgentJobRunner(user["id"], paths)
+        if self.local_upload_server is None:
+            self.local_upload_server = LocalUploadServer(
+                self.client, self.runner.paths.runtime / "assets"
+            )
+            self.local_upload_server.start()
         self.poll_seconds = max(1.0, float(response.get("poll_seconds", self.poll_seconds)))
+        self.claim_wait_seconds = max(
+            0.0, min(30.0, float(response.get("claim_wait_seconds", 0)))
+        )
         self.lease_seconds = max(30.0, float(response.get("lease_seconds", 45)))
         print(
             f"本地代理已连接：{user['display_name']} ({user['username']})，"
@@ -110,9 +147,16 @@ class LocalAgentApplication:
             self.connect()
         while not self.stopping:
             try:
-                job = self.client.claim(self.agent_id)
+                if self.claim_wait_seconds > 0:
+                    job = self.client.claim(
+                        self.agent_id, wait_seconds=self.claim_wait_seconds
+                    )
+                else:
+                    # Keep compatibility with older embedded/test clients.
+                    job = self.client.claim(self.agent_id)
                 if job is None:
-                    time.sleep(self.poll_seconds)
+                    if self.claim_wait_seconds <= 0:
+                        time.sleep(self.poll_seconds)
                     continue
                 self.execute(job)
             except AgentApiError as exc:
@@ -134,6 +178,9 @@ class LocalAgentApplication:
                 self.stopping = True
         if self.runner is not None:
             self.runner.shutdown()
+        if self.local_upload_server is not None:
+            self.local_upload_server.stop()
+            self.local_upload_server = None
 
     def execute(self, job: dict) -> None:
         assert self.runner is not None
@@ -143,6 +190,7 @@ class LocalAgentApplication:
         video_path: Path | None = None
         cover_image_path: Path | None = None
         image_paths: tuple[Path, ...] = ()
+        local_asset_paths: tuple[Path, ...] = ()
         download_dir: Path | None = None
         future = None
         status = "failed"
@@ -174,8 +222,36 @@ class LocalAgentApplication:
             if job["kind"] == "publish":
                 payload = job.get("payload", {})
                 content_type = payload.get("content_type", "video")
+                local_assets = payload.get("local_assets")
                 # Older queued tasks omitted the flag and still need the managed download path.
-                if payload.get("managed_upload", True):
+                if isinstance(local_assets, dict):
+                    asset_root = self.runner.paths.runtime / "assets"
+                    resolved_assets: list[Path] = []
+                    if content_type == "article":
+                        resolved_images: list[Path] = []
+                        for asset in local_assets.get("images") or []:
+                            resolved_images.append(
+                                _local_asset_path(asset_root, asset, "article-image")
+                            )
+                            local_asset_paths = tuple(resolved_images)
+                        image_paths = tuple(resolved_images)
+                        if not 1 <= len(image_paths) <= 9:
+                            raise RuntimeError("任务中的本机图文素材数量无效")
+                        resolved_assets.extend(image_paths)
+                    else:
+                        video_path = _local_asset_path(
+                            asset_root, local_assets.get("video"), "video"
+                        )
+                        resolved_assets.append(video_path)
+                        local_asset_paths = tuple(resolved_assets)
+                        if local_assets.get("cover"):
+                            cover_image_path = _local_asset_path(
+                                asset_root, local_assets["cover"], "cover"
+                            )
+                            resolved_assets.append(cover_image_path)
+                            local_asset_paths = tuple(resolved_assets)
+                    local_asset_paths = tuple(resolved_assets)
+                elif payload.get("managed_upload", True):
                     download_dir = secure_directory(self.runner.paths.uploads / job_id)
                     if content_type == "article":
                         downloaded_images: list[Path] = []
@@ -319,6 +395,11 @@ class LocalAgentApplication:
                             logs.append(f"本地临时素材清理失败：{exc}")
                         else:
                             time.sleep(0.5 * (attempt + 1))
+            for asset_path in local_asset_paths:
+                try:
+                    asset_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    logs.append(f"本机素材清理失败：{exc}")
 
         for attempt in range(3):
             try:

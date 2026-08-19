@@ -20,6 +20,9 @@ from webapp.llm_adapter.catalog import AdapterKind
 from webapp.llm_adapter.registry import AdapterCredentials, LLMAdapterRegistry
 
 
+DEEPSEEK_V4_FLASH_MODEL = "deepseek-v4-flash"
+
+
 class _NoRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -116,6 +119,7 @@ class OpenAICompatibleProvider:
             payload["tool_choice"] = tool_choice
         if response_format is not None:
             payload["response_format"] = response_format
+        self._disable_deepseek_thinking(payload, active)
 
         return self._request_message(active, payload, self._timeout_seconds)
 
@@ -124,16 +128,25 @@ class OpenAICompatibleProvider:
         probe_timeout = (
             30 if credentials.definition.kind is AdapterKind.DEEPSEEK else 20
         )
-        self._request_message(
-            credentials,
-            {
-                "model": credentials.definition.model,
-                "messages": [{"role": "user", "content": "回复 OK"}],
-                "temperature": 0,
-                "max_tokens": 1,
-            },
-            min(self._timeout_seconds, probe_timeout),
-        )
+        payload: dict[str, Any] = {
+            "model": credentials.definition.model,
+            "messages": [{"role": "user", "content": "回复 OK"}],
+            "temperature": 0,
+            "max_tokens": 1,
+        }
+        self._disable_deepseek_thinking(payload, credentials)
+        self._request_message(credentials, payload, min(self._timeout_seconds, probe_timeout))
+
+    @staticmethod
+    def _disable_deepseek_thinking(
+        payload: dict[str, Any], active: AdapterCredentials
+    ) -> None:
+        """Keep V4 Flash on its low-latency, non-thinking path for every request."""
+        if (
+            active.definition.kind is AdapterKind.DEEPSEEK
+            and active.definition.model == DEEPSEEK_V4_FLASH_MODEL
+        ):
+            payload["thinking"] = {"type": "disabled"}
 
     def _request_message(
         self,

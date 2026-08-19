@@ -31,7 +31,7 @@ from utils.files import validate_media_filename
 from webapp.api.batch import BatchValidationError
 from webapp.api.batch_jd_video import parse_jd_video_batch_workbook
 from webapp.api.batch_tmall_video import parse_tmall_video_batch_workbook
-from webapp.api.main import WebSettings
+from webapp.api.main import WebSettings, _agent_local_path, _agent_local_video_request
 from webapp.api.main import create_app as _create_app
 from webapp.api.models import ValidationError, validate_publish_request
 from webapp.api.platforms import (
@@ -125,6 +125,34 @@ class PublishRequestValidationTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def test_agent_local_video_request_keeps_windows_paths_without_server_files(self):
+        request = _agent_local_video_request(
+            platform="tmall",
+            account="shop1",
+            local_video_path=r"C:\Videos\demo.mp4",
+            local_cover_image_path=r"C:\Pictures\cover.png",
+            title="夏季女鞋测评",
+            description="",
+            tags="",
+            goods_id="",
+            activity_topic="",
+            music_name="",
+            creator_declaration="内容无需标注",
+            schedule="",
+            original=False,
+            dry_run=True,
+            headed=True,
+        )
+
+        self.assertEqual(str(request.video_path), r"C:\Videos\demo.mp4")
+        self.assertEqual(str(request.cover_image_path), r"C:\Pictures\cover.png")
+        self.assertFalse(request.managed_upload)
+        self.assertFalse(Path(r"C:\Videos\demo.mp4").exists())
+
+    def test_agent_local_path_rejects_relative_paths(self):
+        with self.assertRaisesRegex(ValidationError, "绝对路径"):
+            _agent_local_path("videos/demo.mp4", "本机视频路径", {".mp4"})
 
     def test_tmall_request_normalizes_tags(self):
         request = validate_publish_request(
