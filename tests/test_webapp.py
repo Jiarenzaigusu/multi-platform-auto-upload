@@ -31,7 +31,7 @@ from utils.files import validate_media_filename
 from webapp.api.batch import BatchValidationError
 from webapp.api.batch_jd_video import parse_jd_video_batch_workbook
 from webapp.api.batch_tmall_video import parse_tmall_video_batch_workbook
-from webapp.api.main import WebSettings, _agent_local_path, _agent_local_video_request
+from webapp.api.main import WebSettings
 from webapp.api.main import create_app as _create_app
 from webapp.api.models import ValidationError, validate_publish_request
 from webapp.api.platforms import (
@@ -125,34 +125,6 @@ class PublishRequestValidationTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
-
-    def test_agent_local_video_request_keeps_windows_paths_without_server_files(self):
-        request = _agent_local_video_request(
-            platform="tmall",
-            account="shop1",
-            local_video_path=r"C:\Videos\demo.mp4",
-            local_cover_image_path=r"C:\Pictures\cover.png",
-            title="夏季女鞋测评",
-            description="",
-            tags="",
-            goods_id="",
-            activity_topic="",
-            music_name="",
-            creator_declaration="内容无需标注",
-            schedule="",
-            original=False,
-            dry_run=True,
-            headed=True,
-        )
-
-        self.assertEqual(str(request.video_path), r"C:\Videos\demo.mp4")
-        self.assertEqual(str(request.cover_image_path), r"C:\Pictures\cover.png")
-        self.assertFalse(request.managed_upload)
-        self.assertFalse(Path(r"C:\Videos\demo.mp4").exists())
-
-    def test_agent_local_path_rejects_relative_paths(self):
-        with self.assertRaisesRegex(ValidationError, "绝对路径"):
-            _agent_local_path("videos/demo.mp4", "本机视频路径", {".mp4"})
 
     def test_tmall_request_normalizes_tags(self):
         request = validate_publish_request(
@@ -1635,71 +1607,6 @@ class JobStoreTests(unittest.TestCase):
 
 
 class ApiEndpointTests(unittest.TestCase):
-    def test_uploaded_video_uses_private_file_and_directory_permissions(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            store = JobStore(root / "runtime")
-            started = threading.Event()
-            release = threading.Event()
-
-            def runner(_job):
-                started.set()
-                release.wait(timeout=2)
-                return {"message": "complete"}
-
-            manager = TaskManager(
-                store,
-                runner=runner,
-                managed_upload_root=root / "runtime" / "uploads",
-            )
-            app = create_app(
-                WebSettings(data_dir=root / "app-data", frontend_dist_dir=root / "missing"),
-                manager,
-            )
-            endpoint = next(
-                route.endpoint for route in app.routes if route.path == "/api/jobs/publish"
-            )
-            upload = UploadFile(filename="demo.mp4", file=BytesIO(b"video"))
-            cover_upload = UploadFile(
-                filename="cover.png", file=BytesIO(b"cover")
-            )
-            try:
-                response = asyncio.run(
-                    endpoint(
-                        platform="tmall",
-                        account="shop1",
-                        video=upload,
-                        cover_image=cover_upload,
-                        title="夏季女鞋测评",
-                        description="",
-                        tags="",
-                        goods_id="",
-                        activity_topic="",
-                        music_name="默契",
-                        creator_declaration="内容无需标注",
-                        schedule="",
-                        original=False,
-                        dry_run=True,
-                        headed=True,
-                        workspace=app.state.test_workspace,
-                    )
-                )
-                self.assertEqual(response.status_code, 202)
-                self.assertTrue(started.wait(timeout=1))
-                job = store.list_jobs(limit=None)[0]
-                self.assertEqual(job["payload"]["music_name"], "默契")
-                video_path = Path(job["payload"]["video_path"])
-                cover_path = Path(job["payload"]["cover_image_path"])
-                self.assertEqual(video_path.parent.stat().st_mode & 0o777, 0o700)
-                self.assertEqual(video_path.stat().st_mode & 0o777, 0o600)
-                self.assertEqual(cover_path.parent, video_path.parent)
-                self.assertEqual(cover_path.stat().st_mode & 0o777, 0o600)
-                self.assertEqual(cover_path.read_bytes(), b"cover")
-            finally:
-                release.set()
-                manager.wait_for_account_idle("tmall", "shop1", timeout=2)
-                manager.shutdown()
-
     def test_delete_account_removes_cookie_and_dropdown_entry(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

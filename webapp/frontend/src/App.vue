@@ -315,7 +315,6 @@ const form = reactive({
   platform: 'tmall',
   contentType: 'video',
   account: '',
-  sourceMode: 'agent',
   video: null,
   images: [],
   coverImage: null,
@@ -772,7 +771,6 @@ function clearPublishContent() {
   clearVideo()
   clearImages()
   clearCoverImage()
-  form.sourceMode = 'agent'
   for (const platform of ['tmall', 'jd']) {
     Object.assign(platformDrafts[platform], createEmptyPlatformDraft())
   }
@@ -882,29 +880,23 @@ async function submitPublish() {
   data.append('headed', String(form.headed))
 
   try {
-    if (form.sourceMode === 'agent') {
-      localUploadStatus.value = '正在将素材传给 Windows 助手…'
-      if (isVideo.value) {
-        const [videoAsset, coverAsset] = await Promise.all([
-          uploadFileToAgent(form.video, 'video'),
-          isTmall.value && form.coverImage
-            ? uploadFileToAgent(form.coverImage, 'cover')
-            : Promise.resolve(null),
-        ])
-        data.append('video_asset_id', videoAsset.asset_id)
-        if (coverAsset) data.append('cover_asset_id', coverAsset.asset_id)
-      } else {
-        const imageAssets = await Promise.all(
-          form.images.map((image) => uploadFileToAgent(image, 'article-image')),
-        )
-        data.append('image_asset_ids', JSON.stringify(imageAssets.map((asset) => asset.asset_id)))
-      }
-      localUploadStatus.value = '素材已到达 Windows 助手，正在创建任务…'
+    localUploadStatus.value = '正在将素材传给 Windows 助手…'
+    if (isVideo.value) {
+      const [videoAsset, coverAsset] = await Promise.all([
+        uploadFileToAgent(form.video, 'video'),
+        isTmall.value && form.coverImage
+          ? uploadFileToAgent(form.coverImage, 'cover')
+          : Promise.resolve(null),
+      ])
+      data.append('video_asset_id', videoAsset.asset_id)
+      if (coverAsset) data.append('cover_asset_id', coverAsset.asset_id)
     } else {
-      if (isVideo.value) data.append('video', form.video)
-      else form.images.forEach((image) => data.append('images', image))
-      if (isTmall.value && isVideo.value && form.coverImage) data.append('cover_image', form.coverImage)
+      const imageAssets = await Promise.all(
+        form.images.map((image) => uploadFileToAgent(image, 'article-image')),
+      )
+      data.append('image_asset_ids', JSON.stringify(imageAssets.map((asset) => asset.asset_id)))
     }
+    localUploadStatus.value = '素材已到达 Windows 助手，正在创建任务…'
     const result = await request('/api/jobs/publish', { method: 'POST', body: data })
     showNotice(`${platformLabel(form.platform)}${form.dryRun ? '流程验证' : '发布'}任务已创建，配置已保留可继续修改后再次发布`, 'success')
     await refreshDashboard()
@@ -1007,7 +999,6 @@ function resetUserInterface() {
     platform: 'tmall',
     contentType: 'video',
     account: '',
-    sourceMode: 'agent',
     video: null,
     images: [],
     coverImage: null,
@@ -1195,12 +1186,8 @@ onBeforeUnmount(() => {
 
           <div class="section-heading section-heading-with-action">
             <span>02</span>
-            <div><h2>内容素材</h2><p>{{ form.sourceMode === 'agent' ? '浏览器选择的文件会直接传给当前 Windows 助手，服务器不保存素材。' : '素材会先上传到服务器，再由 Windows 助手下载并发布。' }}</p></div>
+            <div><h2>内容素材</h2><p>浏览器选择的文件会直接传给当前 Windows 助手，服务器不保存素材。</p></div>
             <button type="button" class="quiet danger section-heading-action" @click="clearPublishDraft">一键清空发布配置与素材</button>
-          </div>
-          <div class="platform-choice content-type-choice source-mode-choice">
-            <label :class="{ selected: form.sourceMode === 'agent' }"><input v-model="form.sourceMode" type="radio" value="agent" /><span>直传 Windows 助手</span><small>浏览器选文件，不经过服务器</small></label>
-            <label :class="{ selected: form.sourceMode === 'upload' }"><input v-model="form.sourceMode" type="radio" value="upload" /><span>上传到服务器</span><small>跨设备使用或兼容旧版助手</small></label>
           </div>
           <template v-if="isVideo">
             <div class="dropzone">

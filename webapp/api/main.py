@@ -3,12 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shutil
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
-from pathlib import PurePosixPath, PureWindowsPath
 from tempfile import TemporaryDirectory
 from typing import AsyncIterator
 
@@ -55,7 +53,6 @@ from webapp.api.media import (
 from webapp.api.models import (
     PublishRequest,
     SUPPORTED_COVER_IMAGE_EXTENSIONS,
-    SUPPORTED_VIDEO_EXTENSIONS,
     ValidationError,
     validate_account_name,
     validate_content_type,
@@ -184,97 +181,6 @@ def _tail_file(path: Path, lines: int = 120) -> list[str]:
         return []
 
 
-def _article_staged_image_name(index: int, suffix: str, upload_token: str) -> str:
-    """Keep each article image uniquely identifiable in the verified picker flow."""
-    return f"mpau-article-{upload_token}-{index:02d}{suffix.lower()}"
-
-
-def _agent_local_path(raw_path: str, field_label: str, extensions: set[str]) -> Path:
-    """Validate a path that exists on the paired Windows agent, not on the server."""
-    normalized = raw_path.strip().lstrip("'\"‘’“”").rstrip("'\"‘’“”").strip()
-    if not normalized:
-        raise ValidationError(f"{field_label}不能为空")
-    # The server may run on Linux while the paired agent runs on Windows.  Use
-    # both path grammars for absoluteness and retain the original spelling for
-    # the agent, which resolves it on its own machine.
-    if not PureWindowsPath(normalized).is_absolute() and not PurePosixPath(normalized).is_absolute():
-        raise ValidationError(f"{field_label}必须填写本机绝对路径")
-    suffix = PureWindowsPath(normalized).suffix.lower()
-    if suffix not in extensions:
-        raise ValidationError(f"{field_label}格式不受支持")
-    return Path(normalized)
-
-
-def _agent_local_video_request(
-    *,
-    platform: str,
-    account: str,
-    local_video_path: str,
-    local_cover_image_path: str,
-    title: str,
-    description: str,
-    tags: str,
-    goods_id: str,
-    activity_topic: str,
-    music_name: str,
-    creator_declaration: str,
-    schedule: str,
-    original: bool,
-    dry_run: bool,
-    headed: bool,
-) -> PublishRequest:
-    """Build a remote-agent request without opening the local file on the server."""
-    video_path = _agent_local_path(
-        local_video_path, "本机视频路径", SUPPORTED_VIDEO_EXTENSIONS
-    )
-    cover_path = (
-        _agent_local_path(
-            local_cover_image_path,
-            "本机封面路径",
-            SUPPORTED_COVER_IMAGE_EXTENSIONS,
-        )
-        if local_cover_image_path.strip()
-        else None
-    )
-    # Reuse the canonical metadata validator with tiny server-side fixtures;
-    # the real files are validated again by the Windows agent immediately
-    # before Edge starts.
-    with TemporaryDirectory(prefix="mpau-agent-validation-") as directory:
-        root = Path(directory)
-        fixture_video = root / f"video{video_path.suffix.lower()}"
-        fixture_video.write_bytes(b"agent-local-reference")
-        fixture_cover = None
-        if cover_path is not None:
-            fixture_cover = root / f"cover{cover_path.suffix.lower()}"
-            fixture_cover.write_bytes(b"agent-local-reference")
-        request = validate_publish_request(
-            platform=platform,
-            account=account,
-            content_type="video",
-            video_path=fixture_video,
-            cover_image_path=fixture_cover,
-            original_filename=PureWindowsPath(str(video_path)).name,
-            title=title,
-            description=description,
-            raw_tags=tags,
-            goods_id=goods_id,
-            activity_topic=activity_topic,
-            raw_music_name=music_name,
-            raw_creator_declaration=creator_declaration,
-            raw_schedule=schedule,
-            original=original,
-            dry_run=dry_run,
-            headed=headed,
-            managed_upload=False,
-        )
-    return replace(
-        request,
-        video_path=video_path,
-        cover_image_path=cover_path,
-        managed_upload=False,
-    )
-
-
 def _agent_asset_request(
     *,
     platform: str,
@@ -356,16 +262,6 @@ def create_app(
         AuthStore(data_paths.auth_database),
         session_seconds=settings.session_seconds,
     )
-
-    def cleanup_staged_upload(
-        directory: Path, manager: TaskManager
-    ) -> None:
-        try:
-            shutil.rmtree(directory)
-        except FileNotFoundError:
-            return
-        except OSError as exc:
-            manager.record_maintenance_error(f"未入队上传目录清理失败：{directory.name}：{exc}")
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -945,13 +841,8 @@ def create_app(
         platform: str = Form(...),
         account: str = Form(...),
         content_type: str = Form("video"),
-        video: UploadFile | None = File(None),
-        local_video_path: str = Form(""),
         video_asset_id: str = Form(""),
-        images: list[UploadFile] = File(default=[]),
         image_asset_ids: str = Form(""),
-        cover_image: UploadFile | None = File(None),
-        local_cover_image_path: str = Form(""),
         cover_asset_id: str = Form(""),
         title: str = Form(...),
         description: str = Form(""),
@@ -975,16 +866,6 @@ def create_app(
             selected_platform = validate_platform(platform)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        image_uploads = (
-            [item for item in images if getattr(item, "filename", "")]
-            if isinstance(images, list)
-            else []
-        )
-        local_video_path = local_video_path if isinstance(local_video_path, str) else ""
-        local_cover_image_path = (
-            local_cover_image_path if isinstance(local_cover_image_path, str) else ""
-        )
-        use_local_video = bool(local_video_path.strip())
         video_asset_id = video_asset_id.strip() if isinstance(video_asset_id, str) else ""
         cover_asset_id = cover_asset_id.strip() if isinstance(cover_asset_id, str) else ""
         raw_image_asset_ids = image_asset_ids if isinstance(image_asset_ids, str) else ""
@@ -996,290 +877,83 @@ def create_app(
             not isinstance(item, str) or not item.strip() for item in parsed_image_asset_ids
         ):
             raise HTTPException(status_code=422, detail="图文素材 ID 格式无效")
-        use_local_assets = bool(video_asset_id or cover_asset_id or parsed_image_asset_ids)
+        if selected_content_type == "video":
+            if not video_asset_id or parsed_image_asset_ids:
+                raise HTTPException(status_code=422, detail="视频发布必须提交本机视频素材 ID")
+        elif selected_platform != "tmall":
+            raise HTTPException(status_code=422, detail="京东图文发布尚未开放")
+        elif (
+            video_asset_id
+            or cover_asset_id
+            or not 1 <= len(parsed_image_asset_ids) <= 9
+        ):
+            raise HTTPException(status_code=422, detail="天猫图文必须提交 1-9 个本机素材 ID")
+        if selected_content_type == "video" and cover_asset_id and selected_platform != "tmall":
+            raise HTTPException(status_code=422, detail="京东不支持自定义封面")
 
-        try:
-            if selected_content_type == "video":
-                if use_local_video and use_local_assets:
-                    raise ValidationError("本机路径模式不能同时提交本机素材 ID")
-                if use_local_assets:
-                    if video is not None or cover_image is not None or image_uploads:
-                        raise ValidationError("本机直传模式不能同时上传服务器文件")
-                    if not video_asset_id:
-                        raise ValidationError("请先通过 Windows 助手上传视频")
-                    if parsed_image_asset_ids:
-                        raise ValidationError("视频任务不能提交图文素材 ID")
-                    original_name = "video.mp4"
-                elif use_local_video:
-                    if video is not None or cover_image is not None:
-                        raise ValidationError("本机直读模式不能同时上传视频或封面文件")
-                    original_name = PureWindowsPath(local_video_path.strip()).name
-                    if not original_name:
-                        raise ValidationError("本机视频路径无效")
-                else:
-                    if video is None:
-                        raise ValidationError("请上传视频文件")
-                    original_name = validate_media_filename(video.filename or "video.mp4")
-                    if Path(original_name).suffix.lower() not in SUPPORTED_VIDEO_EXTENSIONS:
-                        raise ValidationError("上传文件不是支持的视频格式")
-                    if local_cover_image_path.strip():
-                        raise ValidationError("上传模式不能填写本机封面路径")
-            else:
-                if selected_platform != "tmall":
-                    raise ValidationError("京东图文发布尚未开放")
-                if use_local_assets:
-                    if image_uploads or video is not None or cover_image is not None:
-                        raise ValidationError("本机直传模式不能同时上传服务器文件")
-                    if (
-                        video_asset_id
-                        or cover_asset_id
-                        or not 1 <= len(parsed_image_asset_ids) <= 9
-                    ):
-                        raise ValidationError("天猫图文必须上传 1-9 个本机素材")
-                    original_name = "image.jpg"
-                else:
-                    if not 1 <= len(image_uploads) <= 9:
-                        raise ValidationError("天猫图文必须上传 1-9 张图片")
-                    if any(
-                        Path(item.filename or "").suffix.lower()
-                        not in SUPPORTED_COVER_IMAGE_EXTENSIONS
-                        for item in image_uploads
-                    ):
-                        raise ValidationError("图文图片仅支持 JPG、PNG 或 WebP 格式")
-                    original_name = Path(image_uploads[0].filename or "image.jpg").name
-            cover_name = Path(cover_image.filename or "cover.jpg").name if cover_image else ""
-            if cover_image and (
-                selected_content_type != "video"
-                or Path(cover_name).suffix.lower() not in SUPPORTED_COVER_IMAGE_EXTENSIONS
-            ):
-                raise ValidationError("封面图片仅支持视频 JPG、PNG 或 WebP 格式")
-        except ValidationError as exc:
-            if video:
-                await video.close()
-            for image in image_uploads:
-                await image.close()
-            if cover_image:
-                await cover_image.close()
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
         try:
             manager.start()
         except Exception:
-            if video:
-                await video.close()
-            for image in image_uploads:
-                await image.close()
-            if cover_image:
-                await cover_image.close()
             raise
 
-        if use_local_assets:
-            try:
-                status = manager.agent_status()
-                agents = status.get("agents") or []
-                if not agents:
-                    raise ValidationError("本地执行助手未在线")
-                selected_agent_id = agents[0]["agent_id"]
-                video_asset = (
-                    manager.get_local_asset(video_asset_id, agent_id=selected_agent_id)
-                    if video_asset_id
-                    else None
-                )
-                cover_asset = (
-                    manager.get_local_asset(cover_asset_id, agent_id=selected_agent_id)
-                    if cover_asset_id
-                    else None
-                )
-                image_assets = [
-                    manager.get_local_asset(asset_id, agent_id=selected_agent_id)
-                    for asset_id in parsed_image_asset_ids
-                ]
-                request = _agent_asset_request(
-                    platform=selected_platform,
-                    account=account,
-                    content_type=selected_content_type,
-                    video_asset=video_asset,
-                    image_assets=image_assets,
-                    cover_asset=cover_asset,
-                    title=title,
-                    description=description,
-                    tags=tags,
-                    goods_id=goods_id,
-                    activity_topic=activity_topic,
-                    music_name=music_name,
-                    creator_declaration=creator_declaration,
-                    schedule=schedule,
-                    original=original,
-                    dry_run=dry_run,
-                    headed=headed,
-                )
-                def public_asset(record: dict | None) -> dict | None:
-                    if record is None:
-                        return None
-                    return {
-                        key: record[key]
-                        for key in ("asset_id", "filename", "size", "kind", "sha256")
-                    }
-
-                asset_refs = {
-                    "video": public_asset(video_asset),
-                    "cover": public_asset(cover_asset),
-                    "images": [public_asset(item) for item in image_assets],
-                }
-                job = await asyncio.to_thread(
-                    manager.submit_publish_task, request, local_assets=asset_refs
-                )
-            except (KeyError, PermissionError, ValueError) as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
-            finally:
-                if video:
-                    await video.close()
-                if cover_image:
-                    await cover_image.close()
-            return JSONResponse(status_code=202, content={"job": _job_response(job)})
-
-        if use_local_video:
-            try:
-                request = _agent_local_video_request(
-                    platform=selected_platform,
-                    account=account,
-                    local_video_path=local_video_path,
-                    local_cover_image_path=local_cover_image_path,
-                    title=title,
-                    description=description,
-                    tags=tags,
-                    goods_id=goods_id,
-                    activity_topic=activity_topic,
-                    music_name=music_name,
-                    creator_declaration=creator_declaration,
-                    schedule=schedule,
-                    original=original,
-                    dry_run=dry_run,
-                    headed=headed,
-                )
-                job = await asyncio.to_thread(manager.submit_publish_task, request)
-            except ValidationError as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
-            except Exception:
-                raise
-            finally:
-                if video:
-                    await video.close()
-                if cover_image:
-                    await cover_image.close()
-            return JSONResponse(status_code=202, content={"job": _job_response(job)})
-
-        destination_dir = workspace.paths.uploads / uuid.uuid4().hex
-        destination_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
-        destination = (
-            destination_dir / original_name if selected_content_type == "video" else None
-        )
-        article_token = uuid.uuid4().hex[:12]
-        image_destinations = tuple(
-            destination_dir
-            / _article_staged_image_name(
-                index, Path(image.filename or ".jpg").suffix or ".jpg", article_token
-            )
-            for index, image in enumerate(image_uploads, start=1)
-        )
-        cover_destination = (
-            destination_dir
-            / f"cover-{uuid.uuid4().hex}{Path(cover_name).suffix.lower()}"
-            if cover_image
-            else None
-        )
         try:
-            if selected_content_type == "video" and video and destination:
-                await asyncio.to_thread(
-                    stage_upload, video, destination, settings.max_upload_bytes
-                )
-            else:
-                for image, image_destination in zip(
-                    image_uploads, image_destinations, strict=True
-                ):
-                    await asyncio.to_thread(
-                        stage_upload,
-                        image,
-                        image_destination,
-                        settings.max_cover_image_bytes,
-                    )
-            if cover_image and cover_destination:
-                try:
-                    await asyncio.to_thread(
-                        stage_upload,
-                        cover_image,
-                        cover_destination,
-                        settings.max_cover_image_bytes,
-                    )
-                except UploadTooLargeError as exc:
-                    raise HTTPException(
-                        status_code=413,
-                        detail="封面图片超过 20 MiB 限制",
-                    ) from exc
-            request = validate_publish_request(
-                platform=platform,
+            status = manager.agent_status()
+            agents = status.get("agents") or []
+            if not agents:
+                raise ValidationError("本地执行助手未在线")
+            selected_agent_id = agents[0]["agent_id"]
+            video_asset = (
+                manager.get_local_asset(video_asset_id, agent_id=selected_agent_id)
+                if video_asset_id
+                else None
+            )
+            cover_asset = (
+                manager.get_local_asset(cover_asset_id, agent_id=selected_agent_id)
+                if cover_asset_id
+                else None
+            )
+            image_assets = [
+                manager.get_local_asset(asset_id, agent_id=selected_agent_id)
+                for asset_id in parsed_image_asset_ids
+            ]
+            request = _agent_asset_request(
+                platform=selected_platform,
                 account=account,
                 content_type=selected_content_type,
-                video_path=destination,
-                image_paths=image_destinations,
-                cover_image_path=cover_destination,
-                original_filename=original_name,
+                video_asset=video_asset,
+                image_assets=image_assets,
+                cover_asset=cover_asset,
                 title=title,
                 description=description,
-                raw_tags=tags,
+                tags=tags,
                 goods_id=goods_id,
                 activity_topic=activity_topic,
-                raw_music_name=music_name,
-                raw_creator_declaration=creator_declaration,
-                raw_schedule=schedule,
+                music_name=music_name,
+                creator_declaration=creator_declaration,
+                schedule=schedule,
                 original=original,
                 dry_run=dry_run,
                 headed=headed,
-                managed_upload=True,
             )
-        except ValidationError as exc:
-            cleanup_staged_upload(destination_dir, manager)
+
+            def public_asset(record: dict | None) -> dict | None:
+                if record is None:
+                    return None
+                return {
+                    key: record[key]
+                    for key in ("asset_id", "filename", "size", "kind", "sha256")
+                }
+
+            asset_refs = {
+                "video": public_asset(video_asset),
+                "cover": public_asset(cover_asset),
+                "images": [public_asset(item) for item in image_assets],
+            }
+            job = await asyncio.to_thread(
+                manager.submit_publish_task, request, local_assets=asset_refs
+            )
+        except (KeyError, PermissionError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except UploadTooLargeError as exc:
-            cleanup_staged_upload(destination_dir, manager)
-            label = "视频" if selected_content_type == "video" else "图文图片"
-            raise HTTPException(status_code=413, detail=f"{label}超过 Web 应用允许的最大文件大小") from exc
-        except HTTPException:
-            cleanup_staged_upload(destination_dir, manager)
-            raise
-        except OSError as exc:
-            cleanup_staged_upload(destination_dir, manager)
-            raise HTTPException(status_code=500, detail="视频暂存失败，请检查磁盘空间和目录权限") from exc
-        except Exception:
-            cleanup_staged_upload(destination_dir, manager)
-            raise
-        finally:
-            if video:
-                await video.close()
-            for image in image_uploads:
-                await image.close()
-            if cover_image:
-                await cover_image.close()
-
-        def submit_with_quota() -> dict:
-            with workspace.store.media_lock:
-                _, media_bytes = directory_usage(workspace.paths.media)
-                _, upload_bytes = directory_usage(
-                    workspace.paths.uploads, recursive=True
-                )
-                if media_bytes + upload_bytes > settings.max_media_total_bytes:
-                    raise MediaQuotaExceededError(
-                        "当前用户保存的视频总容量已超过配置上限"
-                    )
-                return manager.submit_publish_task(request)
-
-        try:
-            job = await asyncio.to_thread(submit_with_quota)
-        except MediaQuotaExceededError as exc:
-            cleanup_staged_upload(destination_dir, manager)
-            raise HTTPException(status_code=413, detail=str(exc)) from exc
-        except Exception:
-            cleanup_staged_upload(destination_dir, manager)
-            raise
         return JSONResponse(status_code=202, content={"job": _job_response(job)})
 
     async def create_batch_jobs(
