@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Iterable
 from zipfile import BadZipFile
 
@@ -207,9 +207,13 @@ def resolve_local_path(raw_path: str, field_label: str) -> Path:
         raise ValueError(f"{field_label}不能为空")
     try:
         path = Path(normalized_path)
+        windows_path = PureWindowsPath(normalized_path)
     except (RuntimeError, ValueError) as exc:
         raise ValueError(f"{field_label}无法解析") from exc
-    if not path.is_absolute():
+    # The web server may run on Linux/macOS while the workbook belongs to a
+    # paired Windows Agent. Recognize both path grammars before deferring the
+    # actual file check to that Agent.
+    if not path.is_absolute() and not windows_path.is_absolute():
         raise ValueError(f"{field_label}必须填写本机绝对路径")
     return path
 

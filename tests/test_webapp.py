@@ -32,6 +32,7 @@ from webapp.api.batch import BatchValidationError
 from webapp.api.batch_jd_video import parse_jd_video_batch_workbook
 from webapp.api.batch_tmall_video import parse_tmall_video_batch_workbook
 from webapp.api.main import WebSettings
+from webapp.api.batch import resolve_local_path
 from webapp.api.main import create_app as _create_app
 from webapp.api.models import ValidationError, validate_publish_request
 from webapp.api.platforms import (
@@ -139,6 +140,18 @@ class PublishRequestValidationTests(unittest.TestCase):
 
         self.assertEqual(request.tags, ("女鞋", "夏季穿搭"))
         self.assertFalse(request.dry_run)
+
+    def test_batch_path_parser_accepts_windows_absolute_path_on_non_windows_server(self):
+        path = resolve_local_path(
+            r"C:\Users\operator\Videos\demo.mp4", "视频路径"
+        )
+        self.assertEqual(str(path), r"C:\Users\operator\Videos\demo.mp4")
+
+    def test_batch_path_parser_accepts_unc_windows_path(self):
+        path = resolve_local_path(
+            r"\\DESKTOP-01\素材\demo.mp4", "视频路径"
+        )
+        self.assertEqual(str(path), r"\\DESKTOP-01\素材\demo.mp4")
 
     def test_tmall_accepts_optional_cover_image_only(self):
         cover = Path(self.temp_dir.name) / "cover.png"
