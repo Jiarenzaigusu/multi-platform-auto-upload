@@ -100,14 +100,19 @@ class JDArticle:
             raise ValueError("请选择有效的京东创作声明")
 
     async def _upload_images(self, page, frame: Frame) -> None:
-        button = frame.get_by_role("button", name="上传图片", exact=True)
-        await button.wait_for(state="visible", timeout=10000)
-        async with page.expect_file_chooser(timeout=10000) as chooser_info:
-            await button.click(force=True)
-        chooser = await chooser_info.value
-        if not chooser.is_multiple():
-            raise RuntimeError("京东图文上传控件未开启多选模式")
-        await chooser.set_files(list(self.image_paths))
+        # 直接对隐藏的 file input 设置文件，复用京东视频上传的 set_input_files 写法。
+        # 不再走 page.expect_file_chooser + chooser.set_files：后者会弹出 Windows 原生
+        # 文件选择框，对话框关闭后浏览器会丢失前台焦点，进而导致后续 Ctrl+V 粘贴时
+        # 被 Windows 前台锁定机制发到后台。
+        file_input = frame.locator('input[type="file"][accept*="image"][multiple]').first
+        if not await file_input.count():
+            file_input = frame.locator('input[type="file"][accept*="image"]').first
+        if not await file_input.count():
+            file_input = frame.locator('input[type="file"]').first
+        if not await file_input.count():
+            raise RuntimeError("未找到京东图文图片上传的 file input 控件")
+        await file_input.wait_for(state="attached", timeout=10000)
+        await file_input.set_input_files(list(self.image_paths))
         for _ in range(300):
             text = await frame.locator("body").inner_text(timeout=3000)
             if "上传失败" in text or "处理失败" in text:
