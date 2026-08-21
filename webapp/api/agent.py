@@ -432,8 +432,8 @@ def create_agent_router(
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        if job["kind"] != "publish" or job["platform"] != "tmall":
-            raise HTTPException(status_code=409, detail="该任务没有天猫封面图片")
+        if job["kind"] != "publish":
+            raise HTTPException(status_code=409, detail="该任务没有封面图片")
         raw_cover_path = job["payload"].get("cover_image_path")
         if not raw_cover_path:
             raise HTTPException(status_code=404, detail="任务没有自定义封面图片")

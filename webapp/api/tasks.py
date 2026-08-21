@@ -682,6 +682,7 @@ class TaskManager:
     async def _run_platform_task_async(self, job: dict[str, Any]) -> dict[str, Any]:
         # Import lazily so API startup does not initialize browser automation.
         from webapp.api.platforms import (
+            JdArticleUploadRequest,
             JdVideoUploadRequest,
             TmallArticleUploadRequest,
             TmallVideoUploadRequest,
@@ -691,6 +692,7 @@ class TaskManager:
             login_tmall_account,
             tmall_publish_strategy,
             upload_jd_video,
+            upload_jd_article,
             upload_tmall_article,
             upload_tmall_video,
         )
@@ -817,14 +819,40 @@ class TaskManager:
             platform_result = await upload_tmall_video(
                 request, paths=self.paths, session_pool=session_pool
             )
+        elif content_type == "article":
+            if session_pool is None:
+                raise RuntimeError("京东任务必须通过 BrowserRuntime 会话池运行")
+            request = JdArticleUploadRequest(
+                account_name=account,
+                image_files=image_paths,
+                title=payload["title"],
+                description=payload["description"],
+                goods_id=payload["goods_id"],
+                topic=payload.get("activity_topic", ""),
+                schedule=schedule,
+                original=bool(payload["original"]),
+                creator_declaration=payload.get("creator_declaration", "内容无需标注"),
+                debug=True,
+                headless=not headed,
+                dry_run=bool(payload["dry_run"]),
+            )
+            platform_result = await upload_jd_article(
+                request, paths=self.paths, session_pool=session_pool
+            )
         else:
             if session_pool is None:
                 raise RuntimeError("京东任务必须通过 BrowserRuntime 会话池运行")
             request = JdVideoUploadRequest(
                 account_name=account,
                 video_file=video_path,
+                cover_image_file=(
+                    Path(payload["cover_image_path"])
+                    if payload.get("cover_image_path")
+                    else None
+                ),
                 title=payload["title"],
                 goods_id=payload["goods_id"],
+                topic=payload.get("activity_topic", ""),
                 schedule=schedule,
                 original=bool(payload["original"]),
                 creator_declaration=payload.get("creator_declaration", "内容无需标注"),

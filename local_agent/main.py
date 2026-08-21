@@ -27,7 +27,7 @@ from local_agent.paths import (
 from local_agent.runner import AgentJobRunner
 from uploader.errors import PublishResultUncertainError
 from utils.files import validate_cover_image_filename, validate_media_filename
-from webapp.api.models import SUPPORTED_COVER_IMAGE_EXTENSIONS
+from webapp.api.models import JD_ARTICLE_IMAGE_EXTENSIONS, SUPPORTED_COVER_IMAGE_EXTENSIONS
 
 _LOCAL_ASSET_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
@@ -59,7 +59,9 @@ class AgentLeaseLostError(RuntimeError):
     pass
 
 
-def _article_images_from_folder(raw_folder_path: object) -> tuple[Path, ...]:
+def _article_images_from_folder(
+    raw_folder_path: object, platform_name: str = "tmall"
+) -> tuple[Path, ...]:
     """Resolve the source workbook's image folder on the paired computer."""
     folder_path = Path(str(raw_folder_path or "")).expanduser()
     if not folder_path.is_absolute() or not folder_path.is_dir():
@@ -71,15 +73,23 @@ def _article_images_from_folder(raw_folder_path: object) -> tuple[Path, ...]:
                     path
                     for path in folder_path.iterdir()
                     if path.is_file()
-                    and path.suffix.lower() in SUPPORTED_COVER_IMAGE_EXTENSIONS
+                    and path.suffix.lower() in (
+                        JD_ARTICLE_IMAGE_EXTENSIONS
+                        if platform_name == "jd"
+                        else SUPPORTED_COVER_IMAGE_EXTENSIONS
+                    )
                 ),
                 key=lambda path: (path.name.casefold(), path.name),
             )
         )
     except OSError as exc:
         raise RuntimeError("Excel 中的图文图片文件夹无法读取") from exc
-    if not 1 <= len(image_paths) <= 9:
-        raise RuntimeError("图文图片文件夹必须包含 1-9 张 JPG、PNG 或 WebP 图片")
+    max_images = 20 if platform_name == "jd" else 9
+    if not 1 <= len(image_paths) <= max_images:
+        raise RuntimeError(
+            f"图文图片文件夹必须包含 1-{max_images} 张"
+            + (" JPG 或 PNG 图片" if platform_name == "jd" else " JPG、PNG 或 WebP 图片")
+        )
     if any(path.stat().st_size == 0 for path in image_paths):
         raise RuntimeError("Excel 中的图文图片不能为空")
     return image_paths
@@ -235,7 +245,8 @@ class LocalAgentApplication:
                             )
                             local_asset_paths = tuple(resolved_images)
                         image_paths = tuple(resolved_images)
-                        if not 1 <= len(image_paths) <= 9:
+                        max_images = 20 if job["platform"] == "jd" else 9
+                        if not 1 <= len(image_paths) <= max_images:
                             raise RuntimeError("任务中的本机图文素材数量无效")
                         resolved_assets.extend(image_paths)
                     else:
@@ -271,7 +282,8 @@ class LocalAgentApplication:
                                 raise RuntimeError("任务图文图片下载为空")
                             downloaded_images.append(image_path)
                         image_paths = tuple(downloaded_images)
-                        if not 1 <= len(image_paths) <= 9:
+                        max_images = 20 if job["platform"] == "jd" else 9
+                        if not 1 <= len(image_paths) <= max_images:
                             raise RuntimeError("任务图文图片数量无效")
                     else:
                         original_name = validate_media_filename(
@@ -309,7 +321,9 @@ class LocalAgentApplication:
                     if content_type == "article":
                         image_folder_path = payload.get("image_folder_path")
                         if image_folder_path:
-                            image_paths = _article_images_from_folder(image_folder_path)
+                            image_paths = _article_images_from_folder(
+                                image_folder_path, job["platform"]
+                            )
                         else:
                             image_paths = tuple(
                                 Path(str(path)).expanduser()

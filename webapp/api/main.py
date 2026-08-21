@@ -30,12 +30,13 @@ from utils.config import BASE_DIR
 from webapp.ai_copy import create_ai_copy_router
 from webapp.api.agent import create_agent_router
 from webapp.api.agent_batch import (
+    parse_remote_jd_article_batch_workbook,
     parse_remote_jd_video_batch_workbook,
     parse_remote_tmall_article_batch_workbook,
     parse_remote_tmall_video_batch_workbook,
 )
 from webapp.api.batch import BatchValidationError
-from webapp.api.batch_jd_article import JD_ARTICLE_BATCH_UNAVAILABLE_MESSAGE
+from webapp.api.batch_jd_article import parse_jd_article_batch_workbook
 from webapp.api.batch_jd_video import parse_jd_video_batch_workbook
 from webapp.api.batch_templates import build_batch_template
 from webapp.api.batch_tmall_article import parse_tmall_article_batch_workbook
@@ -51,6 +52,7 @@ from webapp.api.media import (
     validate_media_filename,
 )
 from webapp.api.models import (
+    MAX_JD_ARTICLE_IMAGE_BYTES,
     PublishRequest,
     SUPPORTED_COVER_IMAGE_EXTENSIONS,
     ValidationError,
@@ -597,7 +599,9 @@ def create_app(
             if selected_platform == "tmall" and selected_content_type == "article"
             else "%E5%A4%A9%E7%8C%AB_%E8%A7%86%E9%A2%91_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx"
             if selected_platform == "tmall"
-            else "%E4%BA%AC%E4%B8%9C_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx"
+            else "%E4%BA%AC%E4%B8%9C_%E5%9B%BE%E6%96%87_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx"
+            if selected_content_type == "article"
+            else "%E4%BA%AC%E4%B8%9C_%E8%A7%86%E9%A2%91_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx"
         )
         return StreamingResponse(
             iter([content]),
@@ -880,16 +884,21 @@ def create_app(
         if selected_content_type == "video":
             if not video_asset_id or parsed_image_asset_ids:
                 raise HTTPException(status_code=422, detail="视频发布必须提交本机视频素材 ID")
-        elif selected_platform != "tmall":
-            raise HTTPException(status_code=422, detail="京东图文发布尚未开放")
         elif (
             video_asset_id
             or cover_asset_id
-            or not 1 <= len(parsed_image_asset_ids) <= 9
+            or not 1 <= len(parsed_image_asset_ids) <= (
+                9 if selected_platform == "tmall" else 20
+            )
         ):
-            raise HTTPException(status_code=422, detail="天猫图文必须提交 1-9 个本机素材 ID")
-        if selected_content_type == "video" and cover_asset_id and selected_platform != "tmall":
-            raise HTTPException(status_code=422, detail="京东不支持自定义封面")
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "天猫图文必须提交 1-9 个本机素材 ID"
+                    if selected_platform == "tmall"
+                    else "京东图文必须提交 1-20 个本机素材 ID"
+                ),
+            )
 
         try:
             manager.start()
@@ -916,6 +925,12 @@ def create_app(
                 manager.get_local_asset(asset_id, agent_id=selected_agent_id)
                 for asset_id in parsed_image_asset_ids
             ]
+            if selected_platform == "jd" and selected_content_type == "article":
+                if any(item["size"] > MAX_JD_ARTICLE_IMAGE_BYTES for item in image_assets):
+                    raise ValidationError("京东图文单张图片不能超过 5 MiB")
+            if selected_platform == "jd" and selected_content_type == "video" and cover_asset:
+                if cover_asset["size"] > 5 * 1024 * 1024:
+                    raise ValidationError("京东封面图片不能超过 5 MiB")
             request = _agent_asset_request(
                 platform=selected_platform,
                 account=account,
@@ -1066,19 +1081,27 @@ def create_app(
         headed: bool = Form(True),
         workspace: UserWorkspace = Depends(operator_workspace),
     ) -> JSONResponse:
-        if isinstance(content_type, str) and content_type != "video":
-            await workbook.close()
-            raise HTTPException(status_code=422, detail=JD_ARTICLE_BATCH_UNAVAILABLE_MESSAGE)
+        selected_content_type = validate_content_type(
+            content_type if isinstance(content_type, str) else "video"
+        )
+        if getattr(workspace.task_manager, "remote_execution", False):
+            parser = (
+                parse_remote_jd_video_batch_workbook
+                if selected_content_type == "video"
+                else parse_remote_jd_article_batch_workbook
+            )
+        else:
+            parser = (
+                parse_jd_video_batch_workbook
+                if selected_content_type == "video"
+                else parse_jd_article_batch_workbook
+            )
         return await create_batch_jobs(
             platform_label="京东",
-            parser=(
-                parse_remote_jd_video_batch_workbook
-                if getattr(workspace.task_manager, "remote_execution", False)
-                else parse_jd_video_batch_workbook
-            ),
+            parser=parser,
             account=account,
             workbook=workbook,
-            content_type="video",
+            content_type=selected_content_type,
             dry_run=dry_run,
             headed=headed,
             workspace=workspace,

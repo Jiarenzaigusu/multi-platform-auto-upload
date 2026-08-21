@@ -20,6 +20,7 @@ from webapp.ai_copy.product_lookup.tmall_reader import TmallProductReader
 from webapp.api.browser_runtime import BrowserRuntime
 from webapp.api.models import MIN_SCHEDULE_LEAD_TIME
 from webapp.api.platforms import (
+    JdArticleUploadRequest,
     JdVideoUploadRequest,
     TmallArticleUploadRequest,
     TmallVideoUploadRequest,
@@ -30,6 +31,7 @@ from webapp.api.platforms import (
     resolve_account_file,
     tmall_publish_strategy,
     upload_jd_video,
+    upload_jd_article,
     upload_tmall_article,
     upload_tmall_video,
 )
@@ -211,7 +213,7 @@ class AgentJobRunner:
         if content_type == "video" and (video_path is None or not video_path.is_file()):
             raise RuntimeError("任务视频没有下载到用户电脑")
         if content_type == "article" and (
-            platform != "tmall" or not image_paths or any(not path.is_file() for path in image_paths)
+            not image_paths or any(not path.is_file() for path in image_paths)
         ):
             raise RuntimeError("任务图文图片没有完整下载到用户电脑")
 
@@ -268,12 +270,34 @@ class AgentJobRunner:
             platform_result = await upload_tmall_video(
                 request, paths=self.paths, session_pool=session_pool
             )
+        elif content_type == "article":
+            request = JdArticleUploadRequest(
+                account_name=account,
+                image_files=image_paths,
+                title=payload["title"],
+                description=payload["description"],
+                goods_id=payload["goods_id"],
+                topic=payload["activity_topic"],
+                schedule=schedule,
+                original=bool(payload["original"]),
+                creator_declaration=payload.get(
+                    "creator_declaration", "内容无需标注"
+                ),
+                debug=True,
+                headless=not headed,
+                dry_run=bool(payload["dry_run"]),
+            )
+            platform_result = await upload_jd_article(
+                request, paths=self.paths, session_pool=session_pool
+            )
         else:
             request = JdVideoUploadRequest(
                 account_name=account,
                 video_file=video_path,
+                cover_image_file=cover_image_path,
                 title=payload["title"],
                 goods_id=payload["goods_id"],
+                topic=payload["activity_topic"],
                 schedule=schedule,
                 original=bool(payload["original"]),
                 creator_declaration=payload.get(

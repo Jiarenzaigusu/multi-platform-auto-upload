@@ -153,7 +153,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         )
         self.assertEqual(str(path), r"\\DESKTOP-01\素材\demo.mp4")
 
-    def test_tmall_accepts_optional_cover_image_only(self):
+    def test_tmall_and_jd_accept_optional_cover_image(self):
         cover = Path(self.temp_dir.name) / "cover.png"
         cover.write_bytes(b"image")
 
@@ -168,15 +168,15 @@ class PublishRequestValidationTests(unittest.TestCase):
 
         self.assertEqual(request.cover_image_path, cover.resolve())
 
-        with self.assertRaisesRegex(ValidationError, "仅天猫光合"):
-            validate_publish_request(
-                platform="jd",
-                account="shop1",
-                video_path=self.video,
-                cover_image_path=cover,
-                original_filename="demo.mp4",
-                title="京东视频标题示例",
-            )
+        jd_request = validate_publish_request(
+            platform="jd",
+            account="shop1",
+            video_path=self.video,
+            cover_image_path=cover,
+            original_filename="demo.mp4",
+            title="京东视频标题示例",
+        )
+        self.assertEqual(jd_request.cover_image_path, cover.resolve())
 
     def test_tmall_rejects_unsupported_cover_image(self):
         cover = Path(self.temp_dir.name) / "cover.gif"
@@ -293,16 +293,48 @@ class PublishRequestValidationTests(unittest.TestCase):
                 goods_id="1,2,3,4,5,6,7",
             )
 
-    def test_jd_still_rejects_multiple_product_ids(self):
-        with self.assertRaisesRegex(ValidationError, "只能关联 1 个"):
+    def test_jd_accepts_ten_product_ids_and_rejects_more(self):
+        request = validate_publish_request(
+            platform="jd",
+            account="shop1",
+            video_path=self.video,
+            original_filename="demo.mp4",
+            title="京东视频标题示例",
+            goods_id="1,2,3,4,5,6,7,8,9,10",
+        )
+        self.assertEqual(request.goods_id, "1,2,3,4,5,6,7,8,9,10")
+
+        with self.assertRaisesRegex(ValidationError, "最多关联 10 个"):
             validate_publish_request(
                 platform="jd",
                 account="shop1",
                 video_path=self.video,
                 original_filename="demo.mp4",
                 title="京东视频标题示例",
-                goods_id="123,456",
+                goods_id="1,2,3,4,5,6,7,8,9,10,11",
             )
+
+    def test_jd_article_accepts_images_body_and_topic(self):
+        images = []
+        for index in range(2):
+            image = Path(self.temp_dir.name) / f"article-{index}.jpg"
+            image.write_bytes(b"image")
+            images.append(image)
+
+        request = validate_publish_request(
+            platform="jd",
+            account="shop1",
+            content_type="article",
+            image_paths=tuple(images),
+            original_filename=images[0].name,
+            title="京东图文标题",
+            description="京东图文正文",
+            activity_topic="数码先锋",
+        )
+
+        self.assertEqual(request.image_paths, tuple(path.resolve() for path in images))
+        self.assertEqual(request.description, "京东图文正文")
+        self.assertEqual(request.activity_topic, "数码先锋")
 
     def test_tmall_end_of_list_is_not_treated_as_an_empty_result(self):
         self.assertFalse(_has_explicit_empty_product_result("¥149.00\n没有更多了"))
@@ -1383,6 +1415,56 @@ class TmallBatchApiTests(unittest.TestCase):
 
 
 class JdBatchApiTests(unittest.TestCase):
+    def test_valid_article_workbook_creates_jd_article_job(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_dir = root / "article-images"
+            image_dir.mkdir()
+            (image_dir / "01.jpg").write_bytes(b"image")
+            workbook = Workbook()
+            worksheet = workbook.active
+            worksheet.append([
+                "图片文件夹路径", "标题", "正文内容", "商品ID", "参与话题",
+                "定时发布", "自主原创", "创作者声明",
+            ])
+            worksheet.append([
+                str(image_dir), "京东图文标题", "京东图文正文", "12345", "数码先锋",
+                "", "否", "内容无需标注",
+            ])
+            content = BytesIO()
+            workbook.save(content)
+            workbook.close()
+
+            store = JobStore(root / "runtime")
+            manager = TaskManager(store, runner=lambda job: {"message": "complete"}, max_workers=1)
+            app = create_app(
+                WebSettings(data_dir=root / "app-data", frontend_dist_dir=root / "missing"),
+                manager,
+            )
+            endpoint = next(route.endpoint for route in app.routes if route.path == "/api/jobs/batch/jd")
+            upload = UploadFile(filename="jd-article.xlsx", file=BytesIO(content.getvalue()))
+            try:
+                response = asyncio.run(
+                    endpoint(
+                        account="shop1",
+                        workbook=upload,
+                        content_type="article",
+                        dry_run=True,
+                        headed=True,
+                        workspace=app.state.test_workspace,
+                    )
+                )
+                body = json.loads(response.body)
+
+                self.assertEqual(response.status_code, 202)
+                self.assertEqual(body["created_count"], 1)
+                created = store.get_job(body["jobs"][0]["id"])
+                self.assertEqual(created["payload"]["content_type"], "article")
+                self.assertEqual(created["payload"]["description"], "京东图文正文")
+                self.assertEqual(created["payload"]["activity_topic"], "数码先锋")
+            finally:
+                manager.shutdown()
+
     def test_valid_workbook_creates_one_job_per_excel_row(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

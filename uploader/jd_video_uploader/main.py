@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +36,7 @@ from utils.config import DEBUG_MODE
 from uploader.base_video import BaseVideoUploader
 from uploader.jd_session import JdBrowserSession
 from utils.log import jd_logger
+from utils.clipboard import write_clipboard
 
 # 京东京麦发布中心 URL，用于 Cookie 校验与登录入口
 JD_POST_CENTER_URL = "https://dr.jd.com/jm/#/n/post-center.html"
@@ -48,6 +50,11 @@ JD_AUTH_HOSTS = {"passport.shop.jd.com", "passport.jd.com", "safe.jd.com"}
 # 发布策略常量
 JD_PUBLISH_STRATEGY_IMMEDIATE = "immediate"
 JD_PUBLISH_STRATEGY_SCHEDULED = "scheduled"
+# 京东链接导入一次最多关联的商品数（平台页面显示 0/10）
+JD_MAX_GOODS_IDS = 10
+# 京东视频自定义封面支持的格式与大小限制
+JD_COVER_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+JD_MAX_COVER_IMAGE_BYTES = 5 * 1024 * 1024
 
 
 class JdAuthenticationError(RuntimeError):
@@ -262,7 +269,7 @@ async def jd_cookie_gen(
             return _build_login_result(False, "timeout", "等待京东京麦登录超时", account_file, page.url)
 
         await asyncio.sleep(3)
-        await context.storage_state(path=account_file)
+        await session.save_storage_state()
         jd_logger.info(_msg("💾", f"cookie 已保存: {account_file}"))
 
         jd_logger.success(_msg("🥳", "京东京麦登录成功，cookie 验证通过"))
@@ -328,8 +335,8 @@ class JDVideo(JDBaseUploader):
     完整发布流程：
     1. validate_upload_args: 校验所有参数
     2. 打开发布页 → 定位发布 iframe → 上传视频文件
-    3. 等待视频上传完成（发布按钮 disabled 消失）
-    4. 填写标题 → 关联商品（可选）→ 选择创作者声明 → 开启自主原创（可选）→ 设置定时（可选）
+    3. 等待视频上传完成 → 设置自定义封面（可选）
+    4. 填写标题 → 关联商品（可选）→ 添加话题（可选）→ 选择创作者声明 → 开启自主原创（可选）→ 设置定时（可选）
     5. dry_run 跳过发布；否则点击发布按钮 → 处理验证码（人工）→ 等待确认
     6. 成功后保存 storage_state；页面保留供人工复核
     """
@@ -339,7 +346,9 @@ class JDVideo(JDBaseUploader):
         file_path: str,
         title: str,
         account_file,
+        cover_image_path: str | None = None,
         goods_id: str | None = None,
+        topic: str = "",
         schedule: datetime | None = None,
         original: bool = False,
         creator_declaration: str = "",
@@ -351,7 +360,9 @@ class JDVideo(JDBaseUploader):
         :param file_path: 视频文件路径
         :param title: 视频标题（5-27 字）
         :param account_file: 账号 Cookie 文件路径
-        :param goods_id: 商品 ID（可选，最多 1 个）
+        :param cover_image_path: 自定义封面图片路径（可选，最大 5 MiB）
+        :param goods_id: 商品 ID（可选，支持逗号、空格或换行分隔，最多 10 个）
+        :param topic: 参与话题名称（可选，精确匹配后选择）
         :param schedule: 定时发布时间（None 立即发布）
         :param original: 是否开启"自主原创"开关
         :param creator_declaration: 创作者声明（必填）
@@ -360,8 +371,10 @@ class JDVideo(JDBaseUploader):
         """
         super().__init__(account_file=account_file, debug=debug)
         self.file_path = file_path
+        self.cover_image_path = cover_image_path
         self.title = title
         self.goods_id = (goods_id or "").strip()
+        self.topic = (topic or "").strip()
         self.schedule = schedule
         self.original = original
         self.creator_declaration = creator_declaration.strip()
@@ -372,6 +385,22 @@ class JDVideo(JDBaseUploader):
         await self.validate_base_args()
         # 校验视频文件
         self.file_path = str(self.validate_video_file(self.file_path))
+        # 校验京东自定义封面图片（可选）
+        if self.cover_image_path:
+            cover_path = Path(self.cover_image_path)
+            if not cover_path.is_file():
+                raise ValueError("京东封面图片不存在或上传未完成")
+            if cover_path.suffix.lower() not in JD_COVER_IMAGE_EXTENSIONS:
+                raise ValueError("京东封面图片仅支持 JPG、PNG 或 WebP 格式")
+            try:
+                cover_size = cover_path.stat().st_size
+            except OSError as exc:
+                raise ValueError("无法读取京东封面图片") from exc
+            if cover_size == 0:
+                raise ValueError("京东封面图片为空")
+            if cover_size > JD_MAX_COVER_IMAGE_BYTES:
+                raise ValueError("京东封面图片不能超过 5 MiB")
+            self.cover_image_path = str(cover_path.resolve())
         # 标题长度校验（5-27 字）
         title = (self.title or "").strip()
         if not title:
@@ -379,9 +408,18 @@ class JDVideo(JDBaseUploader):
         if not (5 <= len(title) <= 27):
             raise ValueError(f"京东视频标题长度必须 5-27 字（当前 {len(title)} 字）")
         self.title = title
-        # 商品 ID 必须为纯数字
-        if self.goods_id and not self.goods_id.isdigit():
-            raise ValueError(f"京东商品 ID 必须为纯数字: {self.goods_id}")
+        # 商品 ID 支持逗号、空格、换行分隔；链接导入页一次最多 10 个
+        if self.goods_id:
+            goods_ids = tuple(dict.fromkeys(
+                value.strip("'\"‘’“”")
+                for value in re.split(r"[,，\s]+", self.goods_id)
+                if value.strip("'\"‘’“”")
+            ))
+            if any(not goods_id.isdigit() for goods_id in goods_ids):
+                raise ValueError(f"京东商品 ID 必须为纯数字: {self.goods_id}")
+            if len(goods_ids) > JD_MAX_GOODS_IDS:
+                raise ValueError(f"京东一次最多关联 {JD_MAX_GOODS_IDS} 个商品 ID")
+            self.goods_id = ",".join(goods_ids)
         # 定时发布时间校验
         if self.schedule is not None:
             self.validate_publish_date(self.schedule)
@@ -390,134 +428,288 @@ class JDVideo(JDBaseUploader):
             raise ValueError("京东创作声明不能为空")
 
     async def _wait_for_video_uploaded(self, frame: Frame, timeout_seconds: int = 600):
-        """等视频上传完成。判定信号：发布按钮 disabled 属性消失。
+        """等视频上传完成。判定信号：页面出现可见的“修改封面”按钮。
 
         :param frame: 发布 iframe
         :param timeout_seconds: 超时秒数（默认 600 秒 = 10 分钟）
         """
         for i in range(timeout_seconds // 2):
-            disabled = await frame.evaluate(
-                """() => {
-                    const b = document.querySelector('button[class*="publishBtn"]');
-                    return b ? b.disabled : true;
-                }"""
-            )
-            if disabled is False:
-                jd_logger.success(_msg("🥳", f"视频上传完成（{i*2}s 后发布按钮可点）"))
+            body_text = await frame.locator("body").inner_text(timeout=3000)
+            if "上传失败" in body_text or "本地处理失败" in body_text:
+                raise RuntimeError(f"京东视频上传失败：{body_text[-300:].strip()}")
+            edit_cover = frame.locator(".edit-cover-btn").filter(has_text="修改封面").first
+            if await edit_cover.count() and await edit_cover.is_visible():
+                jd_logger.success(_msg("🥳", f"视频上传完成（{i*2}s 后出现修改封面按钮）"))
                 return
             if i % 5 == 0:
                 jd_logger.info(_msg("🏃", f"小人正在等待视频上传完成 ({i*2}s)"))
             await asyncio.sleep(2)
         raise RuntimeError(f"等待视频上传完成超时（{timeout_seconds}s）")
 
+    async def _set_custom_cover(self, frame: Frame) -> None:
+        """在京东视频编辑器中通过本地文件设置自定义封面。
+
+        京东封面弹窗完全独立于天猫图库流程：点击“修改封面”后直接将图片
+        写入弹窗的 image file input，再确认并核验主表单预览图已更新。
+        """
+        if not self.cover_image_path:
+            return
+
+        cover_path = Path(self.cover_image_path).resolve()
+        jd_logger.info(_msg("🖼️", f"准备设置京东自定义封面: {cover_path.name}"))
+
+        edit_button = frame.locator('[data-spm-click="openVideoCoverModal"]').first
+        if not await edit_button.count():
+            edit_button = frame.locator(".edit-cover-btn").filter(has_text="修改封面").first
+        await edit_button.wait_for(state="visible", timeout=120000)
+        preview = frame.locator(".video-cover-wrapper .preview-img").first
+        previous_src = await preview.get_attribute("src") if await preview.count() else None
+        await edit_button.click()
+
+        # 弹窗外层 class 在不同版本中会变化；“手动上传”区域由一个透明的
+        # file input 覆盖，直接向该原生控件设置文件即等同用户在该区域选图。
+        # 文件控件只有封面编辑器打开时才出现；以它为就绪信号，规避 modal
+        # 容器在动画期间尚未写入 class/role 的竞态。
+        # 京东弹窗只有一个本地图片 input；使用 first 避免 Patchright 在
+        # 动画挂载阶段对 .last 的延迟定位问题。
+        file_input = frame.locator('input[type="file"][accept*="image"]').first
+        for _ in range(30):
+            if await file_input.count():
+                break
+            await asyncio.sleep(0.5)
+        else:
+            raise RuntimeError("点击京东“修改封面”后未找到本地图片上传控件")
+        modal = frame.locator(".jd-modal-wrap").last
+
+        # 不点击文字节点：它会被上述 input 拦截而导致自动化卡住。
+        await frame.locator('input[type="file"][accept*="image"]').first.set_input_files(
+            str(cover_path)
+        )
+
+        crop_preview = modal.locator("img.reactEasyCrop_Image").last
+        if await crop_preview.count():
+            await crop_preview.wait_for(state="visible", timeout=15000)
+            for _ in range(30):
+                src = await crop_preview.get_attribute("src")
+                if src:
+                    break
+                await asyncio.sleep(0.2)
+
+        # 选择图片后京麦会重挂载弹窗内容，wrapper locator 可能短暂失效；
+        # “确定”按钮在当前发布 iframe 内唯一，使用稳定的按钮属性定位。
+        confirm_button = frame.locator('button[data-component-label="确定"]').first
+        await confirm_button.wait_for(state="visible", timeout=10000)
+        await confirm_button.click()
+        try:
+            await modal.wait_for(state="hidden", timeout=15000)
+        except Exception:
+            # 某些版本卸载 wrapper 较慢，但确认按钮已触发即可继续校验预览。
+            await asyncio.sleep(1)
+
+        if await preview.count():
+            for _ in range(30):
+                current_src = await preview.get_attribute("src")
+                if current_src and current_src != previous_src:
+                    break
+                await asyncio.sleep(0.5)
+            else:
+                raise RuntimeError("京东封面已确认，但主表单预览图未更新")
+        jd_logger.success(_msg("🖼️", f"京东自定义封面已设置: {cover_path.name}"))
+
     async def _add_goods(self, page, frame: Frame):
-        """通过商品 ID 在「站内搜索」tab 关联商品。
+        """通过「链接导入」一次关联多个商品 ID。
 
-        流程：点 + → 切站内搜索 tab → 输入 ID → 点查询 →
-              等结果出现（含 ¥）→ 勾选第一个商品卡 → 点确定 → 等 drawer 关闭。
-
-        四种终态判定：
-        1. 出现 ¥ 价格 → 找到商品，可勾选
-        2. 平台返回明确无结果文案 → ID 不存在
-        3. 平台返回「失效原因」卡片 → ID 格式正确但商品不可用
-        4. 20s 内既无 ¥ 也无文案 → 接口超时
+        京麦链接导入只接受商品 PC 链接；调用方提供的 ID 会先转换为链接，
+        再一次粘贴查询。全部商品卡核验通过后逐条勾选并统一确认。
         """
         if not self.goods_id:
             return
 
-        jd_logger.info(_msg("🛒", f"小人准备添加商品: {self.goods_id}"))
+        goods_ids = tuple(self.goods_id.split(","))
+        jd_logger.info(_msg("🛒", f"小人准备通过链接导入添加商品: {', '.join(goods_ids)}"))
 
-        # 点关联挂件区域的 + 按钮
         plus_btn = frame.locator('div[class*="addgoods-upload"]').first
         await plus_btn.scroll_into_view_if_needed()
         await plus_btn.click()
 
-        # 等 drawer 打开。京东 tab id（如 rc-tabs-0-tab-2）是动态生成的，不能作为稳定选择器
         drawer = frame.locator('.jd-drawer-open, .jd-drawer-wrapper-body').first
         await drawer.wait_for(state="visible", timeout=10000)
         await asyncio.sleep(1)
 
-        # 切到「站内搜索」tab：优先按 role+文本定位，避免依赖动态 id
-        site_tab = frame.locator('.jd-drawer-wrapper-body [role="tab"]').filter(has_text="站内搜索").first
-        if not await site_tab.count():
-            site_tab = frame.locator('.jd-drawer-wrapper-body .jd-tabs-tab-btn').filter(has_text="站内搜索").first
-        await site_tab.wait_for(state="visible", timeout=10000)
-        await site_tab.click()
+        link_tab = frame.locator('.jd-drawer-wrapper-body [role="tab"]').filter(has_text="链接导入").first
+        if not await link_tab.count():
+            link_tab = frame.locator('.jd-drawer-wrapper-body .jd-tabs-tab-btn').filter(has_text="链接导入").first
+        await link_tab.wait_for(state="visible", timeout=10000)
+        await link_tab.click()
         await asyncio.sleep(1.5)
 
-        # 找当前激活的 tab panel。不同会话的 rc-tabs id 可能变化，
-        # 优先取 aria-hidden=false 的 active panel
         active_panel = frame.locator('.jd-drawer-wrapper-body [role="tabpanel"][aria-hidden="false"]').first
         if not await active_panel.count():
             active_panel = frame.locator('.jd-drawer-wrapper-body .jd-tabs-tabpane-active').first
         await active_panel.wait_for(state="visible", timeout=5000)
 
-        # 输入商品 ID
-        site_input = active_panel.locator('input').first
-        await site_input.wait_for(state="visible", timeout=5000)
-        await site_input.click()
-        await site_input.fill(self.goods_id)
-        await asyncio.sleep(0.5)
+        # 链接导入不是 input：京麦只接收浏览器原生 paste 事件中的 PC 商品链接。
+        # 直接填商品 ID 或 keyboard.insert_text 不会更新 React 状态，查询按钮会保持禁用。
+        paste_target = active_panel.locator('.paste-search-input-content').first
+        await paste_target.wait_for(state="visible", timeout=5000)
+        product_links = "\n".join(
+            f"https://item.jd.com/{goods_id}.html" for goods_id in goods_ids
+        )
+        paste_shortcut = write_clipboard(product_links)
+        await paste_target.click()
+        await page.keyboard.press(paste_shortcut)
 
-        # 点查询
-        query_btn = active_panel.locator('button').filter(has_text="查询").first
-        if not await query_btn.count():
-            query_btn = frame.locator('.jd-drawer-wrapper-body button.jd-btn-primary').filter(has_text="查询").first
-        await query_btn.wait_for(state="visible", timeout=5000)
-        await query_btn.click()
-        jd_logger.info(_msg("🔎", f"已点查询，搜索商品 ID: {self.goods_id}"))
-
-        # 等查询结果，四种终态判定
-        INVALID_HINTS = ("暂无数据", "没有找到", "无结果", "未搜索到")
-        result_text = ""
-        for _ in range(20):
-            await asyncio.sleep(1)
-            result_text = await active_panel.evaluate("el => el.innerText || ''")
-            # 终态 1：出现价格 → 找到商品
-            if "¥" in result_text or "￥" in result_text:
+        imported_tags = active_panel.locator('.paste-search-input-content-tag')
+        for _ in range(10):
+            if await imported_tags.count() == len(goods_ids):
                 break
-            # 终态 2：明确无结果
-            if any(k in result_text for k in INVALID_HINTS):
-                raise ValueError(
-                    f"商品 ID {self.goods_id} 在京东站内搜索无结果。请核实 ID 是否正确，或使用「本店商品」tab。"
-                )
-            # 终态 3：失效卡（实测格式：「<id>\n失效原因: <reason>」）
-            if "失效原因" in result_text:
-                reason = "未知"
-                if "失效原因:" in result_text:
-                    reason = result_text.split("失效原因:", 1)[1].split("\n", 1)[0].strip() or reason
-                raise ValueError(
-                    f"商品 ID {self.goods_id} 在京东站内搜索不可用（失效原因: {reason}）。"
-                    "请核实 ID 是否正确、商品是否上架。"
-                )
+            await asyncio.sleep(0.2)
         else:
-            # 终态 4：超时
             raise RuntimeError(
-                f"商品 ID {self.goods_id} 搜索 20s 内未返回有效商品（结果区无 ¥/￥ 价格）。"
-                "建议用 --headed 观察。"
+                f"京东链接导入未生成全部商品标签：期望 {len(goods_ids)} 个，"
+                f"实际 {await imported_tags.count()} 个。"
             )
 
-        # 勾选第一个商品卡。表头还有一个 goods-card-header-check 是「全选」，要排除
-        goods_check = active_panel.locator('label.jd-checkbox-wrapper.goods-card-check').first
-        if not await goods_check.count():
-            # 兜底：找 active panel 里第一个不是 header-check 的 checkbox-wrapper
-            goods_check = active_panel.locator('label.jd-checkbox-wrapper:not(.goods-card-header-check)').first
-        await goods_check.wait_for(state="visible", timeout=5000)
-        await goods_check.click()
-        jd_logger.info(_msg("✅", "已勾选商品"))
-        await asyncio.sleep(1)
+        query_btn = active_panel.locator('.paste-search-input button').filter(has_text="查询").first
+        await query_btn.wait_for(state="visible", timeout=5000)
+        await query_btn.click()
+        jd_logger.info(_msg("🔎", f"已一次查询 {len(goods_ids)} 个商品 ID"))
 
-        # 点 drawer 底部的「确定」
+        invalid_hints = ("暂无数据", "没有找到", "无结果", "未搜索到", "失效原因")
+        cards = active_panel.locator('.goods-card')
+        for _ in range(30):
+            await asyncio.sleep(1)
+            result_text = await active_panel.inner_text()
+            if any(hint in result_text for hint in invalid_hints) and await cards.count() < len(goods_ids):
+                raise ValueError(f"京东链接导入商品不可用：{result_text.strip()[-300:]}")
+            if await cards.count() >= len(goods_ids):
+                break
+        else:
+            raise RuntimeError(
+                f"京东链接导入查询超时：期望 {len(goods_ids)} 个商品，实际 {await cards.count()} 个。"
+            )
+
+        # 排除表头全选框，只勾选每个返回商品卡对应的 checkbox。京麦点选后
+        # 会异步重渲染；不能把 click 成功当作已选成功，必须逐项读回选中状态。
+        goods_checks = active_panel.locator('label.jd-checkbox-wrapper.goods-card-check')
+        if await goods_checks.count() != len(goods_ids):
+            raise RuntimeError(
+                f"京东链接导入结果数量不匹配：期望 {len(goods_ids)} 个，实际 {await goods_checks.count()} 个。"
+            )
+
+        async def is_selected(checkbox) -> bool:
+            return bool(await checkbox.evaluate("""
+                element => {
+                    const input = element.querySelector('input[type="checkbox"]');
+                    if (input) return input.checked;
+                    return element.classList.contains('jd-checkbox-checked')
+                        || element.getAttribute('aria-checked') === 'true'
+                        || element.querySelector('.jd-checkbox-checked, [aria-checked="true"]') !== null;
+                }
+            """))
+
+        for index, goods_id in enumerate(goods_ids, start=1):
+            for attempt in range(3):
+                # 每次重新取 locator，避免点击上一个商品导致 React 重挂载后引用失效。
+                checkbox = goods_checks.nth(index - 1)
+                await checkbox.wait_for(state="visible", timeout=5000)
+                if await is_selected(checkbox):
+                    break
+                await checkbox.click()
+                await asyncio.sleep(0.5)
+                if await is_selected(goods_checks.nth(index - 1)):
+                    break
+            else:
+                raise RuntimeError(
+                    f"京东链接导入商品 {goods_id} 连续 3 次点击后仍未选中，已停止避免漏挂商品。"
+                )
+            jd_logger.info(_msg("✅", f"已确认勾选第 {index}/{len(goods_ids)} 个商品: {goods_id}"))
+
+        selected_count = 0
+        for index in range(len(goods_ids)):
+            if await is_selected(goods_checks.nth(index)):
+                selected_count += 1
+        if selected_count != len(goods_ids):
+            raise RuntimeError(
+                f"京东链接导入勾选校验失败：期望已选 {len(goods_ids)} 个，实际 {selected_count} 个。"
+            )
+        jd_logger.info(_msg("✅", f"已确认全部勾选 {selected_count} 个商品"))
+        await asyncio.sleep(0.5)
+
         confirm_btn = frame.locator('.jd-drawer-wrapper-body button.jd-btn-primary').filter(has_text="确定").first
         await confirm_btn.click()
-        # 等 drawer 关闭
         drawer = frame.locator('.jd-drawer-wrapper-body')
         try:
             await drawer.wait_for(state="hidden", timeout=10000)
         except Exception:
-            # 兜底：drawer 关闭可能是内部状态切换而不是 DOM 移除
             await asyncio.sleep(2)
-        jd_logger.success(_msg("🛒", f"商品 {self.goods_id} 已关联"))
+        jd_logger.success(_msg("🛒", f"商品已关联（共 {len(goods_ids)} 个）"))
+
+    async def _add_topic(self, frame: Frame) -> None:
+        """搜索并精确选择一个京麦“参与话题”卡片。
+
+        京麦的话题抽屉在点击卡片时直接保存选择，没有二次确认步骤。该方法
+        只接受页面中名称完全匹配的话题，避免关键词搜索命中相近热门话题后误选。
+        """
+        if not self.topic:
+            return
+
+        expected_topic = re.sub(r"[\s#]+", "", self.topic)
+        jd_logger.info(_msg("📣", f"准备添加京东话题: {self.topic}"))
+
+        trigger = frame.get_by_text("点击添加话题", exact=True).first
+        await trigger.wait_for(state="visible", timeout=10000)
+        await trigger.click()
+
+        drawer_title = frame.get_by_text("参与话题", exact=True).last
+        await drawer_title.wait_for(state="visible", timeout=15000)
+        drawer = drawer_title.locator('xpath=ancestor::*[@role="dialog"][1]')
+        await drawer.wait_for(state="visible", timeout=5000)
+        search_input = drawer.locator('input[placeholder="输入关键词搜索"]').first
+        await search_input.wait_for(state="visible", timeout=5000)
+        await search_input.fill(self.topic)
+        await drawer.locator("button.jd-input-search-button").first.click()
+        jd_logger.info(_msg("🔎", f"已搜索京东话题: {self.topic}"))
+
+        topic_cards = drawer.locator(".select-item")
+        matched_card = None
+        available_topics: list[str] = []
+        for _ in range(30):
+            card_count = await topic_cards.count()
+            available_topics = []
+            for index in range(card_count):
+                card = topic_cards.nth(index)
+                topic_name = (await card.locator(".title").first.evaluate("""
+                    element => [...element.childNodes]
+                        .filter(node => node.nodeType === Node.TEXT_NODE)
+                        .map(node => node.textContent || "").join("").trim()
+                """))
+                if topic_name:
+                    available_topics.append(topic_name)
+                if re.sub(r"[\s#]+", "", topic_name) == expected_topic:
+                    matched_card = card
+                    break
+            if matched_card is not None:
+                break
+            await asyncio.sleep(1)
+        else:
+            try:
+                await drawer.locator("button.jd-drawer-close").click()
+            except Exception:
+                pass
+            raise ValueError(
+                f"京东话题“{self.topic}”没有完全匹配的搜索结果。"
+                f"当前结果：{', '.join(available_topics[:8]) or '无'}"
+            )
+
+        await matched_card.click()
+        for _ in range(20):
+            if not await drawer.is_visible():
+                break
+            await asyncio.sleep(0.5)
+        else:
+            raise RuntimeError(f"京东话题“{self.topic}”点击后未被平台接受")
+        jd_logger.success(_msg("📣", f"京东话题已添加: {self.topic}"))
 
     async def _select_creator_declaration(self, frame: Frame):
         """选择运营人员指定的创作者声明下拉项。
@@ -886,6 +1078,7 @@ class JDVideo(JDBaseUploader):
             file_input = frame.locator('input[type="file"][accept*=".mp4"]').first
             await file_input.set_input_files(self.file_path)
             await self._wait_for_video_uploaded(frame)
+            await self._set_custom_cover(frame)
 
             # 填写标题
             jd_logger.info(_msg("✍️", f"填写正文标题: {self.title}"))
@@ -894,6 +1087,7 @@ class JDVideo(JDBaseUploader):
 
             # 各步骤依次执行
             await self._add_goods(page, frame)
+            await self._add_topic(frame)
             await self._select_creator_declaration(frame)
             await self._set_original(frame)
             await self._set_schedule(frame)

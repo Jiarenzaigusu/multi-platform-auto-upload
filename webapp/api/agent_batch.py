@@ -28,6 +28,11 @@ from webapp.api.batch_jd_video import (
     JD_VIDEO_COLUMN_ALIASES,
     _parse_original,
 )
+from webapp.api.batch_jd_article import (
+    JD_ARTICLE_BATCH_COLUMNS,
+    JD_ARTICLE_COLUMN_ALIASES,
+    _parse_original as _parse_jd_article_original,
+)
 from webapp.api.batch_tmall_article import (
     TMALL_ARTICLE_BATCH_COLUMNS,
     TMALL_ARTICLE_COLUMN_ALIASES,
@@ -241,6 +246,53 @@ def parse_remote_tmall_article_batch_workbook(
         template_label="天猫图文",
         columns=TMALL_ARTICLE_BATCH_COLUMNS,
         aliases=TMALL_ARTICLE_COLUMN_ALIASES,
+        account=account,
+        dry_run=dry_run,
+        headed=headed,
+        max_rows=max_rows,
+        request_from_values=make_request,
+    )
+
+
+def parse_remote_jd_article_batch_workbook(
+    content: bytes, *, account: str, dry_run: bool, headed: bool, max_rows: int = 200
+) -> list[BatchPublishRow]:
+    """Parse a JD article workbook and resolve its image folder on the agent."""
+    def make_request(
+        values: dict[str, str], positions: dict[str, int]
+    ) -> tuple[PublishRequest, Path]:
+        folder_path = resolve_local_path(values["image_folder_path"], "图片文件夹路径")
+        original = _parse_jd_article_original(values["original"])
+        with TemporaryDirectory(prefix="mpau-agent-batch-") as temporary_directory:
+            fixture_image = _fixture_file(Path(temporary_directory), ".jpg", "image")
+            request = validate_publish_request(
+                platform="jd",
+                account=account,
+                content_type="article",
+                image_paths=(fixture_image,),
+                original_filename=folder_path.name or "article.jpg",
+                title=values["title"],
+                description=values["description"],
+                goods_id=values["goods_id"],
+                activity_topic=values["activity_topic"],
+                raw_creator_declaration=(
+                    values["creator_declaration"]
+                    if "creator_declaration" in positions
+                    else "内容无需标注"
+                ),
+                raw_schedule=values["schedule"],
+                original=original,
+                dry_run=dry_run,
+                headed=headed,
+            )
+        return replace(request, image_paths=()), folder_path
+
+    return _parse_rows(
+        content,
+        platform_label="京东",
+        template_label="京东图文",
+        columns=JD_ARTICLE_BATCH_COLUMNS,
+        aliases=JD_ARTICLE_COLUMN_ALIASES,
         account=account,
         dry_run=dry_run,
         headed=headed,

@@ -185,13 +185,13 @@ class GenerateCopyRequest(BaseModel):
         default=None,
         ge=2,
         le=100,
-        description="生成标题的目标字符数（结果会接近该值，按汉字、英文字母、标点等逐字符计算）",
+        description="生成标题的目标汉字数（每条结果必须正好等于目标值，标点数字不计）",
     )
     body_max_chars: int | None = Field(       # 正文目标字符数（字段名为兼容旧客户端保留）
         default=None,
         ge=10,
         le=1000,
-        description="生成正文的目标字符数（结果会接近该值，按汉字、英文字母、标点等逐字符计算）",
+        description="生成正文的目标汉字数（提示模型严格遵循该值，标点数字不计）",
     )
     title_count: int = Field(
         default=1,
@@ -275,7 +275,7 @@ class GenerateCopyRequest(BaseModel):
 class GeneratedCopyDraft(BaseModel):
     """LLM 生成的文案草稿（用于解析 LLM 返回的 JSON）。
 
-    固定上下限用于限制单次模型响应的体积；不按用户选择的目标字数校验结果。
+    固定上下限用于限制单次模型响应的体积；标题目标字数由服务层另行严格校验。
     """
 
     model_config = ConfigDict(extra="forbid")

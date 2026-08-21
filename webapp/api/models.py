@@ -23,12 +23,15 @@ from pathlib import Path
 
 # 支持的平台
 SUPPORTED_PLATFORMS = {"tmall", "jd"}
-# 支持的内容类型。京东图文暂时只保留类型预留，不接受创建任务。
+# 支持的视频和图文内容类型。
 SUPPORTED_CONTENT_TYPES = {"video", "article"}
 # 支持的视频扩展名
 SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm"}
 # 支持的封面图片扩展名
 SUPPORTED_COVER_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+JD_ARTICLE_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+MAX_JD_ARTICLE_IMAGES = 20
+MAX_JD_ARTICLE_IMAGE_BYTES = 5 * 1024 * 1024
 # 账号名正则：字母数字下划线连字符，1-64 字符
 ACCOUNT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # 定时发布时间标准格式
@@ -39,8 +42,10 @@ MIN_SCHEDULE_LEAD_TIME = timedelta(hours=2)
 MAX_MUSIC_NAME_LENGTH = 100
 # 天猫一次最多关联的商品 ID 数
 MAX_TMALL_GOODS_IDS = 6
-# 创作者声明可选值（与天猫/京东平台选项一致）
-CREATOR_DECLARATIONS = (
+# 京东链接导入一次最多关联的商品 ID 数（平台页面显示 0/10）
+MAX_JD_GOODS_IDS = 10
+# 天猫创作者声明的真实页面选项。
+TMALL_CREATOR_DECLARATIONS = (
     "内容无需标注",
     "内容含营销信息",
     "含AI生成内容",
@@ -48,8 +53,19 @@ CREATOR_DECLARATIONS = (
     "内容为转载",
     "个人观点，仅供参考",
 )
-# 平台将“内容含营销广告”调整为“内容含营销信息”；兼容已下载的旧批量模板。
-CREATOR_DECLARATION_ALIASES = {"内容含营销广告": "内容含营销信息"}
+# 京东创作者声明的真实页面选项。与天猫独立维护，禁止跨平台文案映射。
+JD_CREATOR_DECLARATIONS = (
+    "内容无需标注",
+    "内容含营销广告",
+    "含AI生成内容",
+    "含虚构演绎内容",
+    "内容为转载",
+    "个人观点，仅供参考",
+)
+# 仅天猫兼容已下载旧模板的营销声明；京东始终要求其后台真实字段。
+TMALL_CREATOR_DECLARATION_ALIASES = {"内容含营销广告": "内容含营销信息"}
+# 保留旧名称，供天猫模块和第三方调用方继续使用。
+CREATOR_DECLARATIONS = TMALL_CREATOR_DECLARATIONS
 
 
 class ValidationError(ValueError):
@@ -69,13 +85,13 @@ class PublishRequest:
     account: str                # 店铺账号标识
     video_path: Path | None     # 视频文件绝对路径（仅视频）
     image_paths: tuple[Path, ...]  # 图片绝对路径（仅图文，顺序即发布顺序）
-    cover_image_path: Path | None  # 封面图片路径（仅天猫，可为 None）
+    cover_image_path: Path | None  # 视频自定义封面图片路径（可为 None）
     original_filename: str      # 原始文件名（用于日志/结果）
     title: str                  # 标题
     description: str            # 描述/文案（天猫有，京东无）
     tags: tuple[str, ...]       # 话题标签（天猫有，京东无）
     goods_id: str               # 商品 ID 字符串（逗号分隔）
-    activity_topic: str         # 活动话题（天猫有，京东无）
+    activity_topic: str         # 参与话题（天猫活动话题 / 京东话题）
     music_name: str             # 音乐名称（天猫有，京东无）
     creator_declaration: str    # 创作者声明
     schedule: datetime | None   # 定时发布时间，None 立即发布
@@ -210,7 +226,7 @@ def validate_publish_request(
 
     包含通用校验（平台/账号/素材/封面/创作者声明）与平台专属校验：
     - 天猫：标题最多 30 字，文案+标签最多 1000 字，不支持自主原创，最多 6 个商品 ID
-    - 京东：标题 5-27 字，无文案/标签/活动话题/音乐，最多 1 个商品 ID
+    - 京东：视频标题 5-27 字且无独立文案；图文标题 5-20 字并支持正文；二者均不支持标签/音乐，支持一个可选话题、自主原创，最多 10 个商品 ID
 
     :returns: 校验后的 PublishRequest
     :raises ValidationError: 任一校验失败
@@ -223,9 +239,11 @@ def validate_publish_request(
     goods_ids = parse_goods_ids(goods_id)
     normalized_activity_topic = activity_topic.strip()
     music_name = raw_music_name.strip()
-    creator_declaration = CREATOR_DECLARATION_ALIASES.get(
-        raw_creator_declaration.strip(), raw_creator_declaration.strip()
-    )
+    creator_declaration = raw_creator_declaration.strip()
+    if selected_platform == "tmall":
+        creator_declaration = TMALL_CREATOR_DECLARATION_ALIASES.get(
+            creator_declaration, creator_declaration
+        )
 
     normalized_video_path: Path | None = None
     normalized_image_paths: tuple[Path, ...] = ()
@@ -241,10 +259,12 @@ def validate_publish_request(
             raise ValidationError("仅支持 MP4、MOV、MKV、M4V、AVI 或 WebM 视频")
         normalized_video_path = video_path.resolve()
     else:
-        if selected_platform != "tmall":
-            raise ValidationError("京东图文发布尚未开放")
-        if not 1 <= len(image_paths) <= 9:
-            raise ValidationError("天猫图文必须上传 1-9 张图片")
+        max_images = 9 if selected_platform == "tmall" else MAX_JD_ARTICLE_IMAGES
+        if not 1 <= len(image_paths) <= max_images:
+            raise ValidationError(
+                "天猫图文必须上传 1-9 张图片" if selected_platform == "tmall"
+                else "京东图文必须上传 1-20 张图片"
+            )
         normalized_paths: list[Path] = []
         for image_path in image_paths:
             if not image_path.is_file():
@@ -254,15 +274,24 @@ def validate_publish_request(
                     raise ValidationError("图文图片不能为空")
             except OSError as exc:
                 raise ValidationError("无法读取图文图片") from exc
-            if image_path.suffix.lower() not in SUPPORTED_COVER_IMAGE_EXTENSIONS:
-                raise ValidationError("图文图片仅支持 JPG、PNG 或 WebP 格式")
+            allowed_extensions = (
+                SUPPORTED_COVER_IMAGE_EXTENSIONS if selected_platform == "tmall"
+                else JD_ARTICLE_IMAGE_EXTENSIONS
+            )
+            if image_path.suffix.lower() not in allowed_extensions:
+                raise ValidationError(
+                    "图文图片仅支持 JPG、PNG 或 WebP 格式" if selected_platform == "tmall"
+                    else "京东图文图片仅支持 JPG 或 PNG 格式"
+                )
+            if selected_platform == "jd" and image_path.stat().st_size > MAX_JD_ARTICLE_IMAGE_BYTES:
+                raise ValidationError("京东图文单张图片不能超过 5 MiB")
             normalized_paths.append(image_path.resolve())
         normalized_image_paths = tuple(normalized_paths)
 
-    # 封面图片校验（仅天猫）
+    # 视频自定义封面校验（天猫与京东均支持）
     if cover_image_path is not None:
-        if selected_content_type != "video" or selected_platform != "tmall":
-            raise ValidationError("当前仅天猫光合支持自定义封面图片")
+        if selected_content_type != "video":
+            raise ValidationError("自定义封面图片仅支持视频发布")
         if not cover_image_path.is_file():
             raise ValidationError("封面图片不存在或上传未完成")
         try:
@@ -278,7 +307,12 @@ def validate_publish_request(
         raise ValidationError("标题不能为空")
 
     # 创作者声明校验
-    if creator_declaration not in CREATOR_DECLARATIONS:
+    platform_creator_declarations = (
+        TMALL_CREATOR_DECLARATIONS
+        if selected_platform == "tmall"
+        else JD_CREATOR_DECLARATIONS
+    )
+    if creator_declaration not in platform_creator_declarations:
         raise ValidationError("请选择有效的创作者声明")
 
     # 音乐名称长度校验
@@ -302,18 +336,19 @@ def validate_publish_request(
             raise ValidationError(f"天猫一次最多关联 {MAX_TMALL_GOODS_IDS} 个商品 ID")
     else:
         # 京东专属校验
-        if not 5 <= len(normalized_title) <= 27:
-            raise ValidationError("京东标题长度必须为 5-27 个字符")
-        if normalized_description:
-            raise ValidationError("当前京东发布器没有独立文案字段，请清空文案")
+        title_max = 27 if selected_content_type == "video" else 20
+        if not 5 <= len(normalized_title) <= title_max:
+            raise ValidationError(f"京东{'视频' if selected_content_type == 'video' else '图文'}标题长度必须为 5-{title_max} 个字符")
+        if selected_content_type == "video" and normalized_description:
+            raise ValidationError("当前京东视频发布器没有独立文案字段，请清空文案")
+        if selected_content_type == "article" and len(normalized_description) > 1001:
+            raise ValidationError("京东图文正文最多 1001 个字符")
         if raw_tags.strip():
             raise ValidationError("当前京东发布器不支持标签字段")
-        if normalized_activity_topic:
-            raise ValidationError("当前京东发布器不支持活动话题")
         if music_name:
             raise ValidationError("当前京东发布器不支持音乐字段")
-        if len(goods_ids) > 1:
-            raise ValidationError("京东一次只能关联 1 个商品 ID")
+        if len(goods_ids) > MAX_JD_GOODS_IDS:
+            raise ValidationError(f"京东一次最多关联 {MAX_JD_GOODS_IDS} 个商品 ID")
 
     return PublishRequest(
         platform=selected_platform,

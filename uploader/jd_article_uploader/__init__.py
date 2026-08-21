@@ -1,4 +1,5 @@
-"""京东图文发布预留包；当前尚未实现可执行发布流程。
+"""京东京麦图文发布模块，只导出独立的图文流程类。"""
 
-后续会在本包内实现独立的 JDArticle 流程，并直接使用 uploader.jd_session。
-"""
+from .main import JDArticle
+
+__all__ = ["JDArticle"]

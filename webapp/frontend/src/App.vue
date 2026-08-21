@@ -26,9 +26,17 @@ const DRAFT_DB_VERSION = 1
 const DRAFT_VIDEO_STORE = 'videos'
 const DRAFT_VIDEO_MAX_BYTES = 100 * 1024 * 1024
 const MAX_COVER_IMAGE_BYTES = 20 * 1024 * 1024
-const creatorDeclarationOptions = [
+const tmallCreatorDeclarationOptions = [
   '内容无需标注',
   '内容含营销信息',
+  '含AI生成内容',
+  '含虚构演绎内容',
+  '内容为转载',
+  '个人观点，仅供参考',
+]
+const jdCreatorDeclarationOptions = [
+  '内容无需标注',
+  '内容含营销广告',
   '含AI生成内容',
   '含虚构演绎内容',
   '内容为转载',
@@ -38,18 +46,21 @@ const draftRestoredVideoName = ref('')
 const draftRestoredAt = ref('')
 const isRestoringDraft = ref(true)
 let persistTimer = null
+let isSwitchingWorkspace = false
 
 /** Namespace browser drafts by immutable user ID to prevent cross-login leakage. */
 function formDraftStorageKey() {
-  return currentUser.value ? `mpau_publish_form_draft_v2:${currentUser.value.id}` : ''
+  return currentUser.value ? `mpau_publish_form_draft_v4:${currentUser.value.id}` : ''
 }
 
 /** Namespace the IndexedDB video record by immutable user ID. */
-function draftVideoKey() {
-  return currentUser.value ? `last_publish_video:${currentUser.value.id}` : ''
+function draftVideoKey(platform = form.platform, contentType = form.contentType) {
+  return currentUser.value
+    ? `last_publish_video:${currentUser.value.id}:${platform}:${contentType}`
+    : ''
 }
 
-const PLATFORM_DRAFT_KEYS = [
+const WORKSPACE_DRAFT_KEYS = [
   'account',
   'title',
   'description',
@@ -62,7 +73,7 @@ const PLATFORM_DRAFT_KEYS = [
   'original',
 ]
 
-function createEmptyPlatformDraft() {
+function createEmptyWorkspaceDraft() {
   return {
     account: '',
     title: '',
@@ -77,17 +88,29 @@ function createEmptyPlatformDraft() {
   }
 }
 
-function normalizePlatformDraft(saved) {
-  const draft = createEmptyPlatformDraft()
+function workspaceKey(platform, contentType) {
+  return `${platform}_${contentType}`
+}
+
+function createWorkspaceDrafts() {
+  return Object.fromEntries(
+    ['tmall', 'jd'].flatMap((platform) => ['video', 'article'].map((contentType) => [
+      workspaceKey(platform, contentType), createEmptyWorkspaceDraft(),
+    ])),
+  )
+}
+
+function normalizeWorkspaceDraft(saved) {
+  const draft = createEmptyWorkspaceDraft()
   if (!saved || typeof saved !== 'object') return draft
-  for (const key of PLATFORM_DRAFT_KEYS) {
+  for (const key of WORKSPACE_DRAFT_KEYS) {
     if (key === 'original') {
       if (typeof saved[key] === 'boolean') draft[key] = saved[key]
     } else if (typeof saved[key] === 'string') {
       draft[key] = saved[key]
     }
   }
-  if (!creatorDeclarationOptions.includes(draft.creatorDeclaration)) {
+  if (![...tmallCreatorDeclarationOptions, ...jdCreatorDeclarationOptions].includes(draft.creatorDeclaration)) {
     draft.creatorDeclaration = ''
   }
   return draft
@@ -112,8 +135,9 @@ function openDraftDatabase() {
 }
 
 async function persistDraftVideo(file) {
-  if (!draftVideoKey()) return
-  if (!file) return deleteDraftVideo()
+  const key = draftVideoKey()
+  if (!key) return
+  if (!file) return deleteDraftVideo(key)
   let db
   try {
     db = await openDraftDatabase()
@@ -126,7 +150,7 @@ async function persistDraftVideo(file) {
         type: file.type || 'video/mp4',
         lastModified: file.lastModified || Date.now(),
         savedAt: new Date().toISOString(),
-      }, draftVideoKey())
+      }, key)
       tx.oncomplete = () => resolve()
       tx.onerror = () => reject(tx.error)
     })
@@ -137,14 +161,14 @@ async function persistDraftVideo(file) {
   }
 }
 
-async function restoreDraftVideo() {
-  if (!draftVideoKey()) return null
+async function restoreDraftVideo(key = draftVideoKey()) {
+  if (!key) return null
   let db
   try {
     db = await openDraftDatabase()
     const result = await new Promise((resolve, reject) => {
       const tx = db.transaction(DRAFT_VIDEO_STORE, 'readonly')
-      const req = tx.objectStore(DRAFT_VIDEO_STORE).get(draftVideoKey())
+      const req = tx.objectStore(DRAFT_VIDEO_STORE).get(key)
       req.onsuccess = () => resolve(req.result || null)
       req.onerror = () => reject(req.error)
     })
@@ -165,14 +189,14 @@ async function restoreDraftVideo() {
   return null
 }
 
-async function deleteDraftVideo() {
-  if (!draftVideoKey()) return
+async function deleteDraftVideo(key = draftVideoKey()) {
+  if (!key) return
   let db
   try {
     db = await openDraftDatabase()
     await new Promise((resolve, reject) => {
       const tx = db.transaction(DRAFT_VIDEO_STORE, 'readwrite')
-      tx.objectStore(DRAFT_VIDEO_STORE).delete(draftVideoKey())
+      tx.objectStore(DRAFT_VIDEO_STORE).delete(key)
       tx.oncomplete = () => resolve()
       tx.onerror = () => reject(tx.error)
     })
@@ -198,17 +222,17 @@ function readSavedFormDraft() {
 
 function persistFormDraft() {
   if (isRestoringDraft.value || !formDraftStorageKey()) return
-  snapshotPlatformDraft(form.platform)
+  snapshotWorkspaceDraft()
   if (persistTimer) clearTimeout(persistTimer)
   persistTimer = setTimeout(() => {
     try {
       const payload = {
-        version: 2,
+        version: 4,
         platform: form.platform,
-        platformDrafts: {
-          tmall: { ...platformDrafts.tmall },
-          jd: { ...platformDrafts.jd },
-        },
+        contentType: form.contentType,
+        workspaceDrafts: Object.fromEntries(
+          Object.entries(workspaceDrafts).map(([key, draft]) => [key, { ...draft }]),
+        ),
         dryRun: form.dryRun,
         headed: form.headed,
         savedAt: new Date().toISOString(),
@@ -221,20 +245,23 @@ function persistFormDraft() {
 }
 
 function applySavedFormDraft(saved) {
-  if (
-    !saved
-    || saved.version !== 2
-    || !saved.platformDrafts
-    || typeof saved.platformDrafts !== 'object'
-  ) return
+  if (!saved || typeof saved !== 'object') return
   const savedPlatform = saved.platform === 'tmall' || saved.platform === 'jd'
     ? saved.platform
     : form.platform
-  for (const platform of ['tmall', 'jd']) {
-    Object.assign(platformDrafts[platform], normalizePlatformDraft(saved.platformDrafts[platform]))
+  if (saved.workspaceDrafts && typeof saved.workspaceDrafts === 'object') {
+    for (const key of Object.keys(workspaceDrafts)) {
+      Object.assign(workspaceDrafts[key], normalizeWorkspaceDraft(saved.workspaceDrafts[key]))
+    }
+  } else if (saved.platformDrafts && typeof saved.platformDrafts === 'object') {
+    const contentType = saved.contentType === 'article' ? 'article' : 'video'
+    for (const platform of ['tmall', 'jd']) {
+      Object.assign(workspaceDrafts[workspaceKey(platform, contentType)], normalizeWorkspaceDraft(saved.platformDrafts[platform]))
+    }
   }
   form.platform = savedPlatform
-  applyPlatformDraft(form.platform)
+  if (saved.contentType === 'video' || saved.contentType === 'article') form.contentType = saved.contentType
+  applyWorkspaceDraft(form.platform, form.contentType)
   if (typeof saved.dryRun === 'boolean') form.dryRun = saved.dryRun
   if (typeof saved.headed === 'boolean') form.headed = saved.headed
 }
@@ -245,8 +272,8 @@ async function restorePublishDraft() {
   draftRestoredAt.value = ''
   try {
     applySavedFormDraft(readSavedFormDraft())
-    const videoDraft = await restoreDraftVideo()
-    if (videoDraft?.file) {
+    const videoDraft = await restoreDraftVideo(draftVideoKey(form.platform, form.contentType))
+    if (videoDraft?.file && isVideo.value) {
       form.video = videoDraft.file
       draftRestoredVideoName.value = videoDraft.file.name
       draftRestoredAt.value = videoDraft.savedAt || new Date().toISOString()
@@ -264,20 +291,19 @@ async function restorePublishDraft() {
 }
 
 async function clearPublishDraft() {
-  if (!window.confirm('确定清空发布页面的所有配置信息和已选素材吗？此操作也会删除当前已选的视频文件。')) {
+  const target = `${platformLabel(form.platform)}${form.contentType === 'article' ? '图文' : '视频'}发布台`
+  if (!window.confirm(`确定清空“${target}”的发布草稿和已选素材吗？其他三个发布台不会受影响。`)) {
     return
   }
   clearPublishContent()
-  try {
-    localStorage.removeItem(formDraftStorageKey())
-  } catch (error) { /* ignore */ }
-  await deleteDraftVideo()
+  persistFormDraft()
+  await deleteDraftVideo(draftVideoKey(form.platform, form.contentType))
   form.dryRun = true
   form.headed = true
   form.original = false
   draftRestoredVideoName.value = ''
   draftRestoredAt.value = ''
-  showNotice('已一键清空发布配置和素材', 'success')
+  showNotice(`已清空${target}的发布草稿和素材，其他发布台未改动`, 'success')
 }
 
 const jobs = ref([])
@@ -331,24 +357,23 @@ const form = reactive({
   headed: true,
 })
 
-const platformDrafts = reactive({
-  tmall: createEmptyPlatformDraft(),
-  jd: createEmptyPlatformDraft(),
-})
+const workspaceDrafts = reactive(createWorkspaceDrafts())
 
-function snapshotPlatformDraft(platform = form.platform) {
-  const draft = platformDrafts[platform]
+function snapshotWorkspaceDraft(platform = form.platform, contentType = form.contentType) {
+  const draft = workspaceDrafts[workspaceKey(platform, contentType)]
   if (!draft) return
-  for (const key of PLATFORM_DRAFT_KEYS) {
+  for (const key of WORKSPACE_DRAFT_KEYS) {
     draft[key] = form[key]
   }
 }
 
-function applyPlatformDraft(platform) {
-  const draft = platformDrafts[platform] || createEmptyPlatformDraft()
-  for (const key of PLATFORM_DRAFT_KEYS) {
+function applyWorkspaceDraft(platform, contentType) {
+  const draft = workspaceDrafts[workspaceKey(platform, contentType)] || createEmptyWorkspaceDraft()
+  for (const key of WORKSPACE_DRAFT_KEYS) {
     form[key] = draft[key]
   }
+  const options = platform === 'tmall' ? tmallCreatorDeclarationOptions : jdCreatorDeclarationOptions
+  if (!options.includes(form.creatorDeclaration)) form.creatorDeclaration = ''
 }
 
 const batchForm = reactive({
@@ -361,6 +386,9 @@ const batchForm = reactive({
 })
 
 const isTmall = computed(() => form.platform === 'tmall')
+const creatorDeclarationOptions = computed(() => (
+  isTmall.value ? tmallCreatorDeclarationOptions : jdCreatorDeclarationOptions
+))
 const isVideo = computed(() => form.contentType === 'video')
 const isArticle = computed(() => form.contentType === 'article')
 const isTmallBatch = computed(() => batchForm.platform === 'tmall')
@@ -370,7 +398,7 @@ const platformLabel = (platform) => (platform === 'tmall' ? '天猫光合' : '�
 const batchPlatformLabel = computed(() => platformLabel(batchForm.platform))
 const batchContentTypeLabel = computed(() => batchForm.contentType === 'article' ? '图文' : '视频')
 const batchTemplateUrl = computed(() => apiUrl(
-  `/api/batch-templates-v2/${batchForm.platform}${batchForm.platform === 'tmall' ? `?content_type=${batchForm.contentType}` : ''}`,
+  `/api/batch-templates-v2/${batchForm.platform}?content_type=${batchForm.contentType}`,
 ))
 const jobLabel = (kind) => ({ publish: '发布', login: '登录', check: '校验', delete_account: '删除本地账号' }[kind] || kind)
 const statusLabel = (status) => ({ queued: '排队中', running: '执行中', cancelling: '正在中断', cancelled: '已中断', succeeded: '已完成', failed: '失败', uncertain: '结果待核对' }[status] || status)
@@ -442,26 +470,32 @@ const agentStatusDescription = computed(() => {
   return agentStatus.system || '本地执行助手已连接，可执行登录和发布任务。'
 })
 
-watch(() => form.platform, (platform, previousPlatform) => {
-  if (isRestoringDraft.value) return
-  if (previousPlatform && previousPlatform !== platform) {
-    snapshotPlatformDraft(previousPlatform)
-    applyPlatformDraft(platform)
-  }
-  if (platform === 'jd' && form.contentType === 'article') form.contentType = 'video'
-  publishError.value = ''
-  persistFormDraft()
-})
+function activateWorkspace(platform, contentType) {
+  snapshotWorkspaceDraft()
+  isSwitchingWorkspace = true
+  form.platform = platform
+  form.contentType = contentType
+  applyWorkspaceDraft(platform, contentType)
+  isSwitchingWorkspace = false
+  if (contentType === 'article') clearVideo()
+  else clearImages()
+}
 
-watch(() => form.contentType, (contentType) => {
+watch(() => [form.platform, form.contentType], ([platform, contentType], [previousPlatform, previousContentType]) => {
+  if (isRestoringDraft.value || isSwitchingWorkspace) return
+  if (previousPlatform && previousContentType && (
+    previousPlatform !== platform || previousContentType !== contentType
+  )) {
+    snapshotWorkspaceDraft(previousPlatform, previousContentType)
+    applyWorkspaceDraft(platform, contentType)
+  }
   if (contentType === 'article') clearVideo()
   else clearImages()
   publishError.value = ''
   persistFormDraft()
-})
+}, { flush: 'sync' })
 
 watch(() => batchForm.platform, () => {
-  if (batchForm.platform === 'jd') batchForm.contentType = 'video'
   batchSubmitError.value = ''
   clearBatchWorkbook()
 })
@@ -491,14 +525,14 @@ function showNotice(message, type = 'info') {
 
 function importAiCopyToWorkbench(draft) {
   if (!draft || typeof draft.title !== 'string' || typeof draft.body !== 'string') return
-
+  if (!['tmall', 'jd'].includes(draft.platform) || !['video', 'article'].includes(draft.contentType)) return
+  activateWorkspace(draft.platform, draft.contentType)
   form.title = draft.title
-  if (isTmall.value) {
-    form.description = draft.body
-    showNotice('生成的标题和文案已导入发布工作台，原内容已覆盖', 'success')
-  } else {
-    showNotice('生成的标题已导入；京东不支持独立文案，正文未导入', 'info')
-  }
+  const supportsDescription = draft.platform === 'tmall' || draft.contentType === 'article'
+  if (supportsDescription) form.description = draft.body
+  snapshotWorkspaceDraft(draft.platform, draft.contentType)
+  persistFormDraft()
+  showNotice(`生成的${supportsDescription ? '标题和正文' : '标题'}已导入${platformLabel(draft.platform)}${draft.contentType === 'article' ? '图文' : '视频'}发布台`, 'success')
   activeView.value = 'publish'
 }
 
@@ -732,16 +766,22 @@ function clearVideo() {
 function onImagesChange(event) {
   form.images = Array.from(event.target.files || [])
   if (imageFolderInput.value) imageFolderInput.value.value = ''
-  publishError.value = form.images.length > 9 ? '图片超过 9 张，请移除多余图片后重试' : ''
+  const maxImages = isTmall.value ? 9 : 20
+  publishError.value = form.images.length > maxImages ? `图片超过 ${maxImages} 张，请移除多余图片后重试` : ''
 }
 
 function onImageFolderChange(event) {
   const images = Array.from(event.target.files || [])
-    .filter((file) => /\.(jpe?g|png|webp)$/i.test(file.name))
-    .sort((left, right) => left.name.localeCompare(right.name, 'zh-Hans-CN'))
+    .filter((file) => (isTmall.value ? /\.(jpe?g|png|webp)$/i : /\.(jpe?g|png)$/i).test(file.name))
+    .sort((left, right) => (left.webkitRelativePath || left.name).localeCompare(
+      right.webkitRelativePath || right.name,
+      undefined,
+      { numeric: true, sensitivity: 'base' },
+    ))
   form.images = images
   if (imageInput.value) imageInput.value.value = ''
-  publishError.value = images.length > 9 ? '文件夹内图片超过 9 张，请移除多余图片后重试' : ''
+  const maxImages = isTmall.value ? 9 : 20
+  publishError.value = images.length > maxImages ? `文件夹内图片超过 ${maxImages} 张，请移除多余图片后重试` : ''
 }
 
 function clearImages() {
@@ -771,18 +811,9 @@ function clearPublishContent() {
   clearVideo()
   clearImages()
   clearCoverImage()
-  for (const platform of ['tmall', 'jd']) {
-    Object.assign(platformDrafts[platform], createEmptyPlatformDraft())
-  }
-  form.title = ''
-  form.description = ''
-  form.tags = ''
-  form.goodsId = ''
-  form.activityTopic = ''
-  form.musicName = ''
-  form.creatorDeclaration = ''
-  form.schedule = ''
-  form.original = false
+  const emptyDraft = createEmptyWorkspaceDraft()
+  Object.assign(workspaceDrafts[workspaceKey(form.platform, form.contentType)], emptyDraft)
+  for (const key of WORKSPACE_DRAFT_KEYS) form[key] = emptyDraft[key]
 }
 
 function onBatchWorkbookChange(event) {
@@ -822,23 +853,28 @@ async function submitPublish() {
     publishError.value = '请先重新选择一个视频文件'
     return
   }
-  if (isArticle.value && (!form.images.length || form.images.length > 9)) {
-    publishError.value = '天猫图文必须选择 1-9 张图片'
+  const articleImageLimit = isTmall.value ? 9 : 20
+  if (isArticle.value && (!form.images.length || form.images.length > articleImageLimit)) {
+    publishError.value = `${isTmall.value ? '天猫' : '京东'}图文必须选择 1-${articleImageLimit} 张图片`
     return
   }
-  if (isArticle.value && form.images.some((image) => !/\.(jpe?g|png|webp)$/i.test(image.name))) {
-    publishError.value = '图文图片仅支持 JPG、PNG 或 WebP 格式'
+  if (isArticle.value && form.images.some((image) => !(
+    isTmall.value ? /\.(jpe?g|png|webp)$/i : /\.(jpe?g|png)$/i
+  ).test(image.name))) {
+    publishError.value = isTmall.value
+      ? '图文图片仅支持 JPG、PNG 或 WebP 格式'
+      : '京东图文图片仅支持 JPG 或 PNG 格式'
     return
   }
-  if (isTmall.value && form.coverImage && form.coverImage.size > MAX_COVER_IMAGE_BYTES) {
+  if (isVideo.value && form.coverImage && form.coverImage.size > MAX_COVER_IMAGE_BYTES) {
     publishError.value = '封面图片不能超过 20 MiB'
     return
   }
   if (!form.title.trim()) {
-    publishError.value = '请先填写视频标题'
+    publishError.value = `请先填写${isArticle.value ? '图文' : '视频'}标题`
     return
   }
-  if (!creatorDeclarationOptions.includes(form.creatorDeclaration)) {
+  if (!creatorDeclarationOptions.value.includes(form.creatorDeclaration)) {
     publishError.value = '请选择与实际内容相符的创作者声明'
     return
   }
@@ -858,8 +894,8 @@ async function submitPublish() {
     publishError.value = '天猫一次最多关联 6 个商品 ID'
     return
   }
-  if (!isTmall.value && uniqueGoodsIds.value.length > 1) {
-    publishError.value = '京东一次只能关联 1 个商品 ID'
+  if (!isTmall.value && uniqueGoodsIds.value.length > 10) {
+    publishError.value = '京东一次最多关联 10 个商品 ID'
     return
   }
   submitting.value = true
@@ -868,10 +904,10 @@ async function submitPublish() {
   data.append('account', form.account)
   data.append('content_type', form.contentType)
   data.append('title', form.title)
-  data.append('description', isTmall.value ? form.description : '')
+  data.append('description', isTmall.value || isArticle.value ? form.description : '')
   data.append('tags', isTmall.value ? form.tags : '')
   data.append('goods_id', form.goodsId)
-  data.append('activity_topic', isTmall.value ? form.activityTopic : '')
+  data.append('activity_topic', form.activityTopic)
   data.append('music_name', isTmall.value ? form.musicName : '')
   data.append('creator_declaration', form.creatorDeclaration)
   data.append('schedule', form.schedule.replace('T', ' '))
@@ -884,7 +920,7 @@ async function submitPublish() {
     if (isVideo.value) {
       const [videoAsset, coverAsset] = await Promise.all([
         uploadFileToAgent(form.video, 'video'),
-        isTmall.value && form.coverImage
+        form.coverImage
           ? uploadFileToAgent(form.coverImage, 'cover')
           : Promise.resolve(null),
       ])
@@ -1014,11 +1050,12 @@ function resetUserInterface() {
     dryRun: true,
     headed: true,
   })
-  for (const platform of ['tmall', 'jd']) {
-    Object.assign(platformDrafts[platform], createEmptyPlatformDraft())
+  for (const key of Object.keys(workspaceDrafts)) {
+    Object.assign(workspaceDrafts[key], createEmptyWorkspaceDraft())
   }
   Object.assign(batchForm, {
     platform: 'tmall',
+    contentType: 'video',
     account: '',
     workbook: null,
     dryRun: true,
@@ -1161,6 +1198,7 @@ onBeforeUnmount(() => {
       <AiCopyView
         v-if="activeView === 'ai-copy'"
         :active="activeView === 'ai-copy'"
+        :user-id="currentUser.id"
         @import-to-workbench="importAiCopyToWorkbench"
       />
 
@@ -1173,11 +1211,12 @@ onBeforeUnmount(() => {
           </div>
           <div class="platform-choice content-type-choice">
             <label :class="{ selected: form.contentType === 'video' }"><input v-model="form.contentType" type="radio" value="video" /><span>视频</span><small>单视频，可选自定义封面</small></label>
-            <label :class="{ selected: form.contentType === 'article', disabled: !isTmall }"><input v-model="form.contentType" type="radio" value="article" :disabled="!isTmall" /><span>图文</span><small>{{ isTmall ? '1-9 张图片，按选择顺序发布' : '京东图文即将支持' }}</small></label>
+            <label :class="{ selected: form.contentType === 'article' }"><input v-model="form.contentType" type="radio" value="article" /><span>图文</span><small>{{ isTmall ? '1-9 张图片，按选择顺序发布' : '1-20 张 JPG/PNG 图片，支持正文' }}</small></label>
           </div>
           <p v-if="isTmall && isVideo" class="workflow-tip"><strong>天猫视频步骤：</strong>上传视频 → 可选设置自定义封面 → 填写标题、文案和标签 → 参与话题 → 可选添加音乐 → 关联商品 → 设置定时 → 选择创作者声明 → 提交发布。</p>
           <p v-else-if="isTmall" class="workflow-tip"><strong>天猫图文步骤：</strong>按顺序上传 1-9 张图片 → 填写标题、文案和标签 → 参与话题 → 可选添加音乐 → 关联商品 → 设置定时 → 选择创作者声明 → 提交发布。</p>
-          <p v-else class="workflow-tip"><strong>京东实际步骤：</strong>上传视频 → 填写标题 → 关联商品 → 选择创作声明与自主原创 → 设置定时 → 提交发布；出现验证码时需要在 Edge 中手动完成验证。</p>
+          <p v-else-if="isVideo" class="workflow-tip"><strong>京东视频步骤：</strong>上传视频 → 可选设置封面 → 填写标题 → 关联商品/参与话题 → 选择创作声明与自主原创 → 设置定时 → 提交发布。</p>
+          <p v-else class="workflow-tip"><strong>京东图文步骤：</strong>按顺序上传 1-20 张 JPG/PNG 图片 → 填写标题与正文 → 关联商品/参与话题 → 选择创作声明与自主原创 → 设置定时 → 提交发布。</p>
 
           <div class="field-row">
             <label class="field"><span>店铺账号标识</span><input v-model="form.account" list="account-list" required placeholder="例如 shop1" /><datalist id="account-list"><option v-for="item in visibleAccounts" :key="`${item.platform}-${item.account}`" :value="item.account" /></datalist></label>
@@ -1197,15 +1236,15 @@ onBeforeUnmount(() => {
             </div>
           </template>
           <div v-else class="field image-upload-field">
-            <span>图文图片 <em>必选，1-9 张</em></span>
-            <input id="article-image-files" ref="imageInput" class="native-file-input" type="file" multiple accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" @change="onImagesChange" />
-            <label class="cover-file-picker" :class="{ selected: form.images.length }" for="article-image-files"><span class="cover-file-action">{{ form.images.length ? '重新选择图片' : '选择图片文件' }}</span><span class="cover-file-name">{{ form.images.length ? `已选择 ${form.images.length} 张图片` : '按选择顺序上传，最多 9 张' }}</span></label>
+            <span>图文图片 <em>必选，1-{{ isTmall ? 9 : 20 }} 张</em></span>
+            <input id="article-image-files" ref="imageInput" class="native-file-input" type="file" multiple :accept="isTmall ? 'image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp' : 'image/jpeg,image/png,.jpg,.jpeg,.png'" @change="onImagesChange" />
+            <label class="cover-file-picker" :class="{ selected: form.images.length }" for="article-image-files"><span class="cover-file-action">{{ form.images.length ? '重新选择图片' : '选择图片文件' }}</span><span class="cover-file-name">{{ form.images.length ? `已选择 ${form.images.length} 张图片` : `按选择顺序上传，最多 ${isTmall ? 9 : 20} 张` }}</span></label>
             <input id="article-image-folder" ref="imageFolderInput" class="native-file-input" type="file" multiple webkitdirectory directory @change="onImageFolderChange" />
             <label class="cover-file-picker" for="article-image-folder"><span class="cover-file-action">选择图片文件夹</span><span class="cover-file-name">读取文件夹第一层图片，并按文件名顺序发布</span></label>
             <ol v-if="form.images.length" class="image-file-list"><li v-for="(image, index) in form.images" :key="`${image.name}-${image.lastModified}-${index}`"><b>{{ index + 1 }}</b><span>{{ image.name }}</span><small>{{ (image.size / 1024 / 1024).toFixed(1) }} MB</small><div class="image-file-actions"><button type="button" :disabled="index === 0" @click="moveImage(index, -1)">上移</button><button type="button" :disabled="index === form.images.length - 1" @click="moveImage(index, 1)">下移</button><button type="button" @click="removeImage(index)">移除</button></div></li></ol>
             <button v-if="form.images.length" class="clear-file" type="button" @click="clearImages">清空图文素材</button>
           </div>
-          <div v-if="isTmall && isVideo" class="field cover-image-field">
+          <div v-if="isVideo" class="field cover-image-field">
             <span>自定义封面图片 <em>可选</em></span>
             <input id="cover-image-file" ref="coverImageInput" class="native-file-input" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" @change="onCoverImageChange" />
             <label class="cover-file-picker" :class="{ selected: form.coverImage }" for="cover-image-file">
@@ -1221,7 +1260,7 @@ onBeforeUnmount(() => {
             <small v-if="draftRestoredVideoName">含上次视频：<b>{{ draftRestoredVideoName }}</b></small>
             <small v-else>可在修改后直接再次发布。</small>
           </p>
-          <label class="field"><span>标题</span><input v-model="form.title" required :maxlength="isTmall ? 30 : 27" :placeholder="isTmall ? '最多 30 个字符' : '京东要求 5-27 个字符'" /></label>
+          <label class="field"><span>标题</span><input v-model="form.title" required :maxlength="isTmall ? 30 : (isVideo ? 27 : 20)" :placeholder="isTmall ? '最多 30 个字符' : `京东要求 5-${isVideo ? 27 : 20} 个字符`" /></label>
 
           <template v-if="isTmall">
             <label class="field"><span>发布文案 <em>可选</em></span><textarea v-model="form.description" :maxlength="descriptionLimit" placeholder="填写视频描述与种草文案" /><small class="field-hint">文案与标签会写入同一富文本字段：{{ contentTextLength }} / 1000</small></label>
@@ -1231,12 +1270,15 @@ onBeforeUnmount(() => {
             </div>
             <label class="field"><span>音乐名称 <em>可选</em></span><input v-model="form.musicName" maxlength="100" placeholder="例如：默契" /><small class="field-hint">留空即不添加音乐；填写后会在天猫音乐库中每次输入两个字符，选择第一个同名结果并确认。</small></label>
           </template>
-          <p v-else class="platform-tip">京东京麦当前上传器不支持独立文案与标签字段；标题会写入平台正文标题。</p>
+          <template v-else-if="isArticle">
+            <label class="field"><span>正文内容 <em>可选</em></span><textarea v-model="form.description" maxlength="1001" placeholder="填写京东图文正文" /></label>
+            <label class="field"><span>参与话题 <em>可选</em></span><input v-model="form.activityTopic" placeholder="例如：数码先锋" /></label>
+          </template>
+          <p v-else class="platform-tip">京东京麦视频不支持独立文案与标签字段；标题会写入平台正文标题。</p>
 
           <div class="section-heading"><span>03</span><div><h2>发布设置</h2><p>先用流程验证确认页面字段和商品匹配无误，再执行正式发布。</p></div></div>
           <div class="field-row">
-            <label v-if="isTmall" class="field"><span>商品 ID <em>可选，最多 6 个</em></span><textarea v-model="form.goodsId" maxlength="256" placeholder="每行一个商品 ID，或用逗号分隔" /><small class="field-hint">系统会按填写顺序逐个搜索并勾选，全部完成后统一确认；重复 ID 会自动去重。</small></label>
-            <label v-else class="field"><span>商品 ID <em>可选</em></span><input v-model="form.goodsId" inputmode="numeric" placeholder="纯数字商品 ID" /><small class="field-hint">京东一次只能关联一个商品。</small></label>
+            <label class="field"><span>商品 ID <em>可选，最多 {{ isTmall ? 6 : 10 }} 个</em></span><textarea v-model="form.goodsId" maxlength="256" placeholder="每行一个商品 ID，或用逗号分隔" /><small class="field-hint">系统会按填写顺序关联商品；重复 ID 会自动去重。</small></label>
             <div class="field"><span>定时发布 <em>可选</em></span><div class="schedule-input-wrap"><input ref="scheduleInput" v-model="form.schedule" :min="scheduleMinimum" aria-hidden="true" class="schedule-input" tabindex="-1" type="datetime-local" /><button aria-label="选择定时发布时间" class="schedule-display" type="button" @click="openSchedulePicker"><span>{{ scheduleDisplay }}</span><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="2" /><path d="M7.5 3.5v3M16.5 3.5v3M3.5 9h17M7.5 12h.01M12 12h.01M16.5 12h.01M7.5 16h.01M12 16h.01M16.5 16h.01" /></svg></button></div><small class="field-hint">至少提前 2 小时；排队过久导致不足 2 小时时，任务会在打开发布页前停止。</small></div>
           </div>
           <label class="field"><span>创作者声明 <em>必选</em></span><select v-model="form.creatorDeclaration" required><option disabled value="">请选择与实际内容相符的声明</option><option v-for="item in creatorDeclarationOptions" :key="item" :value="item">{{ item }}</option></select><small class="field-hint">系统会按此选项精确匹配平台声明，不再自动选择“内容无需标注”。</small></label>
@@ -1267,9 +1309,9 @@ onBeforeUnmount(() => {
           <div class="section-heading"><span>01</span><div><h2>选择平台与店铺</h2><p>Excel 中不需要重复填写平台和店铺；切换平台后请使用对应的模板。</p></div></div>
           <div class="platform-choice batch-platform-choice">
             <label :class="{ selected: batchForm.platform === 'tmall' }"><input v-model="batchForm.platform" type="radio" value="tmall" /><span>天猫光合</span><small>支持视频与图文，含标题、文案、标签、话题、音乐、商品</small></label>
-            <label :class="{ selected: batchForm.platform === 'jd' }"><input v-model="batchForm.platform" type="radio" value="jd" /><span>京东京麦</span><small>视频、标题、商品、定时发布、自主原创</small></label>
+            <label :class="{ selected: batchForm.platform === 'jd' }"><input v-model="batchForm.platform" type="radio" value="jd" /><span>京东京麦</span><small>视频/图文、标题、商品、定时发布、自主原创</small></label>
           </div>
-          <div v-if="isTmallBatch" class="content-choice batch-content-choice">
+          <div class="content-choice batch-content-choice">
             <label :class="{ selected: batchForm.contentType === 'video' }"><input v-model="batchForm.contentType" type="radio" value="video" /><span>视频发布</span><small>支持视频绝对路径与可选自定义封面路径</small></label>
             <label :class="{ selected: batchForm.contentType === 'article' }"><input v-model="batchForm.contentType" type="radio" value="article" /><span>图文发布</span><small>每行填写一个图片文件夹，自动识别其中图片</small></label>
           </div>
@@ -1280,16 +1322,16 @@ onBeforeUnmount(() => {
 
           <div class="section-heading"><span>02</span><div><h2>导入{{ batchPlatformLabel }}{{ batchContentTypeLabel }}内容表</h2><p>每个非空行都会生成一条任务；所有行先通过校验，才会一次性进入队列。</p></div></div>
           <div class="batch-guide">
-            <div><strong>Excel 列</strong><span>{{ isTmallArticleBatch ? '图片文件夹路径、标题、发布文案、标签、商品ID、活动话题、音乐名称、定时发布、创作者声明' : isTmallBatch ? '视频路径、自定义封面、标题、文案、标签、商品ID、活动话题、音乐名称、定时发布、创作者声明' : '视频路径、标题、商品ID、定时发布、自主原创、创作者声明' }}</span></div>
-            <div v-if="isTmallArticleBatch"><strong>图片文件夹路径</strong><span>填写本机图片文件夹的绝对路径；系统会识别该文件夹内全部 JPG、PNG 和 WebP 图片，并按文件名升序发布（最多 9 张）。</span></div>
+            <div><strong>Excel 列</strong><span>{{ isTmallArticleBatch ? '图片文件夹路径、标题、发布文案、标签、商品ID、活动话题、音乐名称、定时发布、创作者声明' : isTmallBatch ? '视频路径、自定义封面、标题、文案、标签、商品ID、活动话题、音乐名称、定时发布、创作者声明' : batchForm.contentType === 'article' ? '图片文件夹路径、标题、正文内容、商品ID、参与话题、定时发布、自主原创、创作者声明' : '视频路径、自定义封面、标题、商品ID、参与话题、定时发布、自主原创、创作者声明' }}</span></div>
+            <div v-if="batchForm.contentType === 'article'"><strong>图片文件夹路径</strong><span>填写本机图片文件夹的绝对路径；{{ batchForm.platform === 'jd' ? '系统会识别 JPG、PNG 图片（最多 20 张）' : '系统会识别 JPG、PNG 和 WebP 图片（最多 9 张）' }}，并按文件名升序发布。</span></div>
             <div v-else><strong>视频路径</strong><span>仅填写本机视频文件的绝对路径（如 <code>/Users/your-name/Videos/video.mp4</code>）。</span></div>
             <div v-if="isTmallBatch"><strong>天猫规则</strong><span>标题最多 30 字；标签最多 4 个；文案最多 1000 字；商品 ID 最多 6 个，以逗号或空格分隔；音乐名称可选，最多 100 字。</span></div>
-            <div v-else><strong>京东规则</strong><span>标题为 5-27 字；“自主原创”填写“是”或“否”；当前上传器不支持文案、标签和活动话题。</span></div>
+            <div v-else><strong>京东规则</strong><span>{{ batchForm.contentType === 'article' ? '图文标题为 5-20 字，正文最多 1001 字，图片最多 20 张。' : '视频标题为 5-27 字；“自主原创”填写“是”或“否”；商品 ID 最多 10 个。' }}</span></div>
             <a class="template-link" :href="batchTemplateUrl">下载{{ batchPlatformLabel }}{{ batchContentTypeLabel }} Excel 模板</a>
           </div>
           <div class="dropzone batch-dropzone">
             <input id="batch-workbook" ref="batchWorkbookInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" @change="onBatchWorkbookChange" />
-            <label for="batch-workbook"><strong>{{ batchForm.workbook ? batchForm.workbook.name : `选择${batchPlatformLabel}${batchContentTypeLabel}批量发布 Excel` }}</strong><small>{{ batchForm.workbook ? `${(batchForm.workbook.size / 1024).toFixed(0)} KB` : `仅支持 .xlsx；包含“${isTmallArticleBatch ? '图片文件夹路径' : '视频路径'}”和“标题”表头，单次最多 200 行` }}</small></label>
+            <label for="batch-workbook"><strong>{{ batchForm.workbook ? batchForm.workbook.name : `选择${batchPlatformLabel}${batchContentTypeLabel}批量发布 Excel` }}</strong><small>{{ batchForm.workbook ? `${(batchForm.workbook.size / 1024).toFixed(0)} KB` : `仅支持 .xlsx；包含“${batchForm.contentType === 'article' ? '图片文件夹路径' : '视频路径'}”和“标题”表头，单次最多 200 行` }}</small></label>
             <button v-if="batchForm.workbook" class="clear-file" type="button" @click="clearBatchWorkbook">移除表格</button>
           </div>
           <div v-if="batchErrors.length" class="batch-errors"><strong>以下内容未通过校验，未创建任何任务：</strong><p v-for="error in batchErrors" :key="`${error.row}-${error.field}-${error.message}`">第 {{ error.row }} 行 · {{ error.field }}：{{ error.message }}</p></div>

@@ -1,3 +1,15 @@
+# -*- coding: utf-8 -*-
+"""
+webapp.api.platforms 模块
+
+平台适配层：将 Web 层的请求转换为 uploader 调用。
+
+职责：
+- 解析账号 Cookie 文件路径（cookies/<platform>_<account>.json）
+- 提供 login/check/upload 三类平台函数，统一通过 session_pool 租借会话
+- 京东与天猫的视频、图文上传请求分别由独立 DTO 描述
+- 上传完成后收紧 Cookie 文件权限为 0600
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,6 +22,7 @@ from uploader.jd_video_uploader.main import (
     cookie_auth as jd_cookie_auth,
     jd_setup,
 )
+from uploader.jd_article_uploader.main import JDArticle
 from uploader.tmall_video_uploader.main import (
     TMALL_PUBLISH_STRATEGY_IMMEDIATE,
     TMALL_PUBLISH_STRATEGY_SCHEDULED,
@@ -27,6 +40,8 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True)
 class TmallVideoUploadRequest:
+    """天猫视频上传请求（Web 层与 uploader 之间的 DTO）。"""
+
     account_name: str
     video_file: Path
     title: str
@@ -46,7 +61,7 @@ class TmallVideoUploadRequest:
 
 @dataclass(slots=True)
 class TmallArticleUploadRequest:
-    """Tmall article request using the verified local uploader flow."""
+    """天猫图文上传请求（图片顺序即平台发布顺序）。"""
 
     account_name: str
     image_files: tuple[Path, ...]
@@ -66,10 +81,14 @@ class TmallArticleUploadRequest:
 
 @dataclass(slots=True)
 class JdVideoUploadRequest:
+    """京东视频上传请求（Web 层与 uploader 之间的 DTO）。"""
+
     account_name: str
     video_file: Path
     title: str
+    cover_image_file: Path | None = None
     goods_id: str = ""
+    topic: str = ""
     schedule: datetime | None = None
     original: bool = False
     creator_declaration: str = ""
@@ -78,17 +97,35 @@ class JdVideoUploadRequest:
     dry_run: bool = False
 
 
-def resolve_account_file(paths: UserDataPaths, platform: str, account_name: str) -> Path:
+@dataclass(slots=True)
+class JdArticleUploadRequest:
+    """京东图文上传请求，和视频 DTO 独立维护。"""
+
+    account_name: str
+    image_files: tuple[Path, ...]
+    title: str
+    description: str
+    goods_id: str = ""
+    topic: str = ""
+    schedule: datetime | None = None
+    original: bool = False
+    creator_declaration: str = ""
+    debug: bool = True
+    headless: bool = True
+    dry_run: bool = False
+
+
+def resolve_account_file(
+    paths: UserDataPaths, platform: str, account_name: str
+) -> Path:
     """Resolve one account state inside its authenticated user's workspace."""
     account_file = paths.cookie_file(platform, account_name)
-    account_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    account_file.parent.chmod(0o700)
     secure_account_file(account_file)
     return account_file
 
 
 def secure_account_file(account_file: Path) -> None:
-    """Keep browser storage state readable only by the current OS user."""
+    """收紧 Cookie 文件权限为 0600（仅当前 OS 用户可读写）。"""
     try:
         account_file.chmod(0o600)
     except FileNotFoundError:
@@ -98,7 +135,10 @@ def secure_account_file(account_file: Path) -> None:
 def delete_account_cookie(
     paths: UserDataPaths, platform: str, account_name: str
 ) -> bool:
-    """Remove only the selected platform/account cookie file when it exists."""
+    """删除指定平台/账号的 Cookie 文件。
+
+    :returns: True 已删除，False 文件不存在
+    """
     account_file = resolve_account_file(paths, platform, account_name)
     try:
         account_file.unlink()
@@ -114,6 +154,7 @@ async def login_tmall_account(
     paths: UserDataPaths,
     session_pool: TmallSessionPool,
 ) -> dict:
+    """天猫账号登录：打开可见浏览器等待用户手动登录。"""
     account_file = resolve_account_file(paths, "tmall", account_name)
     try:
         async with session_pool.lease(
@@ -136,6 +177,7 @@ async def check_tmall_account(
     paths: UserDataPaths,
     session_pool: TmallSessionPool,
 ) -> bool:
+    """天猫 Cookie 校验：复用已有会话（preserve_existing_mode）不打断显示模式。"""
     account_file = resolve_account_file(paths, "tmall", account_name)
     if not account_file.exists():
         return False
@@ -153,12 +195,11 @@ async def upload_tmall_video(
     paths: UserDataPaths,
     session_pool: TmallSessionPool,
 ) -> dict:
+    """天猫视频发布：校验 Cookie → 上传视频 → 各步骤 → 等待确认。"""
     account_file = resolve_account_file(paths, "tmall", request.account_name)
     uploader = TmallVideo(
         file_path=str(request.video_file),
-        cover_image_path=(
-            str(request.cover_image_file) if request.cover_image_file else None
-        ),
+        cover_image_path=str(request.cover_image_file) if request.cover_image_file else None,
         title=request.title,
         desc=request.description,
         account_file=str(account_file),
@@ -177,6 +218,7 @@ async def upload_tmall_video(
             account_file,
             headless=request.headless,
         ) as session:
+            # 发布前校验 Cookie（5 分钟内缓存有效）
             if not await tmall_setup(
                 str(account_file),
                 handle=False,
@@ -196,7 +238,7 @@ async def upload_tmall_article(
     paths: UserDataPaths,
     session_pool: TmallSessionPool,
 ) -> dict:
-    """Publish an ordered Tmall article using the local-version uploader."""
+    """天猫图文发布：复用账号鉴权与会话，上传有序图片后填写发布表单。"""
     account_file = resolve_account_file(paths, "tmall", request.account_name)
     uploader = TmallArticle(
         image_paths=tuple(str(path) for path in request.image_files),
@@ -214,9 +256,7 @@ async def upload_tmall_article(
         dry_run=request.dry_run,
     )
     try:
-        async with session_pool.lease(
-            account_file, headless=request.headless
-        ) as session:
+        async with session_pool.lease(account_file, headless=request.headless) as session:
             if not await tmall_setup(
                 str(account_file),
                 handle=False,
@@ -237,6 +277,7 @@ async def login_jd_account(
     paths: UserDataPaths,
     session_pool: JdSessionPool,
 ) -> dict:
+    """京东账号登录：打开可见浏览器等待用户手动登录。"""
     account_file = resolve_account_file(paths, "jd", account_name)
     try:
         async with session_pool.lease(
@@ -259,6 +300,7 @@ async def check_jd_account(
     paths: UserDataPaths,
     session_pool: JdSessionPool,
 ) -> bool:
+    """京东 Cookie 校验。"""
     account_file = resolve_account_file(paths, "jd", account_name)
     if not account_file.exists():
         return False
@@ -276,12 +318,15 @@ async def upload_jd_video(
     paths: UserDataPaths,
     session_pool: JdSessionPool,
 ) -> dict:
+    """京东视频发布：校验 Cookie → 上传视频 → 各步骤 → 等待确认。"""
     account_file = resolve_account_file(paths, "jd", request.account_name)
     uploader = JDVideo(
         file_path=str(request.video_file),
+        cover_image_path=str(request.cover_image_file) if request.cover_image_file else None,
         title=request.title,
         account_file=str(account_file),
         goods_id=request.goods_id,
+        topic=request.topic,
         schedule=request.schedule,
         original=request.original,
         creator_declaration=request.creator_declaration,
@@ -306,5 +351,43 @@ async def upload_jd_video(
     return result if isinstance(result, dict) else {}
 
 
+async def upload_jd_article(
+    request: JdArticleUploadRequest,
+    *,
+    paths: UserDataPaths,
+    session_pool: JdSessionPool,
+) -> dict:
+    """京东图文发布：独立图文上传器，复用京东账号会话池。"""
+    account_file = resolve_account_file(paths, "jd", request.account_name)
+    uploader = JDArticle(
+        image_paths=tuple(str(path) for path in request.image_files),
+        title=request.title,
+        description=request.description,
+        account_file=str(account_file),
+        goods_id=request.goods_id,
+        topic=request.topic,
+        schedule=request.schedule,
+        original=request.original,
+        creator_declaration=request.creator_declaration,
+        debug=request.debug,
+        dry_run=request.dry_run,
+    )
+    try:
+        async with session_pool.lease(account_file, headless=request.headless) as session:
+            # 图文和视频共用京东京麦后台，必须使用同一套登录态判定与缓存策略。
+            if not await jd_setup(
+                str(account_file),
+                handle=False,
+                session=session,
+                auth_cache_seconds=5 * 60,
+            ):
+                raise RuntimeError("京东 Cookie 不存在或已失效，请先在 Web 页面执行登录")
+            result = await uploader.upload_in_session(session)
+    finally:
+        secure_account_file(account_file)
+    return result if isinstance(result, dict) else {}
+
+
 def tmall_publish_strategy(schedule: datetime | None) -> str:
+    """根据是否有定时时间返回发布策略常量。"""
     return TMALL_PUBLISH_STRATEGY_SCHEDULED if schedule else TMALL_PUBLISH_STRATEGY_IMMEDIATE

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
+import os
 import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
@@ -160,15 +161,21 @@ class BrowserSession:
     async def save_storage_state(self) -> None:
         """将当前 BrowserContext 的 storage_state（Cookie）保存到 account_file。
 
-        文件权限收紧为 0600，仅当前 OS 用户可读。
+        先写入同目录临时文件，再原子替换正式文件，避免任务中断时留下半截
+        Cookie。文件权限收紧为 0600，仅当前 OS 用户可读。
         """
         if not self.context:
             return
-        await self.context.storage_state(path=str(self.account_file))
+        self.account_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary_file = self.account_file.with_name(f".{self.account_file.name}.tmp")
         try:
+            await self.context.storage_state(path=str(temporary_file))
+            temporary_file.chmod(0o600)
+            os.replace(temporary_file, self.account_file)
             self.account_file.chmod(0o600)
-        except FileNotFoundError:
-            pass
+        finally:
+            with suppress(FileNotFoundError):
+                temporary_file.unlink()
         self.touch()
 
     async def close(self) -> None:
@@ -372,6 +379,11 @@ class BrowserSessionPool:
             async with self._lock:
                 current = self._sessions.get(key)
                 if current is session:
+                    # 京东/天猫会在页面访问期间刷新 Cookie；即使任务失败，也要把
+                    # 最新状态落盘，避免下一次任务继续使用旧会话。
+                    if session.last_auth_result:
+                        with suppress(Exception):
+                            await session.save_storage_state()
                     session.busy = max(0, session.busy - 1)
                     session.touch()
 

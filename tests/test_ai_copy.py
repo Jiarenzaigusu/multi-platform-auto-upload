@@ -450,7 +450,7 @@ class AiCopyServiceTests(unittest.TestCase):
         self.assertIn("标题和正文的参考，生成的标题文案结果中引用该核心卖点的文字占比约50%", prompt)
         self.assertEqual(len(result.selling_point_references), 2)
 
-    def test_generated_copy_allows_target_length_deviation(self):
+    def test_generated_copy_prompts_for_exact_han_character_targets(self):
         provider = FakeChatProvider(
             draft={"title": "夏鞋", "body": "舒适好搭，日常通勤穿着轻松。"}
         )
@@ -468,11 +468,10 @@ class AiCopyServiceTests(unittest.TestCase):
         self.assertEqual(result.title, "夏鞋")
         self.assertEqual(result.body, "舒适好搭，日常通勤穿着轻松。")
         instruction = provider.calls[0]["messages"][-1]["content"]
-        self.assertIn("每条标题至少 15 个字符，优先写到 17到18 个字符", instruction)
-        self.assertIn("每条正文至少 100 个字符，优先写到 110到120 个字符", instruction)
-        self.assertIn("按界面显示的字符数逐个计算", instruction)
-        self.assertIn("绝不能少于界面目标字数", instruction)
-        self.assertIn("任何一条未达到最低字数时，补充具体场景、卖点与搭配描述", instruction)
+        self.assertIn("每条标题必须正好包含 15 个汉字", instruction)
+        self.assertIn("每条正文必须严格以 100 个汉字为目标", instruction)
+        self.assertIn("标点、数字、英文字母、空格和其他符号全部不计", instruction)
+        self.assertIn("标题达到八个汉字时", instruction)
 
     def test_generated_copy_returns_the_requested_candidate_counts(self):
         provider = FakeChatProvider(

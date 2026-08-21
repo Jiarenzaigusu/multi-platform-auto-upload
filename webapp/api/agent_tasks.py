@@ -170,6 +170,10 @@ class AgentTaskManager:
             payload["cover_image_path"] = (
                 str(request.cover_image_path) if request.cover_image_path else None
             )
+            # Batch image folders carry absolute paths that must be resolved on
+            # the paired desktop agent; never make the agent try to download them.
+            if image_folder_path:
+                payload["managed_upload"] = False
             payload["schedule"] = request.schedule.isoformat() if request.schedule else None
             payload["tags"] = list(request.tags)
             if local_assets:

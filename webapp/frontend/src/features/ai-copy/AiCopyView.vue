@@ -16,10 +16,16 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { createAiCopyApi } from './api.js'
 import AiCopyDropdown from './AiCopyDropdown.vue'
+import WorkbenchImportDialog from './WorkbenchImportDialog.vue'
+import {
+  clearAiCopyDraft, clearSellingPointWorkbook, loadSellingPointWorkbook, readAiCopyDraft,
+  saveAiCopyDraft, saveSellingPointWorkbook,
+} from './ai-copy-draft-store.js'
 
 const props = defineProps({
   apiBase: { type: String, default: '' },
   active: { type: Boolean, default: false },
+  userId: { type: String, default: '' },
 })
 const emit = defineEmits(['import-to-workbench'])
 
@@ -39,6 +45,7 @@ const titleLimitDefault = 15
 const bodyLimitDefault = 100
 const titleCountDefault = 1
 const bodyCountDefault = 1
+const hanCharacterPattern = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/g
 const createDefaultForm = () => ({
   productIdentifiers: '',
   titleMaxChars: titleLimitDefault,
@@ -73,6 +80,9 @@ const importingToBatchExcel = ref(false)
 const downloadBatchExcelCopy = ref(false)
 const selectedTitleIndex = ref(0)
 const selectedBodyIndex = ref(0)
+const workbenchImportOpen = ref(false)
+const restoringDraft = ref(true)
+let draftSaveTimer
 let copyTimer
 let successTimer
 
@@ -247,6 +257,9 @@ const resultBodies = computed(() => {
 })
 const selectedTitle = computed(() => resultTitles.value[selectedTitleIndex.value] || resultTitles.value[0] || '')
 const selectedBody = computed(() => resultBodies.value[selectedBodyIndex.value] || resultBodies.value[0] || '')
+function countHanCharacters(text) {
+  return (String(text || '').match(hanCharacterPattern) || []).length
+}
 
 const canGenerate = computed(() => (
   Boolean(sellingPointCatalog.value)
@@ -298,14 +311,15 @@ function clearAll() {
   window.clearTimeout(successTimer)
   if (sellingPointFileInput.value) sellingPointFileInput.value.value = ''
   if (searchConfigDetails.value) searchConfigDetails.value.open = false
+  clearAiCopyDraft(props.userId)
+  clearSellingPointWorkbook(props.userId).catch(() => {})
 }
 
 function chooseSellingPointFile() {
   if (!uploadingSellingPoints.value) sellingPointFileInput.value?.click()
 }
 
-async function uploadSellingPointCatalog(event) {
-  const file = event.target.files?.[0]
+async function uploadSellingPointFile(file, { persist = true, preserveResult = false } = {}) {
   if (!file) return
   clearFeedback()
   uploadingSellingPoints.value = true
@@ -313,7 +327,8 @@ async function uploadSellingPointCatalog(event) {
     const uploaded = await api.uploadSellingPoints(file)
     const previousCatalogId = sellingPointCatalog.value?.catalog_id
     sellingPointCatalog.value = uploaded
-    result.value = null
+    if (!preserveResult) result.value = null
+    if (persist) await saveSellingPointWorkbook(file, props.userId)
     if (previousCatalogId && previousCatalogId !== uploaded.catalog_id) {
       api.deleteSellingPointCatalog(previousCatalogId).catch(() => {})
     }
@@ -321,6 +336,13 @@ async function uploadSellingPointCatalog(event) {
     error.value = requestError.message
   } finally {
     uploadingSellingPoints.value = false
+  }
+}
+
+async function uploadSellingPointCatalog(event) {
+  try {
+    await uploadSellingPointFile(event.target.files?.[0])
+  } finally {
     event.target.value = ''
   }
 }
@@ -332,6 +354,7 @@ function clearSellingPointCatalog() {
   sellingPointCatalog.value = null
   result.value = null
   error.value = ''
+  clearSellingPointWorkbook(props.userId).catch(() => {})
   if (sellingPointFileInput.value) sellingPointFileInput.value.value = ''
 }
 
@@ -474,10 +497,18 @@ async function copyText(field, value) {
 
 function importToWorkbench() {
   if (!result.value || !selectedTitle.value || !selectedBody.value) return
+  workbenchImportOpen.value = true
+}
+
+function confirmWorkbenchImport(target) {
+  if (!result.value || !selectedTitle.value || !selectedBody.value) return
   emit('import-to-workbench', {
     title: selectedTitle.value,
     body: selectedBody.value,
+    platform: target.platform,
+    contentType: target.contentType,
   })
+  workbenchImportOpen.value = false
 }
 
 function chooseBatchExcelFile() {
@@ -598,10 +629,50 @@ async function importToBatchExcel(event) {
   }
 }
 
-onMounted(loadOptions)
+function restoreAiCopyDraft() {
+  const draft = readAiCopyDraft(props.userId)
+  if (!draft) return
+  if (draft.form && typeof draft.form === 'object') {
+    for (const key of Object.keys(createDefaultForm())) {
+      if (key !== 'searchApiKey' && key !== 'searchEndpoint' && Object.hasOwn(draft.form, key)) form[key] = draft.form[key]
+    }
+  }
+  if (draft.result && typeof draft.result === 'object') result.value = draft.result
+  if (Array.isArray(draft.productReferences)) productReferences.value = draft.productReferences
+  if (Number.isInteger(draft.selectedTitleIndex)) selectedTitleIndex.value = draft.selectedTitleIndex
+  if (Number.isInteger(draft.selectedBodyIndex)) selectedBodyIndex.value = draft.selectedBodyIndex
+}
+
+async function restoreSellingPointWorkbook() {
+  try {
+    const file = await loadSellingPointWorkbook(props.userId)
+    if (file) await uploadSellingPointFile(file, { persist: false, preserveResult: true })
+  } catch (restoreError) {
+    error.value = `恢复本机卖点 Excel 失败：${restoreError.message}`
+  }
+}
+
+function persistAiCopyDraft() {
+  if (restoringDraft.value) return
+  window.clearTimeout(draftSaveTimer)
+  draftSaveTimer = window.setTimeout(() => {
+    // Credentials remain session-only and are never written to localStorage.
+    const savedForm = { ...form, searchApiKey: '', searchEndpoint: '' }
+    saveAiCopyDraft({ version: 1, form: savedForm, result: result.value, productReferences: productReferences.value,
+      selectedTitleIndex: selectedTitleIndex.value, selectedBodyIndex: selectedBodyIndex.value, savedAt: new Date().toISOString() }, props.userId)
+  }, 180)
+}
+
+onMounted(async () => {
+  restoreAiCopyDraft()
+  await loadOptions()
+  await restoreSellingPointWorkbook()
+  restoringDraft.value = false
+})
 watch(() => props.active, (active) => {
   if (active) loadOptions()
 })
+watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], persistAiCopyDraft, { deep: true })
 </script>
 
 <template>
@@ -660,7 +731,7 @@ watch(() => props.active, (active) => {
           <span>已读取</span>
           <div>
             <strong>{{ sellingPointCatalog.filename }}</strong>
-            <small>{{ sellingPointCatalog.row_count }} 条唯一商品卖点，表格仅保留在当前服务内存</small>
+            <small>{{ sellingPointCatalog.row_count }} 条唯一商品卖点；本机已保存副本，刷新后会自动恢复</small>
           </div>
           <button type="button" @click="clearSellingPointCatalog">移除</button>
         </article>
@@ -687,7 +758,7 @@ watch(() => props.active, (active) => {
       </section>
 
       <fieldset class="ai-copy-choice-group ai-copy-limits">
-        <legend><b>目标字数</b><span>生成内容会接近所选字数（上下约 10%）</span></legend>
+        <legend><b>目标汉字数</b><span>只统计汉字，标点数字不计；标题严格等于目标，较长标题会按语义断句</span></legend>
 
         <div class="ai-copy-limit-row">
           <span class="ai-copy-limit-label"><b>标题字数</b><small>期望生成多少字</small></span>
@@ -698,7 +769,7 @@ watch(() => props.active, (active) => {
               type="button"
               :class="{ active: form.titleMaxChars === preset }"
               @click="pickTitleLimit(preset)"
-            >约 {{ preset }} 字</button>
+            >{{ preset }} 字</button>
           </div>
           <label class="ai-copy-limit-custom">
             <span>自定义</span>
@@ -725,7 +796,7 @@ watch(() => props.active, (active) => {
               type="button"
               :class="{ active: form.bodyMaxChars === preset }"
               @click="pickBodyLimit(preset)"
-            >约 {{ preset }} 字</button>
+            >{{ preset }} 字</button>
           </div>
           <label class="ai-copy-limit-custom">
             <span>自定义</span>
@@ -954,7 +1025,7 @@ watch(() => props.active, (active) => {
           >
             <div class="ai-copy-output-label">
               <span>标题{{ resultTitles.length > 1 ? ` ${index + 1}` : '' }}</span>
-              <small>{{ title.length }} 字 · 目标约 {{ resultTitleMax }} 字</small>
+              <small>{{ countHanCharacters(title) }} 汉字 · 目标 {{ resultTitleMax }} 汉字</small>
             </div>
             <label v-if="resultTitles.length > 1" class="ai-copy-candidate-select">
               <input type="checkbox" :checked="selectedTitleIndex === index" @change="selectedTitleIndex = index" />
@@ -978,7 +1049,7 @@ watch(() => props.active, (active) => {
           >
             <div class="ai-copy-output-label">
               <span>正文文案{{ resultBodies.length > 1 ? ` ${index + 1}` : '' }}</span>
-              <small>{{ body.length }} 字 · 目标约 {{ resultBodyMax }} 字</small>
+              <small>{{ countHanCharacters(body) }} 汉字 · 目标 {{ resultBodyMax }} 汉字</small>
             </div>
             <label v-if="resultBodies.length > 1" class="ai-copy-candidate-select">
               <input type="checkbox" :checked="selectedBodyIndex === index" @change="selectedBodyIndex = index" />
@@ -995,12 +1066,18 @@ watch(() => props.active, (active) => {
           <span>
             <small>IMPORT TO WORKBENCH</small>
             <strong>导入发布工作台</strong>
-            <em>覆盖工作台现有标题与文案</em>
+            <em>先选择一个平台与发布类型</em>
           </span>
           <svg aria-hidden="true" viewBox="0 0 24 24">
             <path d="M5 12h13M14 7l5 5-5 5" />
           </svg>
         </button>
+
+        <WorkbenchImportDialog
+          :open="workbenchImportOpen"
+          @close="workbenchImportOpen = false"
+          @confirm="confirmWorkbenchImport"
+        />
 
         <!-- 隐藏的文件输入：用于选择批量发布 Excel -->
         <input
