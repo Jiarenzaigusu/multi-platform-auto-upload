@@ -17,6 +17,8 @@ const agentStatus = reactive({
   deviceName: '',
   system: '',
   unavailable: false,
+  agentVersion: '',
+  latestVersion: '',
 })
 configureApiClient({ baseUrl: apiBase, onUnauthorized: endAuthenticatedSession })
 
@@ -457,16 +459,27 @@ const jobsPageEnd = computed(() => Math.min(
 ))
 const hasPreviousJobs = computed(() => jobsOffset.value > 0)
 const hasMoreJobs = computed(() => jobsOffset.value + jobs.value.length < jobSummary.value.total)
+const agentUpdateAvailable = computed(() => (
+  agentStatus.online
+    && agentStatus.agentVersion
+    && agentStatus.latestVersion
+    && compareVersions(agentStatus.agentVersion, agentStatus.latestVersion) < 0
+))
+
 const agentStatusLabel = computed(() => {
   if (!agentStatus.checked || agentStatus.checking) return '正在检查代理'
   if (agentStatus.unavailable) return '代理状态未知'
   if (!agentStatus.online) return '代理离线'
+  if (agentUpdateAvailable.value) return `代理在线 · 助手有新版本 v${agentStatus.latestVersion}`
   return agentStatus.deviceName ? `代理在线 · ${agentStatus.deviceName}` : '代理在线'
 })
 
 const agentStatusDescription = computed(() => {
   if (agentStatus.unavailable) return '无法读取本地执行助手状态，请刷新后重试。'
   if (!agentStatus.online) return '未检测到已配对的本地执行助手；登录和发布任务无法执行。'
+  if (agentUpdateAvailable.value) {
+    return `Windows 助手有新版本 v${agentStatus.latestVersion}（当前 v${agentStatus.agentVersion || '未知'}）：在助手托盘图标右键菜单中选择“安装新版本”即可自动更新。`
+  }
   return agentStatus.system || '本地执行助手已连接，可执行登录和发布任务。'
 })
 
@@ -536,6 +549,18 @@ function importAiCopyToWorkbench(draft) {
   activeView.value = 'publish'
 }
 
+function compareVersions(a, b) {
+  const parse = (value) => String(value || '').replace(/^v/, '').split('.').map((part) => Number.parseInt(part, 10) || 0)
+  const left = parse(a)
+  const right = parse(b)
+  const width = Math.max(left.length, right.length)
+  for (let index = 0; index < width; index += 1) {
+    const difference = (left[index] || 0) - (right[index] || 0)
+    if (difference !== 0) return difference
+  }
+  return 0
+}
+
 function applyAgentStatus(result) {
   const agent = Array.isArray(result?.agents) ? result.agents[0] : null
   agentStatus.checked = true
@@ -544,6 +569,8 @@ function applyAgentStatus(result) {
   agentStatus.online = Boolean(result?.online && agent)
   agentStatus.deviceName = agent?.device_name || ''
   agentStatus.system = agent?.system || ''
+  agentStatus.agentVersion = agent?.version || ''
+  agentStatus.latestVersion = result?.installer?.windows?.version || ''
 }
 
 async function refreshAgentStatus() {
@@ -558,6 +585,8 @@ async function refreshAgentStatus() {
     agentStatus.online = false
     agentStatus.deviceName = ''
     agentStatus.system = ''
+    agentStatus.agentVersion = ''
+    agentStatus.latestVersion = ''
     agentStatus.unavailable = true
     return false
   }
@@ -604,6 +633,8 @@ async function refreshDashboard() {
           agentStatus.online = false
           agentStatus.deviceName = ''
           agentStatus.system = ''
+          agentStatus.agentVersion = ''
+          agentStatus.latestVersion = ''
           agentStatus.unavailable = true
         }
         syncJobSelection()
@@ -1128,6 +1159,9 @@ onBeforeUnmount(() => {
   <main v-else class="shell">
     <AgentSetupDialog
       v-if="agentSetupOpen"
+      :agent-version="agentStatus.agentVersion"
+      :latest-version="agentStatus.latestVersion"
+      :online="agentStatus.online"
       @close="agentSetupOpen = false"
     />
     <aside class="rail">
@@ -1180,14 +1214,14 @@ onBeforeUnmount(() => {
           <span><strong>{{ currentUser.display_name }}</strong><small>{{ currentUser.username }} · {{ currentUser.role }}</small></span>
           <button
             class="agent-connection-status"
-            :class="{ online: agentStatus.online, offline: !agentStatus.online && agentStatus.checked && !agentStatus.unavailable, unknown: agentStatus.unavailable || !agentStatus.checked }"
+            :class="{ online: agentStatus.online, offline: !agentStatus.online && agentStatus.checked && !agentStatus.unavailable, unknown: agentStatus.unavailable || !agentStatus.checked, updates: agentUpdateAvailable }"
             :title="agentStatusDescription"
             type="button"
             @click="refreshAgentStatus"
           >
             <i aria-hidden="true"></i>{{ agentStatusLabel }}
           </button>
-          <button class="refresh agent-windows" type="button" @click="agentSetupOpen = true">Windows 助手</button>
+          <button class="refresh agent-windows" :class="{ updates: agentUpdateAvailable }" type="button" @click="agentSetupOpen = true">Windows 助手</button>
           <button v-if="!['ai-copy', 'llm-adapter', 'users'].includes(activeView)" class="refresh" @click="refreshDashboard">刷新状态</button>
           <button class="refresh logout" type="button" @click="logout">退出</button>
         </div>

@@ -66,7 +66,11 @@ mpau-web
 .\deploy\windows\build-mpau-agent.ps1
 ```
 
-生成的 `deploy\windows\output\MPAU-Agent-Setup.exe` 放到云服务器默认路径，或通过 `MPAU_AGENT_INSTALLER_PATH` 指定。用户登录网页后下载并安装一次，在网页生成配对码并输入 Windows 助手窗口。Windows 助手使用 DPAPI 保存设备令牌，并随当前 Windows 用户登录自动启动，不保存应用密码。
+生成的 `deploy\windows\output\MPAU-Agent-Setup.exe` 放到云服务器默认路径，或通过 `MPAU_AGENT_INSTALLER_PATH` 指定。构建脚本会同时生成 `agent-installer.json` 版本清单（版本号、SHA-256、大小），两者必须一起上传。用户登录网页后下载并安装一次，在网页生成配对码并输入 Windows 助手窗口。Windows 助手使用 DPAPI 保存设备令牌，并随当前 Windows 用户登录自动启动，不保存应用密码。
+
+### Windows 助手自动更新
+
+版本号唯一来源是 `local_agent/__init__.py` 的 `__version__`，构建时自动同步到安装包。管理员发布新版后（把新的 `MPAU-Agent-Setup.exe` 和 `agent-installer.json` 放到服务器同一目录），已配对的 Windows 助手会在启动后和每 6 小时自动检查更新；网页顶部也会在助手在线但版本落后时显示“助手有新版本”提示。用户在助手托盘图标右键菜单中选择“安装新版本 vX.Y.Z”，助手会自动下载（带 SHA-256 校验）、退出、静默安装并重启，全程无需手动卸载或重新下载。若有发布任务正在执行，需等待任务完成后再更新。
 
 以后用户只打开云服务器域名；普通功能全部由云端响应，只有平台登录、Cookie 校验和发布任务会自动在用户电脑打开 Edge。Cookie、浏览器会话和平台日志默认保存在 `%LOCALAPPDATA%\MPAU-Agent\users\<user_uuid>\`。
 

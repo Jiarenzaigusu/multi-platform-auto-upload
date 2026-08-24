@@ -158,8 +158,18 @@ if (-not $InnoCompiler -or -not (Test-Path $InnoCompiler)) {
 
 Write-Host "Using Inno Setup: $InnoCompiler" -ForegroundColor Green
 $IssFile = Join-Path $ProjectRoot "deploy\windows\mpau-agent-installer.iss"
+
+# Keep the installer version in sync with the agent source of truth.
+$InitFile = Join-Path $ProjectRoot "local_agent\__init__.py"
+$VersionMatch = [regex]::Match((Get-Content $InitFile -Raw), '__version__\s*=\s*"([^"]+)"')
+if (-not $VersionMatch.Success) {
+    throw "Unable to read __version__ from $InitFile"
+}
+$AgentVersion = $VersionMatch.Groups[1].Value
+Write-Host "Agent version: $AgentVersion" -ForegroundColor Cyan
+
 Write-Host "Building installer..." -ForegroundColor Yellow
-& $InnoCompiler $IssFile
+& $InnoCompiler "/DMyAppVersion=$AgentVersion" $IssFile
 
 if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup failed. Check mpau-agent-installer.iss."
@@ -173,6 +183,24 @@ if (-not (Test-Path $SetupExe)) {
 $SetupHash = (Get-FileHash -Algorithm SHA256 $SetupExe).Hash.ToLowerInvariant()
 $ChecksumFile = Join-Path $OutputDir "MPAU-Agent-Setup.exe.sha256"
 "$SetupHash *MPAU-Agent-Setup.exe" | Set-Content -Path $ChecksumFile -Encoding ascii
+
+# Release manifest consumed by the server (/api/agent/latest-release) and the
+# agent self-updater. Rebuilding replaces it atomically alongside the installer.
+$SetupSize = (Get-Item $SetupExe).Length
+$ReleasedAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+$ManifestJson = @{
+    version      = $AgentVersion
+    sha256       = $SetupHash
+    size         = $SetupSize
+    released_at  = $ReleasedAt
+    notes        = ""
+} | ConvertTo-Json
+$ManifestFile = Join-Path $OutputDir "agent-installer.json"
+$ManifestTemp = Join-Path $OutputDir "agent-installer.json.tmp"
+$ManifestJson | Set-Content -Path $ManifestTemp -Encoding ascii
+Move-Item -Force $ManifestTemp $ManifestFile
+Write-Host "Release manifest created: $ManifestFile" -ForegroundColor Green
+
 Write-Host "Installer created: $SetupExe" -ForegroundColor Green
-Write-Host "Installer size: $((Get-Item $SetupExe).Length) bytes" -ForegroundColor Cyan
+Write-Host "Installer size: $SetupSize bytes" -ForegroundColor Cyan
 Write-Host "SHA-256: $SetupHash" -ForegroundColor Cyan

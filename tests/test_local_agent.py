@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -576,6 +577,120 @@ class AgentJobRunnerTests(unittest.TestCase):
                 self.assertIn("用户电脑", result["message"])
             finally:
                 runner.shutdown()
+
+
+class UpdaterTests(unittest.TestCase):
+    def test_version_parsing_and_comparison(self) -> None:
+        from local_agent.updater import is_newer, parse_version
+
+        self.assertEqual(parse_version("0.3.1"), (0, 3, 1))
+        self.assertEqual(parse_version("v1.2"), (1, 2))
+        self.assertIsNone(parse_version("abc"))
+        self.assertIsNone(parse_version(""))
+        self.assertTrue(is_newer("0.3.0", "0.2.9"))
+        self.assertTrue(is_newer("0.10.0", "0.9.0"))
+        self.assertTrue(is_newer("1.0", "0.9.9"))
+        self.assertFalse(is_newer("0.3.0", "0.3.0"))
+        self.assertFalse(is_newer("0.3", "0.3.0"))
+        self.assertFalse(is_newer("0.2.0", "0.3.0"))
+
+    def test_normalize_release_rejects_invalid_manifests(self) -> None:
+        from local_agent.updater import normalize_release
+
+        valid = {
+            "version": "0.3.0",
+            "sha256": "a" * 64,
+            "size": 1024,
+            "notes": "修复",
+        }
+        release = normalize_release(valid)
+        self.assertIsNotNone(release)
+        self.assertEqual(release["sha256"], "a" * 64)
+        self.assertIsNone(normalize_release(None))
+        self.assertIsNone(normalize_release({}))
+        self.assertIsNone(normalize_release({**valid, "version": "latest"}))
+        self.assertIsNone(normalize_release({**valid, "sha256": "xyz"}))
+
+    def test_external_update_script_waits_then_installs_and_restarts(self) -> None:
+        from local_agent.updater import _update_script
+
+        script = _update_script()
+        self.assertIn("Get-Process -Id $ParentPid", script)
+        self.assertIn('"/VERYSILENT"', script)
+        self.assertIn("Start-Process -FilePath $AgentExe", script)
+        self.assertNotIn("MPAU-Agent.exe", script)
+
+    def test_launch_update_starts_powershell_outside_the_agent_executable(self) -> None:
+        from local_agent import updater
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            updater.sys, "frozen", True, create=True
+        ), patch.object(
+            updater.sys, "executable", str(Path(temp_dir) / "MPAU-Agent.exe")
+        ), patch.object(updater.subprocess, "Popen") as popen:
+            installer = Path(temp_dir) / "update" / "MPAU-Agent-Setup-0.4.0.exe"
+            installer.parent.mkdir()
+            installer.write_bytes(b"installer")
+            updater.launch_update(Path(temp_dir), installer)
+
+        command = popen.call_args.args[0]
+        self.assertEqual(command[0], "powershell.exe")
+        self.assertIn("-File", command)
+        self.assertIn("-ParentPid", command)
+        self.assertNotIn("--apply-update", command)
+
+    def test_cleanup_stale_installers_keeps_current(self) -> None:
+        from local_agent import updater
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir) / "update"
+            directory.mkdir()
+            old = directory / "MPAU-Agent-Setup-0.2.0.exe"
+            keep = directory / "MPAU-Agent-Setup-0.3.0.exe"
+            extra = directory / "MPAU-Agent-Setup.exe"
+            for path in (old, keep, extra):
+                path.write_bytes(b"x")
+            updater.cleanup_stale_installers(Path(temp_dir), keep=keep)
+            self.assertFalse(old.exists())
+            self.assertFalse(extra.exists())
+            self.assertTrue(keep.exists())
+
+
+class InstallerManifestTests(unittest.TestCase):
+    def test_manifest_requires_matching_installer(self) -> None:
+        from webapp.api.agent import load_installer_manifest
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            installer = Path(temp_dir) / "MPAU-Agent-Setup.exe"
+            installer.write_bytes(b"setup-bytes")
+            manifest_path = Path(temp_dir) / "agent-installer.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "version": "0.3.0",
+                        "sha256": "b" * 64,
+                        "size": len(b"setup-bytes"),
+                        "released_at": "2026-08-24T02:00:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manifest = load_installer_manifest(installer)
+            self.assertIsNotNone(manifest)
+            self.assertEqual(manifest["version"], "0.3.0")
+
+            # A size mismatch invalidates the manifest.
+            manifest_path.write_text(
+                json.dumps({"version": "0.3.0", "sha256": "b" * 64, "size": 1}),
+                encoding="utf-8",
+            )
+            manifest_path.touch()
+            self.assertIsNone(load_installer_manifest(installer))
+
+            # Missing manifest or installer yields None as well.
+            manifest_path.unlink()
+            self.assertIsNone(load_installer_manifest(installer))
+            self.assertIsNone(load_installer_manifest(Path(temp_dir) / "missing.exe"))
 
 
 if __name__ == "__main__":

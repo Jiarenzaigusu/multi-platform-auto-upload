@@ -131,6 +131,72 @@ class AgentApiClient:
             },
         )
 
+    def latest_release(self) -> dict[str, Any]:
+        return self.request_json("/api/agent/latest-release")
+
+    def download_installer(
+        self,
+        destination: Path,
+        *,
+        expected_size: int | None = None,
+        expected_sha256: str | None = None,
+        progress=None,
+    ) -> None:
+        """Stream the newest agent installer and verify size and SHA-256."""
+        import hashlib
+
+        if not self.agent_token:
+            raise AgentApiError("本地执行助手尚未配对", 401)
+        request = Request(
+            self._url("/api/agent/download-installer"),
+            headers={
+                "Accept": "application/octet-stream",
+                "Authorization": f"Bearer {self.agent_token}",
+            },
+        )
+        destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = destination.with_name(destination.name + ".part")
+        digest = hashlib.sha256()
+        try:
+            with self.opener.open(request, timeout=120) as response, temporary.open(
+                "wb"
+            ) as output:
+                last_progress = time.monotonic()
+                downloaded = 0
+                while chunk := response.read(1024 * 1024):
+                    output.write(chunk)
+                    digest.update(chunk)
+                    downloaded += len(chunk)
+                    if expected_size is not None and downloaded > expected_size:
+                        raise AgentApiError(
+                            "更新安装包大小与服务器发布信息不一致",
+                        )
+                    if progress is not None and time.monotonic() - last_progress >= 10:
+                        progress(downloaded)
+                        last_progress = time.monotonic()
+            if expected_size is not None and downloaded != expected_size:
+                raise AgentApiError("更新安装包下载不完整")
+            if expected_sha256 is not None and digest.hexdigest() != expected_sha256:
+                raise AgentApiError("更新安装包校验失败，已取消安装")
+            temporary.replace(destination)
+            try:
+                destination.chmod(0o600)
+            except OSError:
+                pass
+        except HTTPError as exc:
+            raw = exc.read(100_000)
+            temporary.unlink(missing_ok=True)
+            raise AgentApiError(
+                self._error_message(raw, f"更新安装包下载失败（HTTP {exc.code}）"),
+                exc.code,
+            ) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            temporary.unlink(missing_ok=True)
+            raise AgentApiError(f"更新安装包下载失败：{exc}") from exc
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+
     def revoke_device(self, agent_id: str) -> None:
         self.request_json(
             f"/api/agent/self/{quote(agent_id)}",

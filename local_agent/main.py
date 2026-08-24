@@ -118,7 +118,7 @@ class LocalAgentApplication:
             "device_name": socket.gethostname() or "Local PC",
             "system": platform.platform()[:200],
             "version": __version__,
-            "capabilities": ["local_upload"],
+            "capabilities": ["local_upload", "self_update"],
         }
 
     def stop(self, *_args) -> None:

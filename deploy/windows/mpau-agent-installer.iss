@@ -1,5 +1,11 @@
+; MyAppVersion can be overridden on the ISCC command line with /DMyAppVersion=x.y.z
+; (deploy/windows/build-mpau-agent.ps1 passes the local_agent __version__ so the
+; installer, the release manifest, and the agent's self-update check stay in sync).
+#ifndef MyAppVersion
+#define MyAppVersion "0.3.0"
+#endif
+
 #define MyAppName "MPAU 本地执行助手"
-#define MyAppVersion "0.1.0"
 #define MyAppPublisher "MPAU"
 #define MyAppExeName "MPAU-Agent.exe"
 
@@ -12,6 +18,9 @@ DefaultDirName={localappdata}\Programs\MPAU-Agent
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
+; Unattended self-updates run with /VERYSILENT and must not stop the wizard.
+CloseApplications=no
+RestartApplications=no
 OutputDir=output
 OutputBaseFilename=MPAU-Agent-Setup
 Compression=lzma2
