@@ -36,7 +36,7 @@ from utils.config import DEBUG_MODE
 from uploader.base_video import BaseVideoUploader
 from uploader.jd_session import JdBrowserSession
 from utils.log import jd_logger
-from utils.clipboard import write_clipboard
+from utils.clipboard import dispatch_paste
 
 # 京东京麦发布中心 URL，用于 Cookie 校验与登录入口
 JD_POST_CENTER_URL = "https://dr.jd.com/jm/#/n/post-center.html"
@@ -555,9 +555,8 @@ class JDVideo(JDBaseUploader):
         product_links = "\n".join(
             f"https://item.jd.com/{goods_id}.html" for goods_id in goods_ids
         )
-        paste_shortcut = write_clipboard(product_links)
-        await paste_target.click()
-        await page.keyboard.press(paste_shortcut)
+        # 不调用 Windows 的 clip.exe + Ctrl+V，避免控制台进程抢走浏览器焦点。
+        await dispatch_paste(frame, product_links)
 
         imported_tags = active_panel.locator('.paste-search-input-content-tag')
         for _ in range(10):

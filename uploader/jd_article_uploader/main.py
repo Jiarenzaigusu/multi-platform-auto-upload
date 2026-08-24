@@ -19,7 +19,7 @@ from patchright.async_api import BrowserContext, Frame
 from uploader.errors import PublishResultUncertainError
 from uploader.jd_session import JdBrowserSession
 from utils.log import jd_logger
-from utils.clipboard import write_clipboard
+from utils.clipboard import dispatch_paste
 
 JD_GRAPHIC_URL = "https://dr.jd.com/jm/#/n/publish-graphic.html?platform=jm-pop"
 JD_AUTH_HOSTS = {"passport.shop.jd.com", "passport.jd.com", "safe.jd.com"}
@@ -100,19 +100,17 @@ class JDArticle:
             raise ValueError("请选择有效的京东创作声明")
 
     async def _upload_images(self, page, frame: Frame) -> None:
-        # 直接对隐藏的 file input 设置文件，复用京东视频上传的 set_input_files 写法。
-        # 不再走 page.expect_file_chooser + chooser.set_files：后者会弹出 Windows 原生
-        # 文件选择框，对话框关闭后浏览器会丢失前台焦点，进而导致后续 Ctrl+V 粘贴时
-        # 被 Windows 前台锁定机制发到后台。
-        file_input = frame.locator('input[type="file"][accept*="image"][multiple]').first
-        if not await file_input.count():
-            file_input = frame.locator('input[type="file"][accept*="image"]').first
-        if not await file_input.count():
-            file_input = frame.locator('input[type="file"]').first
-        if not await file_input.count():
-            raise RuntimeError("未找到京东图文图片上传的 file input 控件")
-        await file_input.wait_for(state="attached", timeout=10000)
-        await file_input.set_input_files(list(self.image_paths))
+        # 实页的 input 不会预先挂载，且点击按钮后也不留在 DOM 中；必须拦截
+        # 浏览器层的 file chooser。Patchright 会将 set_files 直接交给浏览器，
+        # 不会显示 Windows 原生文件对话框或切换前台窗口。
+        button = frame.get_by_role("button", name="上传图片", exact=True)
+        await button.wait_for(state="visible", timeout=30000)
+        async with page.expect_file_chooser(timeout=30000) as chooser_info:
+            await button.click(force=True)
+        chooser = await chooser_info.value
+        if not chooser.is_multiple():
+            raise RuntimeError("京东图文上传控件未开启多选模式")
+        await chooser.set_files(list(self.image_paths))
         for _ in range(300):
             text = await frame.locator("body").inner_text(timeout=3000)
             if "上传失败" in text or "处理失败" in text:
@@ -157,9 +155,8 @@ class JDArticle:
         target = panel.locator('.paste-search-input-content').first
         await target.wait_for(state="visible", timeout=5000)
         links = "\n".join(f"https://item.jd.com/{item}.html" for item in ids)
-        paste_shortcut = write_clipboard(links)
-        await target.click()
-        await page.keyboard.press(paste_shortcut)
+        # 不调用 Windows 的 clip.exe + Ctrl+V，避免控制台进程抢走浏览器焦点。
+        await dispatch_paste(frame, links)
         tags = panel.locator('.paste-search-input-content-tag')
         for _ in range(10):
             if await tags.count() == len(ids):
