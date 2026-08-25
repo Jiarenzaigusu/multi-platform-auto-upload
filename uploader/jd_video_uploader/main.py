@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from patchright.async_api import BrowserContext, Frame
+from patchright.async_api import BrowserContext, Frame, Page
 
 from uploader.errors import PublishResultUncertainError
 from utils.config import DEBUG_MODE
@@ -97,6 +97,23 @@ def _url_host(url: str) -> str:
         return urlparse(url).hostname or ""
     except Exception:
         return ""
+
+
+def _is_publish_frame_reload_error(exc: Exception) -> bool:
+    """判断异常是否像京麦发布 iframe 在上传处理中被重挂载。"""
+    message = str(exc).lower()
+    if "target page, context or browser has been closed" in message:
+        return False
+    return any(
+        hint in message
+        for hint in (
+            "frame was detached",
+            "frame has been detached",
+            "execution context was destroyed",
+            "context was destroyed",
+            "most likely because of a navigation",
+        )
+    )
 
 
 async def _is_logged_in(page) -> bool:
@@ -427,94 +444,179 @@ class JDVideo(JDBaseUploader):
         if not self.creator_declaration:
             raise ValueError("京东创作声明不能为空")
 
-    async def _wait_for_video_uploaded(self, frame: Frame, timeout_seconds: int = 600):
-        """等视频上传完成。判定信号：页面出现可见的“修改封面”按钮。
+    async def _wait_for_video_uploaded(
+        self,
+        page_or_frame: Page | Frame,
+        frame: Frame | int | None = None,
+        timeout_seconds: int = 600,
+    ) -> Frame:
+        """等视频上传完成，京麦重载发布 iframe 时自动重新绑定。
 
+        判定信号：页面出现可见的“修改封面”按钮。
+        :param page_or_frame: 京麦发布页；兼容旧调用时也可以直接传发布 iframe
         :param frame: 发布 iframe
         :param timeout_seconds: 超时秒数（默认 600 秒 = 10 分钟）
+        :returns: 当前可用的发布 iframe
         """
-        for i in range(timeout_seconds // 2):
-            body_text = await frame.locator("body").inner_text(timeout=3000)
-            if "上传失败" in body_text or "本地处理失败" in body_text:
-                raise RuntimeError(f"京东视频上传失败：{body_text[-300:].strip()}")
-            edit_cover = frame.locator(".edit-cover-btn").filter(has_text="修改封面").first
-            if await edit_cover.count() and await edit_cover.is_visible():
-                jd_logger.success(_msg("🥳", f"视频上传完成（{i*2}s 后出现修改封面按钮）"))
-                return
-            if i % 5 == 0:
-                jd_logger.info(_msg("🏃", f"小人正在等待视频上传完成 ({i*2}s)"))
-            await asyncio.sleep(2)
-        raise RuntimeError(f"等待视频上传完成超时（{timeout_seconds}s）")
+        page = page_or_frame if frame is not None else None
+        if isinstance(frame, int):
+            timeout_seconds = frame
+            frame = None
+            page = None
+        current_frame = frame or page_or_frame
 
-    async def _set_custom_cover(self, frame: Frame) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        poll_count = 0
+        reload_count = 0
+        last_body_text = ""
+
+        while loop.time() < deadline:
+            try:
+                body_text = await current_frame.locator("body").inner_text(timeout=3000)
+                last_body_text = body_text[-300:].strip()
+                if "上传失败" in body_text or "本地处理失败" in body_text:
+                    raise RuntimeError(f"京东视频上传失败：{last_body_text}")
+                edit_cover = current_frame.locator(".edit-cover-btn").filter(has_text="修改封面").first
+                if await edit_cover.count() and await edit_cover.is_visible():
+                    elapsed = max(0, timeout_seconds - int(deadline - loop.time()))
+                    jd_logger.success(
+                        _msg(
+                            "🥳",
+                            f"视频上传完成（{elapsed}s 后出现修改封面按钮，iframe 重载 {reload_count} 次）",
+                        )
+                    )
+                    return current_frame
+            except Exception as exc:
+                if not _is_publish_frame_reload_error(exc):
+                    raise
+                reload_count += 1
+                if page is None:
+                    raise RuntimeError("检测到京东发布 iframe 重载，但缺少页面对象，无法重新定位 iframe") from exc
+                if page.is_closed():
+                    raise RuntimeError("京东发布页已关闭，无法继续等待视频封面解析") from exc
+                if _url_host(page.url) in JD_AUTH_HOSTS:
+                    raise JdAuthenticationError("京东 Cookie 已失效，请重新登录") from exc
+                jd_logger.warning(
+                    _msg(
+                        "🔁",
+                        f"检测到京东发布 iframe 重载，正在重新定位 iframe（第 {reload_count} 次）",
+                    )
+                )
+                current_frame = await _find_publish_iframe(page)
+                await asyncio.sleep(1)
+                continue
+
+            if poll_count % 5 == 0:
+                jd_logger.info(
+                    _msg(
+                        "🏃",
+                        f"小人正在等待视频上传完成 ({poll_count * 2}s，iframe 重载 {reload_count} 次)",
+                    )
+                )
+            poll_count += 1
+            await asyncio.sleep(2)
+
+        detail = f"；最后页面状态：{last_body_text}" if last_body_text else ""
+        raise RuntimeError(f"等待视频上传完成超时（{timeout_seconds}s，iframe 重载 {reload_count} 次）{detail}")
+
+    async def _set_custom_cover(
+        self,
+        page_or_frame: Page | Frame,
+        frame: Frame | None = None,
+    ) -> Frame:
         """在京东视频编辑器中通过本地文件设置自定义封面。
 
         京东封面弹窗完全独立于天猫图库流程：点击“修改封面”后直接将图片
         写入弹窗的 image file input，再确认并核验主表单预览图已更新。
         """
+        page = page_or_frame if frame is not None else None
+        current_frame = frame or page_or_frame
         if not self.cover_image_path:
-            return
+            return current_frame
 
         cover_path = Path(self.cover_image_path).resolve()
         jd_logger.info(_msg("🖼️", f"准备设置京东自定义封面: {cover_path.name}"))
 
-        edit_button = frame.locator('[data-spm-click="openVideoCoverModal"]').first
-        if not await edit_button.count():
-            edit_button = frame.locator(".edit-cover-btn").filter(has_text="修改封面").first
-        await edit_button.wait_for(state="visible", timeout=120000)
-        preview = frame.locator(".video-cover-wrapper .preview-img").first
-        previous_src = await preview.get_attribute("src") if await preview.count() else None
-        await edit_button.click()
+        reload_count = 0
+        while True:
+            try:
+                edit_button = current_frame.locator('[data-spm-click="openVideoCoverModal"]').first
+                if not await edit_button.count():
+                    edit_button = current_frame.locator(".edit-cover-btn").filter(has_text="修改封面").first
+                await edit_button.wait_for(state="visible", timeout=120000)
+                preview = current_frame.locator(".video-cover-wrapper .preview-img").first
+                previous_src = await preview.get_attribute("src") if await preview.count() else None
+                await edit_button.click()
 
-        # 弹窗外层 class 在不同版本中会变化；“手动上传”区域由一个透明的
-        # file input 覆盖，直接向该原生控件设置文件即等同用户在该区域选图。
-        # 文件控件只有封面编辑器打开时才出现；以它为就绪信号，规避 modal
-        # 容器在动画期间尚未写入 class/role 的竞态。
-        # 京东弹窗只有一个本地图片 input；使用 first 避免 Patchright 在
-        # 动画挂载阶段对 .last 的延迟定位问题。
-        file_input = frame.locator('input[type="file"][accept*="image"]').first
-        for _ in range(30):
-            if await file_input.count():
-                break
-            await asyncio.sleep(0.5)
-        else:
-            raise RuntimeError("点击京东“修改封面”后未找到本地图片上传控件")
-        modal = frame.locator(".jd-modal-wrap").last
+                # 弹窗外层 class 在不同版本中会变化；“手动上传”区域由一个透明的
+                # file input 覆盖，直接向该原生控件设置文件即等同用户在该区域选图。
+                # 文件控件只有封面编辑器打开时才出现；以它为就绪信号，规避 modal
+                # 容器在动画期间尚未写入 class/role 的竞态。
+                # 京东弹窗只有一个本地图片 input；使用 first 避免 Patchright 在
+                # 动画挂载阶段对 .last 的延迟定位问题。
+                file_input = current_frame.locator('input[type="file"][accept*="image"]').first
+                for _ in range(30):
+                    if await file_input.count():
+                        break
+                    await asyncio.sleep(0.5)
+                else:
+                    raise RuntimeError("点击京东“修改封面”后未找到本地图片上传控件")
+                modal = current_frame.locator(".jd-modal-wrap").last
 
-        # 不点击文字节点：它会被上述 input 拦截而导致自动化卡住。
-        await frame.locator('input[type="file"][accept*="image"]').first.set_input_files(
-            str(cover_path)
-        )
+                # 不点击文字节点：它会被上述 input 拦截而导致自动化卡住。
+                await current_frame.locator('input[type="file"][accept*="image"]').first.set_input_files(
+                    str(cover_path)
+                )
 
-        crop_preview = modal.locator("img.reactEasyCrop_Image").last
-        if await crop_preview.count():
-            await crop_preview.wait_for(state="visible", timeout=15000)
-            for _ in range(30):
-                src = await crop_preview.get_attribute("src")
-                if src:
-                    break
-                await asyncio.sleep(0.2)
+                crop_preview = modal.locator("img.reactEasyCrop_Image").last
+                if await crop_preview.count():
+                    await crop_preview.wait_for(state="visible", timeout=15000)
+                    for _ in range(30):
+                        src = await crop_preview.get_attribute("src")
+                        if src:
+                            break
+                        await asyncio.sleep(0.2)
 
-        # 选择图片后京麦会重挂载弹窗内容，wrapper locator 可能短暂失效；
-        # “确定”按钮在当前发布 iframe 内唯一，使用稳定的按钮属性定位。
-        confirm_button = frame.locator('button[data-component-label="确定"]').first
-        await confirm_button.wait_for(state="visible", timeout=10000)
-        await confirm_button.click()
-        try:
-            await modal.wait_for(state="hidden", timeout=15000)
-        except Exception:
-            # 某些版本卸载 wrapper 较慢，但确认按钮已触发即可继续校验预览。
-            await asyncio.sleep(1)
+                # 选择图片后京麦会重挂载弹窗内容，wrapper locator 可能短暂失效；
+                # “确定”按钮在当前发布 iframe 内唯一，使用稳定的按钮属性定位。
+                confirm_button = current_frame.locator('button[data-component-label="确定"]').first
+                await confirm_button.wait_for(state="visible", timeout=10000)
+                await confirm_button.click()
+                try:
+                    await modal.wait_for(state="hidden", timeout=15000)
+                except Exception:
+                    # 某些版本卸载 wrapper 较慢，但确认按钮已触发即可继续校验预览。
+                    await asyncio.sleep(1)
 
-        if await preview.count():
-            for _ in range(30):
-                current_src = await preview.get_attribute("src")
-                if current_src and current_src != previous_src:
-                    break
-                await asyncio.sleep(0.5)
-            else:
-                raise RuntimeError("京东封面已确认，但主表单预览图未更新")
-        jd_logger.success(_msg("🖼️", f"京东自定义封面已设置: {cover_path.name}"))
+                if await preview.count():
+                    for _ in range(30):
+                        current_src = await preview.get_attribute("src")
+                        if current_src and current_src != previous_src:
+                            break
+                        await asyncio.sleep(0.5)
+                    else:
+                        raise RuntimeError("京东封面已确认，但主表单预览图未更新")
+                jd_logger.success(_msg("🖼️", f"京东自定义封面已设置: {cover_path.name}"))
+                return current_frame
+            except Exception as exc:
+                if not _is_publish_frame_reload_error(exc):
+                    raise
+                reload_count += 1
+                if page is None:
+                    raise RuntimeError("设置封面时检测到京东发布 iframe 重载，但缺少页面对象，无法重新定位 iframe") from exc
+                if page.is_closed():
+                    raise RuntimeError("京东发布页已关闭，无法继续设置自定义封面") from exc
+                if _url_host(page.url) in JD_AUTH_HOSTS:
+                    raise JdAuthenticationError("京东 Cookie 已失效，请重新登录") from exc
+                jd_logger.warning(
+                    _msg(
+                        "🔁",
+                        f"设置封面时检测到京东发布 iframe 重载，正在重新定位 iframe（第 {reload_count} 次）",
+                    )
+                )
+                current_frame = await _find_publish_iframe(page)
+                await asyncio.sleep(1)
 
     async def _add_goods(self, page, frame: Frame):
         """通过「链接导入」一次关联多个商品 ID。
@@ -1076,8 +1178,8 @@ class JDVideo(JDBaseUploader):
             jd_logger.info(_msg("🏃", f"小人开始上传视频: {Path(self.file_path).name}"))
             file_input = frame.locator('input[type="file"][accept*=".mp4"]').first
             await file_input.set_input_files(self.file_path)
-            await self._wait_for_video_uploaded(frame)
-            await self._set_custom_cover(frame)
+            frame = await self._wait_for_video_uploaded(page, frame)
+            frame = await self._set_custom_cover(page, frame)
 
             # 填写标题
             jd_logger.info(_msg("✍️", f"填写正文标题: {self.title}"))

@@ -46,7 +46,7 @@ class AgentJobRunner:
         user_id: str,
         paths: UserDataPaths,
         *,
-        browser_idle_timeout_seconds: float = 5 * 60,
+        browser_idle_timeout_seconds: float = 0,
     ) -> None:
         self.user_id = user_id
         self.paths = paths

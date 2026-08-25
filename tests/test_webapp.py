@@ -499,6 +499,119 @@ class PublishRequestValidationTests(unittest.TestCase):
         ):
             asyncio.run(uploader._handle_captcha(frame))
 
+    def test_jd_wait_for_video_uploaded_recovers_from_iframe_reload(self):
+        uploader = object.__new__(JDVideo)
+
+        def make_frame(*, detached: bool = False):
+            body = MagicMock()
+            if detached:
+                body.inner_text = AsyncMock(side_effect=RuntimeError("Frame was detached"))
+            else:
+                body.inner_text = AsyncMock(return_value="等待视频上传")
+
+            edit_button = MagicMock()
+            edit_button.count = AsyncMock(return_value=1)
+            edit_button.is_visible = AsyncMock(return_value=True)
+
+            edit_locator = MagicMock()
+            edit_locator.filter.return_value.first = edit_button
+
+            frame = MagicMock()
+
+            def locator(selector):
+                if selector == "body":
+                    return body
+                if selector == ".edit-cover-btn":
+                    return edit_locator
+                raise AssertionError(f"unexpected selector: {selector}")
+
+            frame.locator.side_effect = locator
+            return frame
+
+        first_frame = make_frame(detached=True)
+        second_frame = make_frame()
+        page = SimpleNamespace(url="https://dr.jd.com/jm/#/n/publish-video.html?platform=jm-pop", is_closed=lambda: False)
+
+        with (
+            patch("uploader.jd_video_uploader.main._find_publish_iframe", new=AsyncMock(return_value=second_frame)),
+            patch("uploader.jd_video_uploader.main.asyncio.sleep", new=AsyncMock()),
+        ):
+            result = asyncio.run(uploader._wait_for_video_uploaded(page, first_frame, timeout_seconds=5))
+
+        self.assertIs(result, second_frame)
+
+    def test_jd_set_custom_cover_recovers_from_iframe_reload(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cover = Path(temp_dir) / "cover.jpg"
+            cover.write_bytes(b"image")
+            uploader = object.__new__(JDVideo)
+            uploader.cover_image_path = str(cover)
+
+            def make_frame(*, detached: bool = False):
+                def first_locator(target):
+                    outer = MagicMock()
+                    outer.first = target
+                    return outer
+
+                edit_button = MagicMock()
+                edit_button.count = AsyncMock(return_value=1)
+                edit_button.wait_for = AsyncMock(
+                    side_effect=RuntimeError("Frame was detached") if detached else None
+                )
+                edit_button.click = AsyncMock()
+
+                preview = MagicMock()
+                preview.count = AsyncMock(return_value=0)
+
+                file_input = MagicMock()
+                file_input.count = AsyncMock(return_value=1)
+                file_input.set_input_files = AsyncMock()
+
+                confirm_button = MagicMock()
+                confirm_button.wait_for = AsyncMock()
+                confirm_button.click = AsyncMock()
+
+                modal = MagicMock()
+                modal.wait_for = AsyncMock()
+                crop_preview = MagicMock()
+                crop_preview.count = AsyncMock(return_value=0)
+                modal.locator.return_value.last = crop_preview
+
+                frame = MagicMock()
+
+                def locator(selector):
+                    if selector in {
+                        '[data-spm-click="openVideoCoverModal"]',
+                        ".edit-cover-btn",
+                    }:
+                        return first_locator(edit_button)
+                    if selector == ".video-cover-wrapper .preview-img":
+                        return first_locator(preview)
+                    if selector == 'input[type="file"][accept*="image"]':
+                        return first_locator(file_input)
+                    if selector == ".jd-modal-wrap":
+                        outer = MagicMock()
+                        outer.last = modal
+                        return outer
+                    if selector == 'button[data-component-label="确定"]':
+                        return first_locator(confirm_button)
+                    raise AssertionError(f"unexpected selector: {selector}")
+
+                frame.locator.side_effect = locator
+                return frame
+
+            first_frame = make_frame(detached=True)
+            second_frame = make_frame()
+            page = SimpleNamespace(url="https://dr.jd.com/jm/#/n/publish-video.html?platform=jm-pop", is_closed=lambda: False)
+
+            with (
+                patch("uploader.jd_video_uploader.main._find_publish_iframe", new=AsyncMock(return_value=second_frame)),
+                patch("uploader.jd_video_uploader.main.asyncio.sleep", new=AsyncMock()),
+            ):
+                result = asyncio.run(uploader._set_custom_cover(page, first_frame))
+
+            self.assertIs(result, second_frame)
+
 
 class TaskManagerTests(unittest.TestCase):
     @staticmethod

@@ -456,11 +456,6 @@
 .ai-copy-link-row .ai-copy-delete-link { border-color: #d8a69d; color: #9d3b2f; background: #fff7f4; }
 .ai-copy-link-row .ai-copy-delete-link:hover { border-color: #bd5d4d; color: #7f2e24; background: #fce8e1; }
 .ai-copy-link-error { margin: 10px 0 0; color: #9d3b2f; font-size: 11px; line-height: 1.5; }
-.ai-copy-search-config { margin-top: 14px; }
-.ai-copy-search-config summary { color: #657178; font-size: 11px; font-weight: 750; cursor: pointer; }
-.ai-copy-search-config summary span { font-weight: 500; }
-.ai-copy-search-config[open] summary { margin-bottom: 13px; }
-.ai-copy-search-config .ai-copy-field + .ai-copy-field { margin-top: 12px; }
 
 .ai-copy-reference-list { display: grid; overflow-y: auto; max-height: 520px; gap: 9px; margin-top: 15px; padding-right: 3px; }
 .ai-copy-reference { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; padding: 13px; border: 1px solid #cbd5bd; border-radius: 11px; background: #f7faef; }

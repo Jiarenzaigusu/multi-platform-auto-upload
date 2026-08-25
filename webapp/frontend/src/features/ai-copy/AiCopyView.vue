@@ -59,8 +59,6 @@ const createDefaultForm = () => ({
   customScene: '',
   customFestival: '',
   productUrls: '',
-  searchEndpoint: '',
-  searchApiKey: '',
 })
 const form = reactive(createDefaultForm())
 const loadingOptions = ref(true)
@@ -73,7 +71,6 @@ const result = ref(null)
 const error = ref('')
 const success = ref('')
 const copiedField = ref('')
-const searchConfigDetails = ref(null)
 const sellingPointFileInput = ref(null)
 const batchExcelFileInput = ref(null)
 const importingToBatchExcel = ref(false)
@@ -358,13 +355,6 @@ const canGenerate = computed(() => (
   && !loadingOptions.value
 ))
 
-function searchConfig() {
-  return {
-    endpoint_url: form.searchEndpoint.trim() || null,
-    api_key: form.searchApiKey.trim() || null,
-  }
-}
-
 function clearFeedback() {
   error.value = ''
   success.value = ''
@@ -392,7 +382,6 @@ function clearAll() {
   window.clearTimeout(copyTimer)
   window.clearTimeout(successTimer)
   if (sellingPointFileInput.value) sellingPointFileInput.value.value = ''
-  if (searchConfigDetails.value) searchConfigDetails.value.open = false
   clearAiCopyDraft(props.userId)
   clearSellingPointWorkbook(props.userId).catch(() => {})
 }
@@ -480,7 +469,6 @@ async function inspectProducts() {
   try {
     productReferences.value = await api.inspectProducts({
       product_urls: productUrls.value,
-      search: searchConfig(),
     })
   } catch (requestError) {
     productReferences.value = []
@@ -554,7 +542,6 @@ async function generateCopy() {
       custom_scene: form.customScene.trim() || null,
       custom_festival: form.customFestival.trim() || null,
       product_urls: productUrls.value,
-      product_search: searchConfig(),
       title_max_chars: titleLimit,
       body_max_chars: bodyLimit,
       title_count: titleCount,
@@ -730,7 +717,7 @@ function restoreAiCopyDraft() {
   if (!draft) return
   if (draft.form && typeof draft.form === 'object') {
     for (const key of Object.keys(createDefaultForm())) {
-      if (key !== 'searchApiKey' && key !== 'searchEndpoint' && Object.hasOwn(draft.form, key)) form[key] = draft.form[key]
+      if (Object.hasOwn(draft.form, key)) form[key] = draft.form[key]
     }
   }
   if (draft.result && typeof draft.result === 'object') result.value = draft.result
@@ -752,9 +739,7 @@ function persistAiCopyDraft() {
   if (restoringDraft.value) return
   window.clearTimeout(draftSaveTimer)
   draftSaveTimer = window.setTimeout(() => {
-    // Credentials remain session-only and are never written to localStorage.
-    const savedForm = { ...form, searchApiKey: '', searchEndpoint: '' }
-    saveAiCopyDraft({ version: 1, form: savedForm, result: result.value, productReferences: productReferences.value,
+    saveAiCopyDraft({ version: 1, form: { ...form }, result: result.value, productReferences: productReferences.value,
       selectedTitleIndex: selectedTitleIndex.value, selectedBodyIndex: selectedBodyIndex.value, savedAt: new Date().toISOString() }, props.userId)
   }, 180)
 }
@@ -801,7 +786,7 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
             rows="3"
             maxlength="2000"
             required
-            placeholder="每行输入一个商品 ID 或货号，也支持逗号、空格分隔"
+            placeholder="每行输入一个商品 ID 或货号"
           />
         </label>
 
@@ -816,7 +801,6 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
           <div>
             <b>SELLING POINT LIBRARY</b>
             <strong>上传商品核心卖点 Excel</strong>
-            <small>需包含“商品ID或货号”和“商品核心内容卖点”两列，编号不可重复</small>
           </div>
           <button :disabled="uploadingSellingPoints" type="button" @click="chooseSellingPointFile">
             {{ uploadingSellingPoints ? '解析中…' : sellingPointCatalog ? '更换表格' : '选择 Excel' }}
@@ -854,10 +838,10 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
       </section>
 
       <fieldset class="ai-copy-choice-group ai-copy-limits">
-        <legend><b>目标汉字数</b><span>只统计汉字，标点数字不计；标题严格等于目标，较长标题会按语义断句</span></legend>
+        <legend><b>目标汉字数</b></legend>
 
         <div class="ai-copy-limit-row">
-          <span class="ai-copy-limit-label"><b>标题字数</b><small>期望生成多少字</small></span>
+          <span class="ai-copy-limit-label"><b>标题字数</b></span>
           <div class="ai-copy-limit-chips">
             <button
               v-for="preset in titleLimitPresets"
@@ -884,7 +868,7 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
         </div>
 
         <div class="ai-copy-limit-row">
-          <span class="ai-copy-limit-label"><b>文案字数</b><small>期望生成多少字</small></span>
+          <span class="ai-copy-limit-label"><b>文案字数</b></span>
           <div class="ai-copy-limit-chips">
             <button
               v-for="preset in bodyLimitPresets"
@@ -912,10 +896,10 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
       </fieldset>
 
       <fieldset class="ai-copy-choice-group ai-copy-limits ai-copy-counts">
-        <legend><b>生成个数</b><span>标题与文案分别生成候选，导入前各选择一条</span></legend>
+        <legend><b>生成个数</b></legend>
 
         <div class="ai-copy-limit-row">
-          <span class="ai-copy-limit-label"><b>标题个数</b><small>生成几条标题候选</small></span>
+          <span class="ai-copy-limit-label"><b>标题个数</b></span>
           <div class="ai-copy-limit-chips">
             <button
               v-for="preset in titleCountPresets"
@@ -942,7 +926,7 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
         </div>
 
         <div class="ai-copy-limit-row">
-          <span class="ai-copy-limit-label"><b>文案个数</b><small>生成几条正文候选</small></span>
+          <span class="ai-copy-limit-label"><b>文案个数</b></span>
           <div class="ai-copy-limit-chips">
             <button
               v-for="preset in bodyCountPresets"
@@ -970,7 +954,7 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
       </fieldset>
 
       <fieldset class="ai-copy-choice-group">
-        <legend><b>文案风格</b><span>选择文案的语气与节奏</span></legend>
+        <legend><b>文案风格</b></legend>
         <div class="ai-copy-style-grid">
           <label
             v-for="item in options.styles"
@@ -987,7 +971,7 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
           </label>
         </div>
         <label class="ai-copy-field ai-copy-custom-context">
-          <span><strong>自定义文案风格</strong><small>可选；填写后仅使用自定义内容</small></span>
+          <span><strong>自定义文案风格</strong></span>
           <input v-model="form.customStyle" maxlength="100" placeholder="请输入自定义文案风格" />
         </label>
       </fieldset>
@@ -1020,14 +1004,14 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
           <div><p>PRODUCT REFERENCES</p><h3>多商品链接参考</h3></div>
           <span>{{ productUrls.length ? `${productUrls.length} / 20` : '可选' }}</span>
         </div>
-        <p class="ai-copy-product-help">每行粘贴一个商品链接，最多 20 个。生成时会逐条读取商品资料，再综合所有商品信息写文案。</p>
+        <p class="ai-copy-product-help">每行粘贴一个天猫或京东商品链接，最多 20 个。生成时会逐条读取商品资料，再综合所有商品信息写文案。</p>
         <div class="ai-copy-link-row">
           <textarea
             v-model="form.productUrls"
             rows="4"
             maxlength="20000"
             spellcheck="false"
-            placeholder="每行一个商品链接&#10;https://item.example.com/product/1&#10;https://item.example.com/product/2"
+            placeholder="每行一个天猫或京东商品链接&#10;https://detail.tmall.com/item.htm?id=...&#10;https://item.jd.com/....html"
             @input="invalidateProductReferences"
           />
           <button
@@ -1049,18 +1033,6 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
         <p v-if="productUrls.length > 20" class="ai-copy-link-error">
           一次最多支持 20 个商品链接，当前已输入 {{ productUrls.length }} 个。
         </p>
-
-        <details ref="searchConfigDetails" class="ai-copy-search-config">
-          <summary>配置商品搜索服务 <span>可选</span></summary>
-          <label class="ai-copy-field">
-            <span><strong>服务地址</strong><small>POST JSON: { url }</small></span>
-            <input v-model="form.searchEndpoint" type="url" placeholder="https://example.com/product/inspect" />
-          </label>
-          <label class="ai-copy-field">
-            <span><strong>API Key</strong><small>仅用于本次请求，不保存</small></span>
-            <input v-model="form.searchApiKey" type="password" autocomplete="off" placeholder="Bearer API Key" />
-          </label>
-        </details>
 
         <div v-if="productReferences.length" class="ai-copy-reference-list">
           <article
@@ -1205,7 +1177,7 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
           <span>
             <small>IMPORT TO WORKBENCH</small>
             <strong>导入发布工作台</strong>
-            <em>先选择一个平台与发布类型</em>
+            <em>选择后直接导入</em>
           </span>
           <svg aria-hidden="true" viewBox="0 0 24 24">
             <path d="M5 12h13M14 7l5 5-5 5" />

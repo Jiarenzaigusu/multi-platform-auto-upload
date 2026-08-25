@@ -393,8 +393,6 @@ const creatorDeclarationOptions = computed(() => (
 ))
 const isVideo = computed(() => form.contentType === 'video')
 const isArticle = computed(() => form.contentType === 'article')
-const isTmallBatch = computed(() => batchForm.platform === 'tmall')
-const isTmallArticleBatch = computed(() => isTmallBatch.value && batchForm.contentType === 'article')
 const isAdmin = computed(() => currentUser.value?.role === 'admin')
 const platformLabel = (platform) => (platform === 'tmall' ? '天猫光合' : '京东京麦')
 const batchPlatformLabel = computed(() => platformLabel(batchForm.platform))
@@ -417,7 +415,7 @@ const viewTitle = computed(() => ({
   users: '用户与权限',
   batch: '批量发布任务',
   jobs: '任务追踪中心',
-}[activeView.value] || '商家发布台'))
+}[activeView.value] || '智能发布中枢系统'))
 const viewEyebrow = computed(() => ({
   'ai-copy': 'AI COPY STUDIO',
   'llm-adapter': 'LLM ROUTING DESK',
@@ -1200,7 +1198,7 @@ onBeforeUnmount(() => {
     <aside class="rail">
       <div class="brand">
         <span class="brand-mark">M</span>
-        <div><strong>商家发布台</strong><small>Tmall · JD</small></div>
+        <div><strong>智能发布中枢系统</strong></div>
       </div>
 
       <nav>
@@ -1279,8 +1277,8 @@ onBeforeUnmount(() => {
           </div>
           <p class="choice-label">选择发布类型</p>
           <div class="platform-choice content-type-choice">
-            <label :class="{ selected: form.contentType === 'video' }"><input v-model="form.contentType" type="radio" value="video" /><span>视频</span></label>
-            <label :class="{ selected: form.contentType === 'article' }"><input v-model="form.contentType" type="radio" value="article" /><span>图文</span></label>
+            <label :class="{ selected: form.contentType === 'video' }"><input v-model="form.contentType" type="radio" value="video" /><span>视频发布</span></label>
+            <label :class="{ selected: form.contentType === 'article' }"><input v-model="form.contentType" type="radio" value="article" /><span>图文发布</span></label>
           </div>
           <p v-if="isTmall && isVideo" class="workflow-tip"><strong>天猫视频步骤：</strong>上传视频 → 可选设置自定义封面 → 填写标题、文案和标签 → 参与话题 → 可选添加音乐 → 关联商品 → 设置定时 → 选择创作者声明 → 提交发布。</p>
           <p v-else-if="isTmall" class="workflow-tip"><strong>天猫图文步骤：</strong>按顺序上传 1-9 张图片 → 填写标题、文案和标签 → 参与话题 → 可选添加音乐 → 关联商品 → 设置定时 → 选择创作者声明 → 提交发布。</p>
@@ -1374,28 +1372,27 @@ onBeforeUnmount(() => {
 
       <section v-else-if="activeView === 'batch'" class="batch-layout">
         <form class="editor-card batch-card" novalidate @submit.prevent="submitBatch">
-          <div class="section-heading"><span>01</span><div><h2>选择平台与店铺</h2><p>Excel 中不需要重复填写平台和店铺；切换平台后请使用对应的模板。</p></div></div>
+          <div class="section-heading"><span>01</span><div><h2>选择平台、发布类型与店铺</h2></div></div>
+          <p class="choice-label">选择平台</p>
           <div class="platform-choice batch-platform-choice">
-            <label :class="{ selected: batchForm.platform === 'tmall' }"><input v-model="batchForm.platform" type="radio" value="tmall" /><span>天猫光合</span><small>支持视频与图文，含标题、文案、标签、话题、音乐、商品</small></label>
-            <label :class="{ selected: batchForm.platform === 'jd' }"><input v-model="batchForm.platform" type="radio" value="jd" /><span>京东京麦</span><small>视频/图文、标题、商品、定时发布、自主原创</small></label>
+            <label :class="{ selected: batchForm.platform === 'tmall' }"><input v-model="batchForm.platform" type="radio" value="tmall" /><span>天猫光合</span></label>
+            <label :class="{ selected: batchForm.platform === 'jd' }"><input v-model="batchForm.platform" type="radio" value="jd" /><span>京东京麦</span></label>
           </div>
+          <p class="choice-label">选择发布类型</p>
           <div class="content-choice batch-content-choice">
-            <label :class="{ selected: batchForm.contentType === 'video' }"><input v-model="batchForm.contentType" type="radio" value="video" /><span>视频发布</span><small>支持视频绝对路径与可选自定义封面路径</small></label>
-            <label :class="{ selected: batchForm.contentType === 'article' }"><input v-model="batchForm.contentType" type="radio" value="article" /><span>图文发布</span><small>每行填写一个图片文件夹，自动识别其中图片</small></label>
+            <label :class="{ selected: batchForm.contentType === 'video' }"><input v-model="batchForm.contentType" type="radio" value="video" /><span>视频发布</span></label>
+            <label :class="{ selected: batchForm.contentType === 'article' }"><input v-model="batchForm.contentType" type="radio" value="article" /><span>图文发布</span></label>
           </div>
+          <p class="choice-label">选择店铺</p>
           <div class="field-row">
-            <label class="field"><span>店铺账号标识</span><input v-model="batchForm.account" list="batch-account-list" required placeholder="例如 shop1" /><datalist id="batch-account-list"><option v-for="item in batchAccounts" :key="`${batchForm.platform}-batch-${item.account}`" :value="item.account" /></datalist></label>
+            <label class="field"><input v-model="batchForm.account" aria-label="店铺账号标识" list="batch-account-list" required placeholder="例如 shop1" /><datalist id="batch-account-list"><option v-for="item in batchAccounts" :key="`${batchForm.platform}-batch-${item.account}`" :value="item.account" /></datalist></label>
             <div class="account-actions"><span>账号状态</span><div><button type="button" class="quiet" @click="accountAction('check', batchForm.platform, batchForm.account)">校验 Cookie</button><button type="button" class="quiet" @click="accountAction('login', batchForm.platform, batchForm.account)">登录 / 重新登录</button><button type="button" class="quiet" @click="deleteAccount(batchForm.platform, batchForm.account)">删除账号</button></div></div>
           </div>
 
-          <div class="section-heading"><span>02</span><div><h2>导入{{ batchPlatformLabel }}{{ batchContentTypeLabel }}内容表</h2><p>每个非空行都会生成一条任务；所有行先通过校验，才会一次性进入队列。</p></div></div>
-          <div class="batch-guide">
-            <div><strong>Excel 列</strong><span>{{ isTmallArticleBatch ? '图片文件夹路径、标题、发布文案、标签、商品ID、活动话题、音乐名称、定时发布、创作者声明' : isTmallBatch ? '视频路径、自定义封面、标题、文案、标签、商品ID、活动话题、音乐名称、定时发布、创作者声明' : batchForm.contentType === 'article' ? '图片文件夹路径、标题、正文内容、商品ID、参与话题、定时发布、自主原创、创作者声明' : '视频路径、自定义封面、标题、商品ID、参与话题、定时发布、自主原创、创作者声明' }}</span></div>
-            <div v-if="batchForm.contentType === 'article'"><strong>图片文件夹路径</strong><span>填写本机图片文件夹的绝对路径；{{ batchForm.platform === 'jd' ? '系统会识别 JPG、PNG 图片（最多 20 张）' : '系统会识别 JPG、PNG 和 WebP 图片（最多 9 张）' }}，并按文件名升序发布。</span></div>
-            <div v-else><strong>视频路径</strong><span>仅填写本机视频文件的绝对路径（如 <code>/Users/your-name/Videos/video.mp4</code>）。</span></div>
-            <div v-if="isTmallBatch"><strong>天猫规则</strong><span>标题最多 30 字；标签最多 4 个；文案最多 1000 字；商品 ID 最多 6 个，以逗号或空格分隔；音乐名称可选，最多 100 字。</span></div>
-            <div v-else><strong>京东规则</strong><span>{{ batchForm.contentType === 'article' ? '图文标题为 5-20 字，正文最多 1001 字，图片最多 20 张。' : '视频标题为 5-27 字；“自主原创”填写“是”或“否”；商品 ID 最多 10 个。' }}</span></div>
-            <a class="template-link" :href="batchTemplateUrl">下载{{ batchPlatformLabel }}{{ batchContentTypeLabel }} Excel 模板</a>
+          <div class="section-heading section-heading-with-action batch-import-heading">
+            <span>02</span>
+            <div><h2>导入{{ batchPlatformLabel }}{{ batchContentTypeLabel }}内容表</h2></div>
+            <a class="template-link section-heading-action" :href="batchTemplateUrl">下载{{ batchPlatformLabel }}{{ batchContentTypeLabel }} Excel 模板</a>
           </div>
           <div class="dropzone batch-dropzone">
             <input id="batch-workbook" ref="batchWorkbookInput" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" @change="onBatchWorkbookChange" />
@@ -1405,13 +1402,11 @@ onBeforeUnmount(() => {
           <div v-if="batchErrors.length" class="batch-errors"><strong>以下内容未通过校验，未创建任何任务：</strong><p v-for="error in batchErrors" :key="`${error.row}-${error.field}-${error.message}`">第 {{ error.row }} 行 · {{ error.field }}：{{ error.message }}</p></div>
           <div v-if="batchResult" class="batch-result"><strong>已创建 {{ batchResult.created_count }} 条任务</strong><span>批次编号：{{ batchResult.batch_id }}</span><button type="button" class="quiet" @click="activeView = 'jobs'">前往任务与日志</button></div>
 
-          <div class="section-heading"><span>03</span><div><h2>执行方式</h2><p>同一店铺会严格串行执行；某一行失败不会阻止后续任务继续运行。</p></div></div>
+          <div class="section-heading"><span>03</span><div><h2>执行方式</h2></div></div>
           <div class="toggles">
             <label><input v-model="batchForm.dryRun" type="checkbox" /><span><strong>流程验证</strong><small>填写并上传每一行内容，但不点击正式发布</small></span></label>
             <label><input v-model="batchForm.headed" type="checkbox" /><span><strong>显示 Microsoft Edge</strong><small>登录、短信和风控验证需要在可见浏览器中手动完成</small></span></label>
           </div>
-          <p v-if="isTmallBatch" class="uploader-note"><strong>导入规则：</strong>若任一行的标题、视频路径、标签、商品 ID 或定时发布时间不符合天猫上传器要求，整份表格不会创建任务；请修正后重新导入。</p>
-          <p v-else class="uploader-note"><strong>导入规则：</strong>若任一行的标题、视频路径、商品 ID、定时发布时间或自主原创字段不符合京东上传器要求，整份表格不会创建任务；请修正后重新导入。</p>
           <p v-if="batchSubmitError" class="publish-error" role="alert">{{ batchSubmitError }}</p>
           <button class="primary" :disabled="batchSubmitting" type="submit">{{ batchSubmitting ? '正在校验并创建任务…' : batchForm.dryRun ? `创建${batchPlatformLabel}流程验证任务` : `创建${batchPlatformLabel}正式发布任务` }}</button>
         </form>

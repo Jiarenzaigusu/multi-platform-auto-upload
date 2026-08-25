@@ -19,7 +19,7 @@ class BrowserRuntime:
         self,
         *,
         user_id: str,
-        idle_timeout_seconds: float = 20 * 60,
+        idle_timeout_seconds: float = 0,
         max_sessions: int = 2,
     ) -> None:
         self.user_id = user_id

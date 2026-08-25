@@ -111,7 +111,7 @@ class GenericHtmlProductReader:
         )
         if not title or not summary:
             raise ProductLookupError(
-                "商品页面没有可读取的标题或描述；可展开“配置商品搜索服务”使用专用解析服务"
+                "商品页面没有可读取的标题或描述；请粘贴可直接访问的天猫或京东商品链接"
             )
 
         attributes: dict[str, str] = {}

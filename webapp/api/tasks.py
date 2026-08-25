@@ -91,7 +91,7 @@ class TaskManager:
         max_workers: int = 2,
         browser_runtime: BrowserRuntime | None = None,
         browser_slots: threading.BoundedSemaphore | None = None,
-        browser_idle_timeout_seconds: float = 20 * 60,
+        browser_idle_timeout_seconds: float = 0,
     ):
         self.store = store
         self.user_id = user_id

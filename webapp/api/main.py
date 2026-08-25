@@ -84,7 +84,7 @@ class WebSettings:
     max_media_files: int = 1000
     max_batch_workbook_bytes: int = 10 * 1024 * 1024
     max_batch_rows: int = 200
-    browser_idle_timeout_seconds: float = 5 * 60
+    browser_idle_timeout_seconds: float = 0
     user_workers: int = 1
     global_browser_tasks: int = 10
     agent_installer_path: Path | None = None
@@ -103,11 +103,11 @@ class WebSettings:
         """Load deployment settings while retaining safe local defaults."""
         data_dir = Path(os.getenv("MPAU_DATA_DIR", BASE_DIR / "data"))
         frontend = Path(__file__).resolve().parents[1] / "frontend" / "dist"
-        raw_idle_timeout = os.getenv("MPAU_BROWSER_IDLE_SECONDS", "300")
+        raw_idle_timeout = os.getenv("MPAU_BROWSER_IDLE_SECONDS", "0")
         try:
             idle_timeout = max(0.0, float(raw_idle_timeout))
         except ValueError:
-            idle_timeout = 5 * 60
+            idle_timeout = 0
 
         def positive_int(name: str, default: int) -> int:
             try:
