@@ -1269,7 +1269,7 @@ onBeforeUnmount(() => {
 
       <section v-else-if="activeView === 'publish'" class="publish-layout">
         <form class="editor-card" novalidate @submit.prevent="submitPublish">
-          <div class="section-heading"><span>01</span><div><h2>选择平台、内容与店铺</h2></div></div>
+          <div class="section-heading"><span>01</span><div><h2>选择平台、发布类型与店铺</h2></div></div>
           <p class="choice-label">选择平台</p>
           <div class="platform-choice">
             <label :class="{ selected: form.platform === 'tmall' }"><input v-model="form.platform" type="radio" value="tmall" /><span>天猫光合</span></label>
