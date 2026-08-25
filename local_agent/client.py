@@ -161,7 +161,14 @@ class AgentApiClient:
             with self.opener.open(request, timeout=120) as response, temporary.open(
                 "wb"
             ) as output:
-                last_progress = time.monotonic()
+                total_size = expected_size
+                if total_size is None:
+                    raw_length = response.headers.get("Content-Length")
+                    try:
+                        total_size = int(raw_length) if raw_length else None
+                    except (TypeError, ValueError):
+                        total_size = None
+                last_progress = 0.0
                 downloaded = 0
                 while chunk := response.read(1024 * 1024):
                     output.write(chunk)
@@ -171,13 +178,19 @@ class AgentApiClient:
                         raise AgentApiError(
                             "更新安装包大小与服务器发布信息不一致",
                         )
-                    if progress is not None and time.monotonic() - last_progress >= 10:
-                        progress(downloaded)
-                        last_progress = time.monotonic()
+                    if progress is not None:
+                        now = time.monotonic()
+                        if now - last_progress >= 0.25 or (
+                            total_size is not None and downloaded >= total_size
+                        ):
+                            progress(downloaded, total_size)
+                            last_progress = now
             if expected_size is not None and downloaded != expected_size:
                 raise AgentApiError("更新安装包下载不完整")
             if expected_sha256 is not None and digest.hexdigest() != expected_sha256:
                 raise AgentApiError("更新安装包校验失败，已取消安装")
+            if progress is not None:
+                progress(downloaded, total_size)
             temporary.replace(destination)
             try:
                 destination.chmod(0o600)

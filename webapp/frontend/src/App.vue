@@ -476,7 +476,7 @@ const agentStatusDescription = computed(() => {
   if (agentStatus.unavailable) return '无法读取本地执行助手状态，请刷新后重试。'
   if (!agentStatus.online) return '未检测到已配对的本地执行助手；登录和发布任务无法执行。'
   if (agentUpdateAvailable.value) {
-    return `Windows 助手有新版本 v${agentStatus.latestVersion}（当前 v${agentStatus.agentVersion || '未知'}）：在助手托盘图标右键菜单中选择“安装新版本”即可自动更新。`
+    return `Windows 助手有新版本 v${agentStatus.latestVersion}（当前 v${agentStatus.agentVersion || '未知'}）：点击“Windows 助手”打开窗口后可查看进度并一键更新。`
   }
   return agentStatus.system || '本地执行助手已连接，可执行登录和发布任务。'
 })

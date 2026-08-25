@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import queue
+import socket
 import sys
 import threading
 import time
@@ -20,6 +22,9 @@ from utils.log import logger
 
 
 _WINDOWS_MUTEX = None
+_WAKE_HOST = "127.0.0.1"
+_WAKE_PORT = 48766
+_WAKE_TOKEN = "show"
 
 UPDATE_CHECK_INTERVAL_SECONDS = 6 * 60 * 60
 UPDATE_CHECK_DELAY_SECONDS = 90
@@ -40,6 +45,25 @@ def _show_fatal_error(message: str) -> None:
         root.destroy()
     except Exception:
         print(message, file=sys.stderr)
+        return
+
+
+def _show_update_failure(message: str) -> None:
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+    except Exception:
+        print(message, file=sys.stderr)
+        return
+
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showwarning("MPAU 本地执行助手更新失败", message)
+        root.destroy()
+    except Exception:
+        print(message, file=sys.stderr)
+        return
 
 
 def _log_and_show_unhandled_exception(exc_type, exc, tb) -> None:
@@ -66,7 +90,65 @@ def _acquire_single_instance() -> bool:
     _WINDOWS_MUTEX = ctypes.windll.kernel32.CreateMutexW(
         None, False, "Local\\MPAU-Agent-Desktop"
     )
-    return bool(_WINDOWS_MUTEX and ctypes.windll.kernel32.GetLastError() != 183)
+    already_running = bool(ctypes.windll.kernel32.GetLastError() == 183)
+    if already_running:
+        _notify_existing_instance()
+        return False
+    return bool(_WINDOWS_MUTEX)
+
+
+def _notify_existing_instance() -> None:
+    """Ask the already-running helper to show its status window."""
+    if os.name != "nt":
+        return
+    try:
+        with socket.create_connection((_WAKE_HOST, _WAKE_PORT), timeout=0.4) as conn:
+            conn.sendall(_WAKE_TOKEN.encode("ascii"))
+    except OSError:
+        pass
+
+
+def _start_wake_listener(
+    application: LocalAgentApplication, on_wake
+) -> None:
+    """Listen on localhost so a second double-click can reveal the UI."""
+    if os.name != "nt":
+        return
+
+    def worker() -> None:
+        try:
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind((_WAKE_HOST, _WAKE_PORT))
+            server.listen(5)
+            server.settimeout(0.5)
+        except OSError as exc:
+            logger.warning("无法启动助手窗口唤醒服务：{}", exc)
+            return
+        with server:
+            while not application.stopping:
+                try:
+                    conn, _address = server.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                with conn:
+                    try:
+                        message = conn.recv(32).decode("ascii", errors="ignore")
+                    except OSError:
+                        continue
+                if message == _WAKE_TOKEN:
+                    try:
+                        on_wake()
+                    except Exception:
+                        logger.exception("显示助手状态窗口失败")
+
+    threading.Thread(
+        target=worker,
+        name="mpau-agent-window-wake",
+        daemon=True,
+    ).start()
 
 
 def _pairing_dialog(
@@ -201,6 +283,7 @@ class AgentUpdater:
         self.release: dict | None = None
         self.busy = False
         self.pending_installer: Path | None = None
+        self.progress: tuple[int, int | None] = (0, None)
 
     def has_running_jobs(self) -> bool:
         runner = self.application.runner
@@ -214,7 +297,7 @@ class AgentUpdater:
             return False, "当前已是最新版本"
         return True, f"发现新版本 v{release['version']}"
 
-    def download(self) -> Path:
+    def download(self, progress=None) -> Path:
         """Download and verify the installer for the known newer release."""
         if self.release is None or self.busy:
             raise RuntimeError("没有可用的更新")
@@ -223,23 +306,42 @@ class AgentUpdater:
         if self.has_running_jobs():
             raise RuntimeError("有发布任务正在执行，请等待任务完成后再更新")
         self.busy = True
+        self.progress = (0, self.release.get("size") or None)
         try:
             installer = updater.download_release(
-                self.client, self.release, self.data_root
+                self.client,
+                self.release,
+                self.data_root,
+                progress=progress,
             )
             updater.cleanup_stale_installers(self.data_root, keep=installer)
             return installer
         finally:
             self.busy = False
 
-    def prepare_install(self) -> tuple[bool, str]:
+    def prepare_install(self, progress=None) -> tuple[bool, str]:
         """Download the update and mark it ready for the next shutdown."""
+        if self.pending_installer is not None and self.pending_installer.is_file():
+            return True, "更新已就绪，助手即将重启并完成安装"
         try:
-            installer = self.download()
+            installer = self.download(progress=progress)
         except (AgentApiError, OSError, RuntimeError) as exc:
             return False, f"更新下载失败：{exc}"
         self.pending_installer = installer
         return True, "更新已就绪，助手即将重启并完成安装"
+
+
+def _format_bytes(value: int | None) -> str:
+    if value is None:
+        return ""
+    size = float(max(0, value))
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
 
 
 def _start_background_update_checks(
@@ -248,6 +350,14 @@ def _start_background_update_checks(
     """Poll the server for newer installers while the desktop helper runs."""
 
     def worker() -> None:
+        try:
+            found, message = updater_state.check()
+        except Exception:
+            found = False
+            message = ""
+        else:
+            if found and notify is not None:
+                notify(message)
         time.sleep(UPDATE_CHECK_DELAY_SECONDS)
         while not updater_state.application.stopping:
             try:
@@ -294,9 +404,22 @@ def _run_tray(
         return _run_status_window(application, connection, data_root)
 
     updater_state = AgentUpdater(application, data_root)
+    pending: list[Path | None] = []
+    status_window_lock = threading.Lock()
+    status_window_open = False
 
     def open_console(_icon=None, _item=None) -> None:
         open_url(connection.server_url)
+
+    def notify(message: str) -> None:
+        try:
+            icon.update_menu()
+        except Exception:
+            pass
+        try:
+            icon.notify(message, "MPAU 本地执行助手")
+        except Exception:
+            pass
 
     def quit_agent(icon, _item=None) -> None:
         application.stop()
@@ -311,11 +434,41 @@ def _run_tray(
         set_autostart(False)
         quit_agent(icon)
 
-    def notify(message: str) -> None:
-        try:
-            icon.notify(message, "MPAU 本地执行助手")
-        except Exception:
-            pass
+    def open_status_window(
+        _icon=None, _item=None, *, auto_install: bool = False
+    ) -> None:
+        nonlocal status_window_open
+        with status_window_lock:
+            if status_window_open:
+                notify("助手窗口已经打开")
+                return
+            status_window_open = True
+
+        def worker() -> None:
+            nonlocal status_window_open
+            try:
+                installer = _run_status_window(
+                    application,
+                    connection,
+                    data_root,
+                    updater_state=updater_state,
+                    stop_on_close=False,
+                    start_update_checks=False,
+                    auto_install_on_open=auto_install,
+                )
+                if installer is not None:
+                    pending.append(installer)
+                    application.stop()
+                    icon.stop()
+            finally:
+                with status_window_lock:
+                    status_window_open = False
+
+        threading.Thread(
+            target=worker,
+            name="mpau-status-window",
+            daemon=True,
+        ).start()
 
     def check_update(icon, _item=None) -> None:
         def worker() -> None:
@@ -324,38 +477,34 @@ def _run_tray(
             except Exception as exc:
                 notify(f"检查更新失败：{exc}")
                 return
+            try:
+                icon.update_menu()
+            except Exception:
+                pass
             notify(message if found else f"检查完成：{message}")
 
         threading.Thread(target=worker, name="mpau-update-check-once", daemon=True).start()
 
     def install_update(icon, _item=None) -> None:
         if updater_state.busy:
-            notify("正在下载更新，请稍候")
+            notify("正在下载更新，请打开助手窗口查看进度")
+            open_status_window(icon)
             return
         if updater_state.has_running_jobs():
             notify("有发布任务正在执行，请等待任务完成后再更新")
             return
         release = updater_state.release
         if release is None:
-            check_update(icon)
+            notify("正在检查更新，请稍候")
+            open_status_window(icon, auto_install=True)
             return
-        notify(f"正在下载新版本 v{release['version']}，下载完成后会自动重启安装")
-
-        def worker() -> None:
-            ready, message = updater_state.prepare_install()
-            if not ready:
-                notify(message)
-                return
-            notify("更新已下载完成，助手即将退出并安装新版本")
-            time.sleep(2)
-            application.stop()
-            icon.stop()
-
-        threading.Thread(target=worker, name="mpau-update-install", daemon=True).start()
+        notify(f"发现新版本 v{release['version']}，正在打开更新窗口")
+        open_status_window(icon, auto_install=True)
 
     user_label = connection.user.get("display_name") or connection.user.get("username")
     menu = pystray.Menu(
-        pystray.MenuItem("打开商家发布台", open_console, default=True),
+        pystray.MenuItem("打开助手窗口", open_status_window, default=True),
+        pystray.MenuItem("打开商家发布台", open_console),
         pystray.MenuItem(f"已连接：{user_label}", None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("检查更新", check_update),
@@ -363,10 +512,9 @@ def _run_tray(
             lambda item: (
                 f"安装新版本 v{updater_state.release['version']}"
                 if updater_state.release
-                else "安装新版本"
+                else "检查并安装新版本"
             ),
             install_update,
-            visible=lambda item: updater_state.release is not None,
         ),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("解除配对并退出", disconnect),
@@ -390,29 +538,39 @@ def _run_tray(
         name="mpau-agent-tray-monitor",
         daemon=True,
     ).start()
+    _start_wake_listener(application, open_status_window)
     updater.cleanup_stale_installers(data_root)
     _start_background_update_checks(updater_state, notify=notify)
     icon.run()
-    return updater_state.pending_installer
+    return pending[0] if pending else updater_state.pending_installer
 
 
 def _run_status_window(
     application: LocalAgentApplication,
     connection: StoredConnection,
     data_root: Path,
+    *,
+    updater_state: AgentUpdater | None = None,
+    stop_on_close: bool = True,
+    start_update_checks: bool = True,
+    auto_install_on_open: bool = False,
 ) -> Path | None:
     import tkinter as tk
-    from tkinter import messagebox
+    from tkinter import messagebox, ttk
 
-    updater_state = AgentUpdater(application, data_root)
+    updater_state = updater_state or AgentUpdater(application, data_root)
     pending: list[Path | None] = []
+    ui_queue: queue.Queue[tuple[str, object]] = queue.Queue()
+    closing = False
+    checking = False
+    progress_indeterminate = False
 
     root = tk.Tk()
     root.title("MPAU 本地执行助手")
     root.resizable(False, False)
     root.configure(bg=theme.CREAM)
     theme.apply_tk_scaling(root)
-    theme.center_window(root, 500, 640)
+    theme.center_window(root, 500, 690)
 
     user_label = (
         connection.user.get("display_name") or connection.user.get("username")
@@ -427,7 +585,6 @@ def _run_status_window(
     body = tk.Frame(root, bg=theme.CREAM)
     body.pack(fill="both", expand=True, padx=24)
 
-    # -- 连接状态卡片 --------------------------------------------------
     conn_card = theme.card(body)
     conn_card.pack(fill="x", pady=(20, 0))
     conn_inner = tk.Frame(conn_card, bg=theme.CARD)
@@ -490,7 +647,6 @@ def _run_status_window(
         lambda: open_url(connection.server_url),
     ).pack(fill="x", ipady=5)
 
-    # -- 软件更新卡片 --------------------------------------------------
     update_card = theme.card(body)
     update_card.pack(fill="x", pady=(14, 0))
     update_inner = tk.Frame(update_card, bg=theme.CARD)
@@ -507,65 +663,194 @@ def _run_status_window(
 
     update_hint = tk.StringVar(value="")
     update_banner = theme.update_banner(update_inner, update_hint)
+    update_banner_visible = False
     update_status = tk.StringVar(value="有新版本时会在这里提示，也可手动检查")
+    progress_label = tk.StringVar(value="")
+
+    progress_bar = ttk.Progressbar(
+        update_inner,
+        orient="horizontal",
+        mode="determinate",
+        maximum=100,
+    )
+    progress_text = tk.Label(
+        update_inner,
+        textvariable=progress_label,
+        bg=theme.CARD,
+        fg=theme.TEXT_600,
+        font=theme.font(9),
+        anchor="w",
+    )
 
     def show_banner(text: str) -> None:
+        nonlocal update_banner_visible
         update_hint.set(text)
-        update_banner.pack(fill="x", pady=(10, 0), before=update_status_label)
+        if not update_banner_visible:
+            update_banner.pack(fill="x", pady=(10, 0), before=update_status_label)
+            update_banner_visible = True
 
-    def check_updates() -> None:
+    def hide_banner() -> None:
+        nonlocal update_banner_visible
+        if update_banner_visible:
+            update_banner.pack_forget()
+            update_banner_visible = False
+
+    def set_progress_visible(visible: bool) -> None:
+        if visible and not progress_bar.winfo_manager():
+            progress_bar.pack(fill="x", pady=(12, 0), before=update_actions)
+            progress_text.pack(fill="x", pady=(6, 0), before=update_actions)
+        elif not visible and progress_bar.winfo_manager():
+            progress_bar.pack_forget()
+            progress_text.pack_forget()
+
+    def set_buttons_enabled(enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        check_button.configure(state=state)
+        install_button.configure(state=state)
+
+    def apply_progress(downloaded: int, total: int | None) -> None:
+        nonlocal progress_indeterminate
+        set_progress_visible(True)
+        if total and total > 0:
+            if progress_indeterminate:
+                progress_bar.stop()
+                progress_bar.configure(mode="determinate")
+                progress_indeterminate = False
+            percent = min(100, int(downloaded * 100 / total))
+            progress_bar.configure(value=percent)
+            progress_label.set(
+                f"下载进度 {percent}% · {_format_bytes(downloaded)} / {_format_bytes(total)}"
+            )
+            update_status.set(f"正在下载新版本安装包：{percent}%")
+        else:
+            if not progress_indeterminate:
+                progress_bar.configure(mode="indeterminate")
+                progress_bar.start(12)
+                progress_indeterminate = True
+            progress_label.set(f"已下载 {_format_bytes(downloaded)}")
+            update_status.set("正在下载新版本安装包…")
+
+    def enqueue(kind: str, payload: object = None) -> None:
+        ui_queue.put((kind, payload))
+
+    def drain_queue() -> None:
+        nonlocal checking, closing, progress_indeterminate
+        while True:
+            try:
+                kind, payload = ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "check-result":
+                checking = False
+                set_buttons_enabled(True)
+                found, message, auto_install = payload  # type: ignore[misc]
+                if found:
+                    show_banner(f"{message}，点击“安装新版本”自动更新")
+                    update_status.set("新版本可用，点击“安装新版本”开始下载")
+                    if auto_install:
+                        root.after(100, install_updates)
+                else:
+                    hide_banner()
+                    update_status.set(str(message))
+            elif kind == "progress":
+                downloaded, total = payload  # type: ignore[misc]
+                apply_progress(int(downloaded), total if isinstance(total, int) else None)
+            elif kind == "install-result":
+                set_buttons_enabled(True)
+                ready, message = payload  # type: ignore[misc]
+                if not ready:
+                    if progress_indeterminate:
+                        progress_bar.stop()
+                        progress_bar.configure(mode="determinate")
+                        progress_indeterminate = False
+                    update_status.set(str(message))
+                    continue
+                progress_bar.configure(mode="determinate", value=100)
+                progress_label.set("下载进度 100% · 安装包已校验")
+                update_status.set("更新已下载完成，准备重启安装")
+                confirm_and_restart()
+            elif kind == "show-window":
+                try:
+                    root.deiconify()
+                    root.lift()
+                    root.focus_force()
+                    root.attributes("-topmost", True)
+                    root.after(800, lambda: root.attributes("-topmost", False))
+                except Exception:
+                    pass
+            elif kind == "application-stopped":
+                closing = True
+                root.destroy()
+                return
+        if not closing:
+            root.after(100, drain_queue)
+
+    def check_updates(*, auto_install: bool = False) -> None:
+        nonlocal checking
+        if checking or updater_state.busy:
+            return
+        checking = True
+        set_buttons_enabled(False)
+        update_status.set("正在检查更新…")
+
         def worker() -> None:
             try:
                 found, message = updater_state.check()
             except Exception as exc:
                 found, message = False, f"检查更新失败：{exc}"
-            root.after(0, lambda: apply_check_result(found, message))
+            enqueue("check-result", (found, message, auto_install))
 
         threading.Thread(target=worker, name="mpau-update-check", daemon=True).start()
 
-    def apply_check_result(found: bool, message: str) -> None:
-        if found:
-            show_banner(f"{message}，点击“安装新版本”自动更新")
-        else:
-            update_status.set(message)
+    def confirm_and_restart() -> None:
+        installer = updater_state.pending_installer
+        if installer is None:
+            update_status.set("安装包状态异常，请重新检查更新")
+            return
+        if not messagebox.askyesno(
+            "更新已就绪", "新版本已下载完成。是否立即重启助手并安装？"
+        ):
+            update_status.set("已下载，可稍后点击“安装新版本”完成安装")
+            return
+        pending.append(installer)
+        close(for_install=True)
 
     def install_updates() -> None:
         if updater_state.busy:
+            update_status.set("正在下载更新，请稍候…")
+            return
+        if updater_state.has_running_jobs():
+            update_status.set("有发布任务正在执行，请等待任务完成后再更新")
+            return
+        if updater_state.pending_installer is not None:
+            confirm_and_restart()
             return
         if updater_state.release is None:
-            found, message = updater_state.check()
-            if not found:
-                update_status.set(message)
-                return
-            show_banner(f"{message}，即将开始下载")
+            check_updates(auto_install=True)
+            return
+        set_buttons_enabled(False)
+        show_banner(f"发现新版本 v{updater_state.release['version']}，正在下载")
+        set_progress_visible(True)
+        progress_bar.configure(mode="determinate", value=0)
+        progress_label.set("准备下载…")
+        update_status.set("正在下载新版本安装包：0%")
 
-        def confirm_and_restart() -> None:
-            if not messagebox.askyesno(
-                "更新已就绪", "新版本已下载完成。是否立即重启助手并安装？"
-            ):
-                update_status.set("已下载，可稍后点击“安装新版本”完成安装")
-                return
-            pending.append(updater_state.pending_installer)
-            close()
+        def progress(downloaded: int, total: int | None = None) -> None:
+            updater_state.progress = (downloaded, total)
+            enqueue("progress", (downloaded, total))
 
         def worker() -> None:
-            ready, message = updater_state.prepare_install()
-            if not ready:
-                root.after(0, lambda: update_status.set(message))
-                return
-            root.after(0, confirm_and_restart)
+            ready, message = updater_state.prepare_install(progress=progress)
+            enqueue("install-result", (ready, message))
 
-        update_status.set("正在下载新版本…")
         threading.Thread(target=worker, name="mpau-update-install", daemon=True).start()
 
     update_actions = tk.Frame(update_inner, bg=theme.CARD)
     update_actions.pack(fill="x", pady=(12, 0))
-    theme.secondary_button(update_actions, "检查更新", check_updates).pack(
-        side="left"
-    )
-    theme.primary_button(update_actions, "安装新版本", install_updates).pack(
-        side="left", padx=(10, 0)
-    )
+    check_button = theme.secondary_button(update_actions, "检查更新", lambda: check_updates())
+    check_button.pack(side="left")
+    install_button = theme.primary_button(update_actions, "安装新版本", install_updates)
+    install_button.pack(side="left", padx=(10, 0))
 
     update_status_label = tk.Label(
         update_inner,
@@ -579,31 +864,52 @@ def _run_status_window(
     )
     update_status_label.pack(fill="x", pady=(12, 0))
 
+    close_note = (
+        "关闭窗口不会退出助手；需要退出请右键托盘图标选择“退出助手”"
+        if not stop_on_close
+        else "关闭窗口将退出本地执行助手"
+    )
     tk.Label(
         body,
-        text="关闭窗口将退出本地执行助手",
+        text=close_note,
         bg=theme.CREAM,
         fg=theme.TEXT_400,
         font=theme.font(9),
     ).pack(pady=(14, 20))
 
-    def close() -> None:
-        application.stop()
+    def close(*, for_install: bool = False) -> None:
+        nonlocal closing
+        closing = True
+        if stop_on_close or for_install:
+            application.stop()
         root.destroy()
 
     def watch_application() -> None:
         if application.stopping:
-            root.destroy()
+            enqueue("application-stopped")
             return
         root.after(500, watch_application)
 
     root.protocol("WM_DELETE_WINDOW", close)
+    root.after(100, drain_queue)
     root.after(500, watch_application)
+    if stop_on_close:
+        _start_wake_listener(application, lambda: enqueue("show-window"))
     updater.cleanup_stale_installers(data_root)
-    _start_background_update_checks(updater_state)
+    if start_update_checks:
+        _start_background_update_checks(updater_state)
+    if auto_install_on_open:
+        root.after(250, install_updates)
+    else:
+        check_updates()
+    try:
+        root.lift()
+        root.attributes("-topmost", True)
+        root.after(1000, lambda: root.attributes("-topmost", False))
+    except Exception:
+        pass
     root.mainloop()
     return pending[0] if pending else None
-
 
 def _connect_when_available(application: LocalAgentApplication) -> bool:
     """Keep an autostarted helper alive while the local network is unavailable."""
@@ -636,6 +942,13 @@ def run() -> None:
     if not _acquire_single_instance():
         return
     store = AgentConnectionStore(args.data_dir)
+    update_failure = updater.consume_update_failure(args.data_dir)
+    if update_failure:
+        _show_update_failure(
+            f"{update_failure}\n\n"
+            f"请手动下载安装最新版，或查看更新日志："
+            f"{args.data_dir / updater.UPDATE_DIRECTORY_NAME / 'update.log'}"
+        )
     try:
         connection = store.load()
     except ValueError:
@@ -663,7 +976,14 @@ def run() -> None:
             daemon=True,
         )
         worker.start()
-        pending_installer = _run_tray(application, connection, store, args.data_dir)
+        if args.background:
+            pending_installer = _run_tray(
+                application, connection, store, args.data_dir
+            )
+        else:
+            pending_installer = _run_status_window(
+                application, connection, args.data_dir
+            )
         application.stop()
         worker.join(timeout=15)
         if pending_installer is not None:

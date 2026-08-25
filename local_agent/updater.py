@@ -19,6 +19,7 @@ from typing import Any, Callable
 from local_agent.client import AgentApiClient, AgentApiError
 
 UPDATE_DIRECTORY_NAME = "update"
+UPDATE_FAILURE_MARKER = "update.failed.txt"
 PROCESS_NAME = "MPAU-Agent.exe"
 _VERSION_PATTERN = re.compile(r"^\d+(\.\d+)*$")
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
@@ -104,7 +105,7 @@ def download_release(
     release: dict[str, Any],
     data_root: Path,
     *,
-    progress: Callable[[int], None] | None = None,
+    progress: Callable[[int, int | None], None] | None = None,
 ) -> Path:
     """Download the installer for ``release`` and verify its integrity."""
     directory = data_root / UPDATE_DIRECTORY_NAME
@@ -134,6 +135,22 @@ def cleanup_stale_installers(data_root: Path, keep: Path | None = None) -> None:
             pass
 
 
+def consume_update_failure(data_root: Path) -> str | None:
+    """Return and remove the most recent failed-update marker, if any."""
+    marker = data_root / UPDATE_DIRECTORY_NAME / UPDATE_FAILURE_MARKER
+    try:
+        message = marker.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    try:
+        marker.unlink()
+    except OSError:
+        pass
+    return message or None
+
+
 def _update_script() -> str:
     """Return the external updater script used after the agent exits.
 
@@ -150,9 +167,19 @@ def _update_script() -> str:
 
 $ErrorActionPreference = "Stop"
 $LogPath = Join-Path $PSScriptRoot "update.log"
+$FailurePath = Join-Path $PSScriptRoot "update.failed.txt"
 
 function Write-UpdateLog([string]$Message) {
     Add-Content -LiteralPath $LogPath -Value ("{0:u} {1}" -f (Get-Date), $Message)
+}
+
+function Write-UpdateFailure([string]$Message) {
+    try {
+        Set-Content -LiteralPath $FailurePath -Value $Message -Encoding UTF8
+    }
+    catch {
+        # Best-effort only; the log still records the failure details.
+    }
 }
 
 try {
@@ -169,9 +196,17 @@ try {
         throw "The downloaded installer is missing."
     }
     Write-UpdateLog "Installing update."
-    & $InstallerPath "/VERYSILENT" "/NORESTART" ('/DIR="{0}"' -f $InstallDir)
-    if ($LASTEXITCODE -ne 0) {
-        throw "Installer exited with code $LASTEXITCODE."
+    $arguments = @(
+        "/VERYSILENT"
+        "/NORESTART"
+        "/SUPPRESSMSGBOXES"
+        "/SP-"
+        ('/LOG="{0}"' -f (Join-Path $PSScriptRoot "installer.log"))
+        ('/DIR="{0}"' -f $InstallDir)
+    )
+    $installer = Start-Process -FilePath $InstallerPath -ArgumentList $arguments -Wait -PassThru
+    if ($installer.ExitCode -ne 0) {
+        throw "Installer exited with code $($installer.ExitCode)."
     }
     if (-not (Test-Path -LiteralPath $AgentExe -PathType Leaf)) {
         throw "Updated agent executable was not found."
@@ -181,7 +216,9 @@ try {
     Write-UpdateLog "Update completed."
 }
 catch {
+    $failure = "更新失败：$($_.Exception.Message)"
     Write-UpdateLog ("Update failed: " + $_.Exception.Message)
+    Write-UpdateFailure $failure
     exit 1
 }
 '''

@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from local_agent.client import AgentApiError
+from local_agent.client import AgentApiClient
 from local_agent.credentials import AgentConnectionStore
 from local_agent.desktop import _connect_when_available
 from local_agent import autostart
@@ -617,8 +618,49 @@ class UpdaterTests(unittest.TestCase):
         script = _update_script()
         self.assertIn("Get-Process -Id $ParentPid", script)
         self.assertIn('"/VERYSILENT"', script)
+        self.assertIn("Start-Process -FilePath $InstallerPath", script)
+        self.assertIn("-Wait -PassThru", script)
+        self.assertIn("update.failed.txt", script)
         self.assertIn("Start-Process -FilePath $AgentExe", script)
-        self.assertNotIn("MPAU-Agent.exe", script)
+
+    def test_download_installer_reports_total_size_to_progress_callback(self) -> None:
+        class FakeResponse:
+            headers = {"Content-Length": "6"}
+
+            def __init__(self) -> None:
+                self._chunks = [b"abc", b"def", b""]
+
+            def read(self, _size):
+                return self._chunks.pop(0)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        class FakeOpener:
+            def __init__(self) -> None:
+                self.request = None
+
+            def open(self, request, timeout=None):
+                self.request = request
+                return FakeResponse()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = AgentApiClient("https://mpau.example.com", "token")
+            client.opener = FakeOpener()
+            destination = Path(temp_dir) / "agent.exe"
+            progress_calls: list[tuple[int, int | None]] = []
+
+            client.download_installer(
+                destination,
+                expected_sha256="bef57ec7f53a6d40beb640a780a639c83bc29ac8a9816f1fc6c5c6dcd93c4721",
+                progress=lambda downloaded, total: progress_calls.append((downloaded, total)),
+            )
+
+            self.assertEqual(progress_calls[-1], (6, 6))
+            self.assertEqual(destination.read_bytes(), b"abcdef")
 
     def test_launch_update_starts_powershell_outside_the_agent_executable(self) -> None:
         from local_agent import updater
@@ -654,6 +696,20 @@ class UpdaterTests(unittest.TestCase):
             self.assertFalse(old.exists())
             self.assertFalse(extra.exists())
             self.assertTrue(keep.exists())
+
+    def test_update_failure_marker_is_consumed_and_cleared(self) -> None:
+        from local_agent import updater
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            marker = Path(temp_dir) / updater.UPDATE_DIRECTORY_NAME
+            marker.mkdir()
+            failure = marker / updater.UPDATE_FAILURE_MARKER
+            failure.write_text("更新失败：安装程序退出", encoding="utf-8")
+
+            message = updater.consume_update_failure(Path(temp_dir))
+
+            self.assertEqual(message, "更新失败：安装程序退出")
+            self.assertFalse(failure.exists())
 
 
 class InstallerManifestTests(unittest.TestCase):

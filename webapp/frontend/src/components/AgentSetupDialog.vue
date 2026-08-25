@@ -84,7 +84,7 @@ async function copyCode() {
       <a class="agent-download" :href="apiUrl(installerUrl)">下载 {{ installerName }}</a>
       <p v-if="updateAvailable" class="agent-update-hint" role="status">
         检测到 Windows 助手有新版本 <strong>v{{ latestVersion }}</strong>（当前 v{{ agentVersion }}）。
-        无需重新下载安装：右键点击任务栏托盘里的助手图标，选择“安装新版本 v{{ latestVersion }}”，助手会自动更新并重启。
+        无需重新下载安装：直接双击“MPAU 本地执行助手”打开窗口，里面有更新进度和“安装新版本”按钮，助手会自动更新并重启。
       </p>
       <p v-else-if="online && agentVersion" class="agent-update-hint current">
         Windows 助手在线，版本 v{{ agentVersion }}，已是最新。
