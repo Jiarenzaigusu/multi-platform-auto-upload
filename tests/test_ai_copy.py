@@ -51,6 +51,7 @@ from webapp.ai_copy.product_lookup.public_http import (
     create_trusted_ssl_context,
     validate_public_product_url,
 )
+from webapp.ai_copy.product_lookup.tmall_client import DirectoryTmallStorageStateProvider
 from webapp.ai_copy.product_lookup.tmall_reader import (
     TmallProductReader,
     extract_tmall_product_ids,
@@ -923,6 +924,36 @@ class ProductSearchToolTests(unittest.TestCase):
                 "https://example.com/item.htm?id=1006533002222"
             )
         )
+
+    def test_tmall_storage_provider_finds_account_cookie_files(self):
+        import tempfile
+        from pathlib import Path
+
+        state = {
+            "cookies": [
+                {
+                    "name": "_m_h5_tk",
+                    "value": "token",
+                    "domain": ".tmall.com",
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cookie_dir = Path(temp_dir)
+            current = cookie_dir / "shop1.json"
+            legacy = cookie_dir / "tmall_shop2.json"
+            ignored = cookie_dir / "jd_shop.json"
+            current.write_text(json.dumps(state), encoding="utf-8")
+            legacy.write_text(json.dumps(state), encoding="utf-8")
+            ignored.write_text(json.dumps({"cookies": []}), encoding="utf-8")
+
+            candidates = DirectoryTmallStorageStateProvider(
+                cookie_dir, max_candidates=5
+            ).candidates()
+
+        self.assertIn(current.resolve(), candidates)
+        self.assertIn(legacy.resolve(), candidates)
+        self.assertNotIn(ignored.resolve(), candidates)
 
 
 class AiCopyRouterTests(unittest.TestCase):

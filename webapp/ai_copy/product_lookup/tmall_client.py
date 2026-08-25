@@ -1,8 +1,8 @@
 """webapp.ai_copy.product_lookup.tmall_client 模块：天猫商品页面抓取客户端。
 
 通过应用的可复用认证浏览器池（Patchright async）加载已登录的天猫账号会话来读取
-需要登录的商品页。DirectoryTmallStorageStateProvider 从 cookies 目录按修改时间
-倒序查找 tmall_*.json 登录态文件，逐个尝试直到成功。
+需要登录的商品页。DirectoryTmallStorageStateProvider 从 cookies/tmall 目录按修改时间
+倒序查找账号登录态文件，逐个尝试直到成功。
 
 验证逻辑：页面未跳登录、含 itemId、含 loaderData/skuCore 才算有效商品页。
 """
@@ -47,8 +47,9 @@ class DirectoryTmallStorageStateProvider:
 
     def candidates(self) -> Sequence[Path]:
         try:
+            legacy_paths = tuple(self._cookie_dir.glob("tmall_*.json"))
             paths = sorted(
-                self._cookie_dir.glob("tmall_*.json"),
+                {*self._cookie_dir.glob("*.json"), *legacy_paths},
                 key=lambda path: path.stat().st_mtime,
                 reverse=True,
             )
