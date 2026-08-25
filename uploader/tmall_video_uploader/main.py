@@ -504,7 +504,7 @@ async def _cookie_auth_in_context(context: BrowserContext) -> bool:
 
         # 初始 URL 未定型时，轮询最多 5 次（共 10 秒）等待 JS 跳转稳定
         for _ in range(5):
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
             current_url = page.url
             if _is_login_page_url(current_url):
                 return False
@@ -859,7 +859,7 @@ class TmallVideo(TmallBaseUploader):
                 return
             if i % 5 == 0:
                 tmall_logger.info(_msg("🏃", "小人正在等待视频上传完成"))
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
         raise RuntimeError("等待视频上传完成超时")
 
     async def _set_custom_cover(self, frame, page: Page) -> None:
@@ -940,7 +940,7 @@ class TmallVideo(TmallBaseUploader):
         await cover_dialog.get_by_text("本地上传", exact=False).last.click()
 
         # 图库嵌在独立 iframe 中，其内部控件及素材卡片均通过 frame DOM 识别。
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
 
         picker_frame = None
         for _ in range(20):
@@ -967,12 +967,12 @@ class TmallVideo(TmallBaseUploader):
             await _upload_picker_file(page, picker_frame, staged_cover_path)
 
             # 文件上传成功后先进入"上传结果"，点击"完成"才会回到图片库。
-            await asyncio.sleep(10)
+            await asyncio.sleep(4.5)
             await _click_visible_frame_button(
                 (picker_frame,), ("完成",), description="图片上传完成"
             )
             expected_cover_stem = staged_cover_path.stem.casefold()
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
 
         # 与图文上传相同，图片库会保留历史素材且可能重挂载卡片。封面暂存文件名
         # 含任务唯一标识，必须按图库展示的完整文件名精确找到唯一 label 卡片，不能
@@ -1028,12 +1028,12 @@ class TmallVideo(TmallBaseUploader):
         await _click_visible_frame_button(
             (picker_frame,), ("确定",), description="图片库确认"
         )
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
 
         # “原始”比例是视频比例而不是图片比例。比例卡片属于不可访问的渲染层，
         # 只能从实时内存页面图像动态识别其位置，绝不能回退为固定坐标。
         await _select_three_to_four_cover_ratio_and_continue(page)
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
 
         # 进入可选的花字确认层；不选模板也要确认，封面才会写回主表单。
         await _click_visible_frame_button(
@@ -1041,7 +1041,7 @@ class TmallVideo(TmallBaseUploader):
             ("下一步", "完成", "确定"),
             description="花字确认",
         )
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
         await cover_dialog.wait_for(state="hidden", timeout=10000)
         tmall_logger.success(_msg("🖼️", f"自定义封面已设置: {cover_path.name}"))
 
