@@ -256,16 +256,38 @@ def secondary_button(parent, text: str, command, **pack_kwargs):
     return button
 
 
-def field_label(parent, text: str, **pack_kwargs):
+def field_label(
+    parent,
+    text: str,
+    *,
+    anchor="w",
+    justify="left",
+    **pack_kwargs,
+):
     import tkinter as tk
 
-    label = tk.Label(parent, text=text, bg=CARD, fg=TEXT_600, font=font(9))
+    label = tk.Label(
+        parent,
+        text=text,
+        bg=CARD,
+        fg=TEXT_600,
+        font=font(9),
+        anchor=anchor,
+        justify=justify,
+    )
     if pack_kwargs:
         label.pack(**pack_kwargs)
     return label
 
 
-def styled_entry(parent, *, entry_font=None, show=None, **pack_kwargs):
+def styled_entry(
+    parent,
+    *,
+    entry_font=None,
+    show=None,
+    justify="left",
+    **pack_kwargs,
+):
     """Flat input with a hairline border that turns green on focus."""
     import tkinter as tk
 
@@ -273,6 +295,7 @@ def styled_entry(parent, *, entry_font=None, show=None, **pack_kwargs):
         parent,
         font=entry_font or font(10),
         show=show,
+        justify=justify,
         relief="flat",
         bd=0,
         bg=CARD,

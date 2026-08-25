@@ -31,6 +31,7 @@ from utils.files import validate_media_filename
 from webapp.api.batch import BatchValidationError
 from webapp.api.batch_jd_video import parse_jd_video_batch_workbook
 from webapp.api.batch_tmall_video import parse_tmall_video_batch_workbook
+from webapp.api.agent_tasks import AgentTaskManager
 from webapp.api.main import WebSettings
 from webapp.api.batch import resolve_local_path
 from webapp.api.main import create_app as _create_app
@@ -1759,6 +1760,48 @@ class ApiEndpointTests(unittest.TestCase):
 
                 self.assertEqual(context.exception.status_code, 500)
                 self.assertIsNotNone(store.get_job(job["id"]))
+            finally:
+                manager.shutdown()
+
+    def test_batch_delete_works_with_local_agent_manager(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            paths = AppDataPaths.create(root / "data").for_user(TEST_USER_ID)
+            store = JobStore(paths.runtime)
+            jobs = [
+                store.create_job(
+                    kind="check",
+                    platform="tmall",
+                    account=f"shop{index}",
+                    payload={},
+                )
+                for index in range(2)
+            ]
+            for job in jobs:
+                store.update_job(job["id"], status="succeeded")
+            manager = AgentTaskManager(store, user_id=TEST_USER_ID, paths=paths)
+            app = create_app(
+                WebSettings(data_dir=root / "app-data", frontend_dist_dir=root / "missing"),
+                manager,
+            )
+            endpoint = next(
+                route.endpoint
+                for route in app.routes
+                if route.path == "/api/jobs/batch-delete"
+            )
+            try:
+                for job in jobs:
+                    manager.job_log_path(job["id"]).write_text("local log", encoding="utf-8")
+
+                body = endpoint(
+                    {"job_ids": [job["id"] for job in jobs]},
+                    workspace=app.state.test_workspace,
+                )
+
+                self.assertEqual(body["deleted"], [job["id"] for job in jobs])
+                self.assertEqual(body["skipped"], [])
+                self.assertTrue(all(store.get_job(job["id"]) is None for job in jobs))
+                self.assertTrue(all(not manager.job_log_path(job["id"]).exists() for job in jobs))
             finally:
                 manager.shutdown()
 

@@ -137,10 +137,20 @@ class LocalAgentApplication:
         if self.runner is None:
             self.runner = AgentJobRunner(user["id"], paths)
         if self.local_upload_server is None:
-            self.local_upload_server = LocalUploadServer(
+            local_upload_server = LocalUploadServer(
                 self.client, self.runner.paths.runtime / "assets"
             )
-            self.local_upload_server.start()
+            try:
+                local_upload_server.start()
+            except OSError as exc:
+                if self.runner is not None:
+                    self.runner.shutdown()
+                    self.runner = None
+                self.local_upload_server = None
+                raise RuntimeError(
+                    "本机上传服务启动失败，端口 48765 可能已被占用"
+                ) from exc
+            self.local_upload_server = local_upload_server
         self.poll_seconds = max(1.0, float(response.get("poll_seconds", self.poll_seconds)))
         self.claim_wait_seconds = max(
             0.0, min(30.0, float(response.get("claim_wait_seconds", 0)))

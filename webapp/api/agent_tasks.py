@@ -706,6 +706,18 @@ class AgentTaskManager:
         if path:
             path.unlink(missing_ok=True)
 
+    def delete_jobs_artifacts(self, job_ids: list[str]) -> None:
+        """Delete per-job logs for a batch task deletion request."""
+        first_error: OSError | None = None
+        for job_id in job_ids:
+            try:
+                self.delete_job_artifacts(job_id)
+            except OSError as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+
     def close_account_session(self, platform: str, account: str) -> None:
         del platform, account
 

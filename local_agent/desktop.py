@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import threading
 import time
+import traceback
 
 from local_agent import __version__
 from local_agent.autostart import open_url, set_autostart
@@ -15,12 +16,45 @@ from local_agent.main import LocalAgentApplication, _server_url
 from local_agent.paths import default_data_root
 from local_agent import theme
 from local_agent import updater
+from utils.log import logger
 
 
 _WINDOWS_MUTEX = None
 
 UPDATE_CHECK_INTERVAL_SECONDS = 6 * 60 * 60
 UPDATE_CHECK_DELAY_SECONDS = 90
+
+
+def _show_fatal_error(message: str) -> None:
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+    except Exception:
+        print(message, file=sys.stderr)
+        return
+
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("MPAU 本地执行助手启动失败", message)
+        root.destroy()
+    except Exception:
+        print(message, file=sys.stderr)
+
+
+def _log_and_show_unhandled_exception(exc_type, exc, tb) -> None:
+    if issubclass(exc_type, KeyboardInterrupt):
+        return sys.__excepthook__(exc_type, exc, tb)
+    logger.error(
+        "桌面助手发生未处理异常\n{}",
+        "".join(traceback.format_exception(exc_type, exc, tb)),
+    )
+    _show_fatal_error(
+        f"MPAU 本地执行助手启动或运行时发生异常：{exc}\n"
+        f"详细日志请查看本机日志文件。"
+    )
+
+
 
 
 def _acquire_single_instance() -> bool:
@@ -56,7 +90,7 @@ def _pairing_dialog(
         root,
         "MPAU 本地执行助手",
         "连接商家发布台，替你在本机自动完成商品发布",
-    )
+    ).pack(fill="x")
 
     body = tk.Frame(root, bg=theme.CREAM)
     body.pack(fill="both", expand=True, padx=28)
@@ -66,7 +100,7 @@ def _pairing_dialog(
     form_inner = tk.Frame(form, bg=theme.CARD)
     form_inner.pack(fill="x", padx=22, pady=(20, 16))
 
-    theme.field_label(form_inner, "发布台地址", anchor="w").pack(fill="x")
+    theme.field_label(form_inner, "发布台地址", anchor="w", fill="x")
     server_entry = theme.styled_entry(
         form_inner,
         entry_font=theme.mono_font(10),
@@ -75,7 +109,7 @@ def _pairing_dialog(
         pady=(6, 16),
     )
     server_entry.insert(0, initial_server or "https://")
-    theme.field_label(form_inner, "一次性配对码", anchor="w").pack(fill="x")
+    theme.field_label(form_inner, "一次性配对码", anchor="w", fill="x")
     code_entry = theme.styled_entry(
         form_inner,
         entry_font=(theme.FONT_FAMILY, 15, "bold"),
@@ -388,7 +422,7 @@ def _run_status_window(
         root,
         "MPAU 本地执行助手",
         "本地任务执行组件正在后台运行",
-    )
+    ).pack(fill="x")
 
     body = tk.Frame(root, bg=theme.CREAM)
     body.pack(fill="both", expand=True, padx=24)
@@ -593,6 +627,10 @@ def build_parser() -> argparse.ArgumentParser:
 def run() -> None:
     if os.name != "nt":
         raise SystemExit("MPAU 本地执行助手仅支持 Windows")
+    sys.excepthook = _log_and_show_unhandled_exception
+    threading.excepthook = lambda args: _log_and_show_unhandled_exception(
+        args.exc_type, args.exc_value, args.exc_traceback
+    )
     theme.enable_dpi_awareness()
     args = build_parser().parse_args()
     if not _acquire_single_instance():

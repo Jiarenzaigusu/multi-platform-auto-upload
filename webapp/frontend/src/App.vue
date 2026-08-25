@@ -700,6 +700,29 @@ function syncJobSelection() {
   selectedJobIds.value = selectedJobIds.value.filter((id) => deletableIds.has(id))
 }
 
+function removeDeletedJobsFromView(deletedIds) {
+  const deletedIdSet = new Set(deletedIds)
+  if (!deletedIdSet.size) return 0
+  const removedJobs = jobs.value.filter((job) => deletedIdSet.has(job.id))
+  if (!removedJobs.length) return 0
+  jobs.value = jobs.value.filter((job) => !deletedIdSet.has(job.id))
+  const statusCounts = { ...(jobSummary.value.statuses || {}) }
+  for (const job of removedJobs) {
+    statusCounts[job.status] = Math.max(0, (statusCounts[job.status] || 0) - 1)
+  }
+  jobSummary.value = {
+    ...jobSummary.value,
+    total: Math.max(0, (jobSummary.value.total || 0) - removedJobs.length),
+    statuses: statusCounts,
+  }
+  if (selectedJob.value && deletedIdSet.has(selectedJob.value.id)) {
+    selectedJob.value = null
+    jobLogs.value = []
+  }
+  syncJobSelection()
+  return removedJobs.length
+}
+
 async function batchDeleteJobs() {
   const targets = jobs.value.filter((job) => selectedJobIds.value.includes(job.id))
   if (!targets.length || batchDeleting.value) return
@@ -712,10 +735,7 @@ async function batchDeleteJobs() {
       body: JSON.stringify({ job_ids: targets.map((job) => job.id) }),
     })
     const deletedIds = new Set(result.deleted || [])
-    if (selectedJob.value && deletedIds.has(selectedJob.value.id)) {
-      selectedJob.value = null
-      jobLogs.value = []
-    }
+    removeDeletedJobsFromView(deletedIds)
     selectedJobIds.value = []
     const skipped = result.skipped || []
     if (deletedIds.size && skipped.length) showNotice(`已删除 ${deletedIds.size} 条；跳过 ${skipped.length} 条（仅已完成或失败的任务可删除）`, 'success')
@@ -723,6 +743,19 @@ async function batchDeleteJobs() {
     else if (skipped.length) showNotice('所选任务均不能删除（仅已完成或失败的任务可删除）', 'error')
     await refreshDashboard()
   } catch (error) {
+    try {
+      await refreshDashboard()
+      const remainingIds = new Set(jobs.value.map((job) => job.id))
+      const deletedAfterRetry = targets.filter((job) => !remainingIds.has(job.id))
+      if (deletedAfterRetry.length) {
+        removeDeletedJobsFromView(deletedAfterRetry.map((job) => job.id))
+        selectedJobIds.value = selectedJobIds.value.filter((id) => remainingIds.has(id))
+        showNotice(`已删除 ${deletedAfterRetry.length} 条任务记录`, 'success')
+        return
+      }
+    } catch {
+      // Keep the original mutation error if the recovery refresh also fails.
+    }
     showNotice(error.message, 'error')
   } finally {
     batchDeleting.value = false

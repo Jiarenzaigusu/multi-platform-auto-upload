@@ -57,7 +57,11 @@ $SpecFile = Join-Path $ProjectRoot "deploy\windows\mpau-agent.spec"
 Set-Location $ProjectRoot
 if (-not (Test-Path $BuildPython)) {
     Write-Host "Creating build virtual environment..." -ForegroundColor Yellow
-    & $Python -3.12 -m venv $BuildVenv
+    if ([System.IO.Path]::GetFileNameWithoutExtension($Python) -ieq "py") {
+        & $Python -3.12 -m venv $BuildVenv
+    } else {
+        & $Python -m venv $BuildVenv
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to create the virtual environment. Verify that Python 3.12 is installed and $Python is available."
     }
