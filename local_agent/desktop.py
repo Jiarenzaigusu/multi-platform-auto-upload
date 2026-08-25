@@ -539,7 +539,6 @@ def _run_tray(
         daemon=True,
     ).start()
     _start_wake_listener(application, open_status_window)
-    updater.cleanup_stale_installers(data_root)
     _start_background_update_checks(updater_state, notify=notify)
     icon.run()
     return pending[0] if pending else updater_state.pending_installer
@@ -767,7 +766,7 @@ def _run_status_window(
                     continue
                 progress_bar.configure(mode="determinate", value=100)
                 progress_label.set("下载进度 100% · 安装包已校验")
-                update_status.set("更新已下载完成，准备重启安装")
+                update_status.set("更新已下载完成，准备打开安装窗口")
                 confirm_and_restart()
             elif kind == "show-window":
                 try:
@@ -808,9 +807,10 @@ def _run_status_window(
             update_status.set("安装包状态异常，请重新检查更新")
             return
         if not messagebox.askyesno(
-            "更新已就绪", "新版本已下载完成。是否立即重启助手并安装？"
+            "更新已就绪",
+            "新版本已下载完成。是否立即重启助手并打开安装窗口？",
         ):
-            update_status.set("已下载，可稍后点击“安装新版本”完成安装")
+            update_status.set("已下载，可稍后点击“安装新版本”打开安装窗口")
             return
         pending.append(installer)
         close(for_install=True)
@@ -895,7 +895,6 @@ def _run_status_window(
     root.after(500, watch_application)
     if stop_on_close:
         _start_wake_listener(application, lambda: enqueue("show-window"))
-    updater.cleanup_stale_installers(data_root)
     if start_update_checks:
         _start_background_update_checks(updater_state)
     if auto_install_on_open:

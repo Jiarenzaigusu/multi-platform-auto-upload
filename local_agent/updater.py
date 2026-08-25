@@ -168,6 +168,7 @@ def _update_script() -> str:
 $ErrorActionPreference = "Stop"
 $LogPath = Join-Path $PSScriptRoot "update.log"
 $FailurePath = Join-Path $PSScriptRoot "update.failed.txt"
+$AgentProcessName = [System.IO.Path]::GetFileNameWithoutExtension($AgentExe)
 
 function Write-UpdateLog([string]$Message) {
     Add-Content -LiteralPath $LogPath -Value ("{0:u} {1}" -f (Get-Date), $Message)
@@ -182,6 +183,31 @@ function Write-UpdateFailure([string]$Message) {
     }
 }
 
+function Get-ProcessDirectory($Process) {
+    try {
+        $processPath = $Process.Path
+        if ([string]::IsNullOrWhiteSpace($processPath)) {
+            return $null
+        }
+        return [System.IO.Path]::GetDirectoryName($processPath)
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-RunningAgentProcesses() {
+    @(Get-Process -Name $AgentProcessName -ErrorAction SilentlyContinue | Where-Object {
+        if ($_.Id -eq $PID -or $_.Id -eq $ParentPid) {
+            $false
+        }
+        else {
+            $processDir = Get-ProcessDirectory $_
+            [string]::IsNullOrWhiteSpace($processDir) -or $processDir -ieq $InstallDir
+        }
+    })
+}
+
 try {
     Write-UpdateLog "Waiting for agent process $ParentPid to exit."
     $deadline = (Get-Date).AddMinutes(3)
@@ -192,14 +218,25 @@ try {
         throw "The previous agent process did not exit in time."
     }
 
+    $runningAgents = Get-RunningAgentProcesses
+    if ($runningAgents.Count -gt 0) {
+        Write-UpdateLog ("Waiting for installed agent processes to exit: " + (($runningAgents | ForEach-Object { "{0}:{1}" -f $_.Id, (Get-ProcessDirectory $_) }) -join ", "))
+    }
+    $deadline = (Get-Date).AddMinutes(3)
+    while ($runningAgents.Count -gt 0 -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 1
+        $runningAgents = Get-RunningAgentProcesses
+    }
+    if ($runningAgents.Count -gt 0) {
+        throw ("The installed agent process is still running: " + (($runningAgents | ForEach-Object { "{0}:{1}" -f $_.Id, (Get-ProcessDirectory $_) }) -join ", "))
+    }
+
     if (-not (Test-Path -LiteralPath $InstallerPath -PathType Leaf)) {
         throw "The downloaded installer is missing."
     }
-    Write-UpdateLog "Installing update."
+    Write-UpdateLog "Installing update from $InstallerPath into $InstallDir."
     $arguments = @(
-        "/VERYSILENT"
         "/NORESTART"
-        "/SUPPRESSMSGBOXES"
         "/SP-"
         ('/LOG="{0}"' -f (Join-Path $PSScriptRoot "installer.log"))
         ('/DIR="{0}"' -f $InstallDir)
