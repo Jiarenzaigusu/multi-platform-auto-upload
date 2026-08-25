@@ -80,6 +80,10 @@ const importingToBatchExcel = ref(false)
 const downloadBatchExcelCopy = ref(false)
 const selectedTitleIndex = ref(0)
 const selectedBodyIndex = ref(0)
+const editingTitleIndex = ref(null)
+const editingBodyIndex = ref(null)
+const titleEditValue = ref('')
+const bodyEditValue = ref('')
 const workbenchImportOpen = ref(false)
 const restoringDraft = ref(true)
 let draftSaveTimer
@@ -261,6 +265,83 @@ function countHanCharacters(text) {
   return (String(text || '').match(hanCharacterPattern) || []).length
 }
 
+function resetEditState() {
+  editingTitleIndex.value = null
+  editingBodyIndex.value = null
+  titleEditValue.value = ''
+  bodyEditValue.value = ''
+}
+
+function updateResultCandidate(kind, index, value) {
+  if (!result.value) return false
+  const isTitle = kind === 'title'
+  const values = (isTitle ? resultTitles.value : resultBodies.value).slice()
+  if (!values[index]) return false
+  values[index] = value
+  if (isTitle) {
+    result.value.titles = values
+    result.value.title = values[0] || ''
+  } else {
+    result.value.bodies = values
+    result.value.body = values[0] || ''
+  }
+  return true
+}
+
+function beginEditTitle(index) {
+  selectedTitleIndex.value = index
+  editingTitleIndex.value = index
+  titleEditValue.value = resultTitles.value[index] || ''
+}
+
+function beginEditBody(index) {
+  selectedBodyIndex.value = index
+  editingBodyIndex.value = index
+  bodyEditValue.value = resultBodies.value[index] || ''
+}
+
+function cancelEditTitle() {
+  editingTitleIndex.value = null
+  titleEditValue.value = ''
+}
+
+function cancelEditBody() {
+  editingBodyIndex.value = null
+  bodyEditValue.value = ''
+}
+
+function saveEditedTitle(index) {
+  const value = titleEditValue.value.trim()
+  if (!value) {
+    error.value = '标题不能为空'
+    return false
+  }
+  if (!updateResultCandidate('title', index, value)) return false
+  selectedTitleIndex.value = index
+  cancelEditTitle()
+  error.value = ''
+  return true
+}
+
+function saveEditedBody(index) {
+  const value = bodyEditValue.value.trim()
+  if (!value) {
+    error.value = '文案不能为空'
+    return false
+  }
+  if (!updateResultCandidate('body', index, value)) return false
+  selectedBodyIndex.value = index
+  cancelEditBody()
+  error.value = ''
+  return true
+}
+
+function saveActiveEdits() {
+  if (editingTitleIndex.value !== null && !saveEditedTitle(editingTitleIndex.value)) return false
+  if (editingBodyIndex.value !== null && !saveEditedBody(editingBodyIndex.value)) return false
+  return true
+}
+
 const canGenerate = computed(() => (
   Boolean(sellingPointCatalog.value)
   && productIdentifiers.value.length >= 1
@@ -305,6 +386,7 @@ function clearAll() {
   sellingPointCatalog.value = null
   productReferences.value = []
   result.value = null
+  resetEditState()
   error.value = ''
   copiedField.value = ''
   window.clearTimeout(copyTimer)
@@ -327,7 +409,10 @@ async function uploadSellingPointFile(file, { persist = true, preserveResult = f
     const uploaded = await api.uploadSellingPoints(file)
     const previousCatalogId = sellingPointCatalog.value?.catalog_id
     sellingPointCatalog.value = uploaded
-    if (!preserveResult) result.value = null
+    if (!preserveResult) {
+      result.value = null
+      resetEditState()
+    }
     if (persist) await saveSellingPointWorkbook(file, props.userId)
     if (previousCatalogId && previousCatalogId !== uploaded.catalog_id) {
       api.deleteSellingPointCatalog(previousCatalogId).catch(() => {})
@@ -353,6 +438,7 @@ function clearSellingPointCatalog() {
   if (catalogId) api.deleteSellingPointCatalog(catalogId).catch(() => {})
   sellingPointCatalog.value = null
   result.value = null
+  resetEditState()
   error.value = ''
   clearSellingPointWorkbook(props.userId).catch(() => {})
   if (sellingPointFileInput.value) sellingPointFileInput.value.value = ''
@@ -443,6 +529,7 @@ async function generateCopy() {
     return
   }
   result.value = null
+  resetEditState()
   generating.value = true
   const titleLimit = form.titleMaxChars === '' || form.titleMaxChars === null
     ? null
@@ -476,6 +563,7 @@ async function generateCopy() {
     result.value = response
     selectedTitleIndex.value = 0
     selectedBodyIndex.value = 0
+    resetEditState()
     productReferences.value = response.product_references || []
   } catch (requestError) {
     error.value = requestError.message
@@ -496,11 +584,13 @@ async function copyText(field, value) {
 }
 
 function importToWorkbench() {
+  if (!saveActiveEdits()) return
   if (!result.value || !selectedTitle.value || !selectedBody.value) return
   workbenchImportOpen.value = true
 }
 
 function confirmWorkbenchImport(target) {
+  if (!saveActiveEdits()) return
   if (!result.value || !selectedTitle.value || !selectedBody.value) return
   emit('import-to-workbench', {
     title: selectedTitle.value,
@@ -512,6 +602,7 @@ function confirmWorkbenchImport(target) {
 }
 
 function chooseBatchExcelFile() {
+  if (!saveActiveEdits()) return
   if (!result.value) {
     error.value = '请先生成文案，再导入到批量发布 Excel'
     return
@@ -557,6 +648,7 @@ async function openAndImportBatchExcel() {
 }
 
 async function importToBatchExcelByHandle(fileHandle) {
+  if (!saveActiveEdits()) return
   const file = await fileHandle.getFile()
   if (!file.name.toLowerCase().endsWith('.xlsx')) {
     error.value = '请选择 .xlsx 格式的批量发布表格'
@@ -595,6 +687,10 @@ function importSummaryText(response) {
 
 // 可选路径：下载独立结果文件，不修改正在打开的原文件。
 async function importToBatchExcel(event) {
+  if (!saveActiveEdits()) {
+    event.target.value = ''
+    return
+  }
   const file = event.target.files?.[0]
   if (!file) return
   if (!result.value) {
@@ -877,7 +973,7 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
         <legend><b>文案风格</b><span>选择文案的语气与节奏</span></legend>
         <div class="ai-copy-style-grid">
           <label
-            v-for="(item, index) in options.styles"
+            v-for="item in options.styles"
             :key="item.value"
             :class="{ selected: !hasCustomStyle && form.style === item.value }"
           >
@@ -887,7 +983,6 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
               :value="item.value"
               @change="form.style = item.value; form.customStyle = ''"
             />
-            <i>0{{ index + 1 }}</i>
             <strong>{{ item.label }}</strong>
           </label>
         </div>
@@ -1031,10 +1126,32 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
               <input type="checkbox" :checked="selectedTitleIndex === index" @change="selectedTitleIndex = index" />
               <span>选用此标题</span>
             </label>
-            <h3>{{ title }}</h3>
-            <button type="button" @click="copyText(`title-${index}`, title)">
-              {{ copiedField === `title-${index}` ? '已复制' : '复制标题' }}
-            </button>
+            <template v-if="editingTitleIndex === index">
+              <textarea
+                v-model="titleEditValue"
+                class="ai-copy-edit-textarea ai-copy-title-editor"
+                maxlength="120"
+                rows="2"
+                @keydown.meta.enter.prevent="saveEditedTitle(index)"
+                @keydown.ctrl.enter.prevent="saveEditedTitle(index)"
+              />
+              <div class="ai-copy-edit-meta">
+                <span>{{ countHanCharacters(titleEditValue) }} 汉字 · 保存后用于复制、导入工作台和 Excel</span>
+              </div>
+              <div class="ai-copy-output-actions">
+                <button type="button" @click="saveEditedTitle(index)">保存标题</button>
+                <button class="ai-copy-secondary-action" type="button" @click="cancelEditTitle">取消</button>
+              </div>
+            </template>
+            <template v-else>
+              <h3>{{ title }}</h3>
+              <div class="ai-copy-output-actions">
+                <button type="button" @click="copyText(`title-${index}`, title)">
+                  {{ copiedField === `title-${index}` ? '已复制' : '复制标题' }}
+                </button>
+                <button class="ai-copy-secondary-action" type="button" @click="beginEditTitle(index)">编辑标题</button>
+              </div>
+            </template>
           </article>
         </section>
 
@@ -1055,10 +1172,32 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
               <input type="checkbox" :checked="selectedBodyIndex === index" @change="selectedBodyIndex = index" />
               <span>选用此文案</span>
             </label>
-            <p>{{ body }}</p>
-            <button type="button" @click="copyText(`body-${index}`, body)">
-              {{ copiedField === `body-${index}` ? '已复制' : '复制文案' }}
-            </button>
+            <template v-if="editingBodyIndex === index">
+              <textarea
+                v-model="bodyEditValue"
+                class="ai-copy-edit-textarea ai-copy-body-editor"
+                maxlength="1600"
+                rows="6"
+                @keydown.meta.enter.prevent="saveEditedBody(index)"
+                @keydown.ctrl.enter.prevent="saveEditedBody(index)"
+              />
+              <div class="ai-copy-edit-meta">
+                <span>{{ countHanCharacters(bodyEditValue) }} 汉字 · 保存后用于复制、导入工作台和 Excel</span>
+              </div>
+              <div class="ai-copy-output-actions">
+                <button type="button" @click="saveEditedBody(index)">保存文案</button>
+                <button class="ai-copy-secondary-action" type="button" @click="cancelEditBody">取消</button>
+              </div>
+            </template>
+            <template v-else>
+              <p>{{ body }}</p>
+              <div class="ai-copy-output-actions">
+                <button type="button" @click="copyText(`body-${index}`, body)">
+                  {{ copiedField === `body-${index}` ? '已复制' : '复制文案' }}
+                </button>
+                <button class="ai-copy-secondary-action" type="button" @click="beginEditBody(index)">编辑文案</button>
+              </div>
+            </template>
           </article>
         </section>
 

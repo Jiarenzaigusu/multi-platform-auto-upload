@@ -741,15 +741,25 @@ def create_app(
         if not unique_ids:
             raise HTTPException(status_code=422, detail="请提供需要删除的任务 ID 列表")
 
-        deleted, skipped = workspace.store.delete_jobs(unique_ids)
-        if deleted:
+        # 顺序与单条删除保持一致：先删日志（日志删除失败时记录仍可保留），
+        # 再删任务记录。这样日志清理失败会如实报错，而不是把记录已经删掉却告诉用户"已保留"。
+        preflight: list[str] = []
+        for job_id in unique_ids:
+            existing = workspace.store.get_job(job_id)
+            if not existing:
+                continue
+            if existing["status"] not in TERMINAL_STATUSES:
+                continue
+            preflight.append(job_id)
+        if preflight:
             try:
-                workspace.task_manager.delete_jobs_artifacts(deleted)
+                workspace.task_manager.delete_jobs_artifacts(preflight)
             except OSError as exc:
                 raise HTTPException(
                     status_code=500,
-                    detail="部分任务日志删除失败，任务记录已保留",
+                    detail="删除任务日志失败，任务记录已保留",
                 ) from exc
+        deleted, skipped = workspace.store.delete_jobs(unique_ids)
         return {"deleted": deleted, "skipped": skipped}
 
     @app.post("/api/jobs/{job_id}/cancel-and-delete-account", status_code=202)

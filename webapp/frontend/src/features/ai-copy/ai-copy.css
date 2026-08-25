@@ -345,7 +345,6 @@
 .ai-copy-style-grid label:hover { transform: translateY(-2px); border-color: #c7aa9e; }
 .ai-copy-style-grid label.selected { border-color: var(--ai-coral); background: #fff0eb; box-shadow: inset 0 0 0 1px var(--ai-coral); }
 .ai-copy-style-grid input { position: absolute; opacity: 0; }
-.ai-copy-style-grid i { color: #a5aca8; font: 700 9px/1 "SFMono-Regular", Consolas, monospace; font-style: normal; }
 .ai-copy-style-grid strong { font-size: 12px; }
 .ai-copy-custom-context { margin-top: 10px; }
 
@@ -687,4 +686,783 @@
   .ai-copy-results,
   .ai-copy-generating span,
   .ai-copy-dropdown-options { animation: none; }
+}
+
+/* 2026 visual refresh: denser, consistent hierarchy for the commerce console. */
+.ai-copy-layout {
+  grid-template-columns: minmax(0, 1fr) minmax(330px, .58fr);
+  gap: 18px;
+}
+
+.ai-copy-card,
+.ai-copy-results {
+  border-radius: 15px;
+  box-shadow: 0 16px 42px rgba(29, 65, 56, .08);
+}
+
+.ai-copy-composer {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 15px;
+  padding: clamp(22px, 2.7vw, 32px);
+  background:
+    radial-gradient(circle at 100% 0, rgba(231, 237, 106, .14), transparent 16rem),
+    rgba(252, 253, 249, .92);
+}
+
+.ai-copy-intro,
+.ai-copy-warning,
+.ai-copy-error,
+.ai-copy-success,
+.ai-copy-selling-points,
+.ai-copy-choice-group,
+.ai-copy-split-fields,
+.ai-copy-product-panel,
+.ai-copy-generate {
+  grid-column: 1 / -1;
+}
+
+.ai-copy-intro {
+  margin-bottom: 2px;
+  padding-bottom: 13px;
+  border-bottom: 1px solid #e4e8e1;
+}
+
+.ai-copy-intro p,
+.ai-copy-result-head p,
+.ai-copy-product-heading p {
+  color: #dc6f58;
+  font-size: 9px;
+  letter-spacing: .18em;
+}
+
+.ai-copy-intro h2,
+.ai-copy-result-head h2,
+.ai-copy-product-heading h3 {
+  color: #183033;
+  font-size: 24px;
+  font-weight: 850;
+  letter-spacing: -.025em;
+}
+
+.ai-copy-model {
+  padding: 6px 9px;
+  border-color: #b9c8aa;
+  color: #3f6143;
+  background: #eef6df;
+  font-size: 9px;
+  font-weight: 850;
+}
+
+.ai-copy-warning,
+.ai-copy-error,
+.ai-copy-success {
+  margin: 0;
+  padding: 10px 12px;
+  font-size: 11px;
+}
+
+.ai-copy-selling-points,
+.ai-copy-limits,
+.ai-copy-product-panel {
+  border-color: #dce3d8;
+  background: #f7faf4;
+}
+
+.ai-copy-selling-points {
+  gap: 10px;
+  margin-bottom: 0;
+  padding: 14px;
+  border-radius: 13px;
+}
+
+.ai-copy-field {
+  gap: 6px;
+}
+
+.ai-copy-field > span strong,
+.ai-copy-choice-group legend b,
+.ai-copy-limit-label b,
+.ai-copy-catalog-upload strong,
+.ai-copy-reference strong {
+  color: #334b42;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.ai-copy-field > span small,
+.ai-copy-choice-group legend span,
+.ai-copy-limit-label small,
+.ai-copy-catalog-upload small,
+.ai-copy-product-help,
+.ai-copy-reference p {
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.ai-copy-field input,
+.ai-copy-field textarea,
+.ai-copy-link-row textarea,
+.ai-copy-dropdown-trigger {
+  border-color: #cfd9d2;
+  border-radius: 8px;
+  padding: 9px 11px;
+  font-size: 12px;
+}
+
+.ai-copy-field textarea,
+.ai-copy-link-row textarea {
+  min-height: 78px;
+  line-height: 1.55;
+}
+
+.ai-copy-identifier-field textarea {
+  min-height: 70px;
+}
+
+.ai-copy-catalog-upload {
+  gap: 10px;
+  padding: 12px;
+  border-radius: 10px;
+}
+
+.ai-copy-catalog-upload button,
+.ai-copy-catalog-status button,
+.ai-copy-link-row button,
+.ai-copy-output button {
+  min-height: 34px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 850;
+}
+
+.ai-copy-catalog-status {
+  gap: 8px;
+  padding: 9px 10px;
+  border-radius: 9px;
+}
+
+.ai-copy-selling-point-preview ol {
+  max-height: 140px;
+}
+
+.ai-copy-selling-point-preview li {
+  padding: 8px 10px;
+  font-size: 10px;
+}
+
+.ai-copy-choice-group {
+  margin: 0;
+}
+
+.ai-copy-limits {
+  padding: 13px;
+  border-radius: 13px;
+}
+
+.ai-copy-limit-row {
+  grid-template-columns: minmax(96px, .32fr) minmax(0, 1fr) minmax(112px, .34fr);
+  gap: 10px;
+  padding: 7px 0;
+}
+
+.ai-copy-limit-chips {
+  gap: 6px;
+}
+
+.ai-copy-limit-chips button {
+  padding: 6px 9px;
+  font-size: 10px;
+}
+
+.ai-copy-limit-custom input {
+  padding: 6px 9px;
+  font-size: 11px;
+}
+
+.ai-copy-style-grid {
+  grid-template-columns: repeat(2, 1fr);
+  gap: 7px;
+}
+
+.ai-copy-style-grid label {
+  min-height: 58px;
+  padding: 9px 10px;
+  border-radius: 9px;
+}
+
+.ai-copy-style-grid strong {
+  font-size: 11px;
+}
+
+.ai-copy-custom-context {
+  margin-top: 8px;
+}
+
+.ai-copy-split-fields {
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin-bottom: 0;
+}
+
+.ai-copy-product-panel {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 15px;
+  border: 1px solid #dce3d8;
+  border-radius: 13px;
+}
+
+.ai-copy-product-help {
+  margin: 8px 0 11px;
+}
+
+.ai-copy-link-row textarea {
+  min-height: 76px;
+}
+
+.ai-copy-reference-list {
+  max-height: 260px;
+  gap: 7px;
+}
+
+.ai-copy-reference {
+  padding: 10px;
+  border-radius: 9px;
+}
+
+.ai-copy-generate {
+  padding: 12px 15px;
+  border-radius: 8px;
+  color: #173532;
+  background: #e7ed6a;
+  box-shadow: 0 9px 20px rgba(129, 145, 48, .2);
+  font-size: 12px;
+}
+
+.ai-copy-generate:hover {
+  background: #dce761;
+}
+
+.ai-copy-results {
+  top: 20px;
+  overflow-y: auto;
+  max-height: calc(100vh - 126px);
+  min-height: 0;
+  padding: 23px;
+  background:
+    radial-gradient(circle at 100% 0, rgba(220, 111, 88, .26), transparent 15rem),
+    linear-gradient(145deg, #1d3d3b 0%, #122f2c 72%);
+}
+
+.ai-copy-result-head {
+  padding-bottom: 15px;
+}
+
+.ai-copy-result-head h2 {
+  color: #f5f8f2;
+  font-size: 23px;
+}
+
+.ai-copy-empty,
+.ai-copy-generating {
+  padding: 48px 2px 4px;
+}
+
+.ai-copy-empty > span {
+  width: 58px;
+  height: 58px;
+  font-size: 20px;
+  font-weight: 850;
+}
+
+.ai-copy-empty h3 {
+  margin: 18px 0 8px;
+  font-size: 20px;
+  font-weight: 850;
+}
+
+.ai-copy-output-group {
+  margin-top: 14px;
+}
+
+.ai-copy-output {
+  margin-top: 8px;
+  padding: 15px;
+  border-radius: 12px;
+}
+
+.ai-copy-title-output h3 {
+  margin: 14px 0 16px;
+  font-size: 20px;
+  font-weight: 850;
+}
+
+.ai-copy-body-output p {
+  margin: 13px 0 16px;
+  font-size: 12px;
+  line-height: 1.75;
+}
+
+.ai-copy-import,
+.ai-copy-import-batch {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 11px;
+}
+
+@media (max-width: 1180px) {
+  .ai-copy-composer {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 1120px) {
+  .ai-copy-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .ai-copy-results {
+    position: relative;
+    top: auto;
+    max-height: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .ai-copy-composer,
+  .ai-copy-results {
+    padding: 18px;
+  }
+
+  .ai-copy-style-grid,
+  .ai-copy-link-row,
+  .ai-copy-limit-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Compact block pass: keep separation but reduce scroll-heavy card height. */
+.ai-copy-composer {
+  row-gap: 14px;
+  padding: clamp(20px, 2.5vw, 30px);
+}
+
+.ai-copy-intro {
+  margin-bottom: 6px;
+  padding-bottom: 12px;
+}
+
+.ai-copy-selling-points,
+.ai-copy-limits,
+.ai-copy-choice-group,
+.ai-copy-split-fields,
+.ai-copy-product-panel {
+  margin-bottom: 16px;
+}
+
+.ai-copy-selling-points,
+.ai-copy-limits,
+.ai-copy-product-panel {
+  padding: 12px 14px;
+  border-radius: 13px;
+}
+
+.ai-copy-choice-group:not(.ai-copy-limits) {
+  padding-top: 12px;
+  border-top: 1px solid #e4e9e2;
+}
+
+.ai-copy-choice-group legend {
+  margin-bottom: 9px;
+}
+
+.ai-copy-choice-group legend b,
+.ai-copy-field > span strong,
+.ai-copy-product-heading h3 {
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.ai-copy-choice-group legend span,
+.ai-copy-field > span small,
+.ai-copy-product-help {
+  font-size: 10px;
+}
+
+.ai-copy-limit-row {
+  gap: 10px;
+  padding: 7px 0;
+}
+
+.ai-copy-limit-chips {
+  gap: 6px;
+}
+
+.ai-copy-limit-chips button {
+  padding: 6px 10px;
+  font-size: 11px;
+}
+
+.ai-copy-limit-custom input {
+  min-height: 34px;
+  padding: 7px 10px;
+  font-size: 12px;
+}
+
+.ai-copy-style-grid {
+  gap: 8px;
+}
+
+.ai-copy-style-grid label {
+  min-height: 48px;
+  padding: 8px 11px;
+  border-radius: 9px;
+}
+
+.ai-copy-style-grid strong {
+  font-size: 11px;
+}
+
+.ai-copy-custom-context {
+  margin-top: 10px;
+}
+
+.ai-copy-split-fields {
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.ai-copy-field input,
+.ai-copy-field textarea,
+.ai-copy-link-row textarea,
+.ai-copy-dropdown-trigger {
+  min-height: 38px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.ai-copy-field textarea,
+.ai-copy-link-row textarea {
+  min-height: 74px;
+}
+
+.ai-copy-identifier-field textarea {
+  min-height: 66px;
+}
+
+.ai-copy-product-panel {
+  margin-top: 2px;
+}
+
+.ai-copy-product-help {
+  margin: 7px 0 10px;
+}
+
+.ai-copy-link-row {
+  gap: 8px;
+}
+
+.ai-copy-generate {
+  margin-top: 2px;
+}
+
+/* Editable result pass: smaller generated titles and inline edits used by all imports. */
+.ai-copy-title-output h3 {
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+.ai-copy-output-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ai-copy-output-actions button {
+  width: 100%;
+  min-height: 38px;
+}
+
+.ai-copy-output-actions .ai-copy-secondary-action {
+  border-color: rgba(241, 238, 221, .28);
+  color: #d4dfd9;
+  background: rgba(255, 255, 255, .035);
+}
+
+.ai-copy-output-actions .ai-copy-secondary-action:hover {
+  border-color: rgba(220, 231, 97, .52);
+  color: #eef4e9;
+}
+
+.ai-copy-edit-textarea {
+  width: 100%;
+  margin-top: 12px;
+  padding: 11px 12px;
+  border: 1px solid rgba(220, 231, 97, .46);
+  border-radius: 10px;
+  outline: none;
+  color: #f7faf4;
+  background: rgba(255, 255, 255, .07);
+  font: inherit;
+  resize: vertical;
+}
+
+.ai-copy-edit-textarea:focus {
+  border-color: rgba(220, 231, 97, .82);
+  box-shadow: 0 0 0 3px rgba(220, 231, 97, .12);
+}
+
+.ai-copy-title-editor {
+  min-height: 74px;
+  font-size: 16px;
+  font-weight: 850;
+  line-height: 1.45;
+}
+
+.ai-copy-body-editor {
+  min-height: 160px;
+  font-size: 12px;
+  line-height: 1.75;
+}
+
+.ai-copy-edit-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 7px;
+  color: #8da59c;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+@media (max-width: 640px) {
+  .ai-copy-output-actions {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Space trim pass: remove low-value blanks and give generated results more reading width. */
+.ai-copy-layout {
+  grid-template-columns: minmax(0, 1fr) minmax(430px, 40%);
+  gap: 16px;
+}
+
+.ai-copy-composer {
+  padding: clamp(18px, 2vw, 26px);
+}
+
+.ai-copy-results {
+  padding: 20px;
+}
+
+.ai-copy-catalog-upload {
+  grid-template-columns: minmax(240px, 420px) auto;
+  justify-content: start;
+  column-gap: 18px;
+}
+
+.ai-copy-catalog-status {
+  grid-template-columns: auto minmax(240px, 430px) auto;
+  justify-content: start;
+}
+
+.ai-copy-selling-point-preview > div {
+  padding: 9px 11px;
+}
+
+.ai-copy-selling-point-preview ol {
+  max-height: 118px;
+}
+
+.ai-copy-selling-point-preview li {
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 8px;
+  padding: 7px 10px;
+}
+
+.ai-copy-limits {
+  padding: 11px 13px;
+}
+
+.ai-copy-limit-row {
+  grid-template-columns: 112px minmax(0, 1fr) 136px;
+  justify-content: stretch;
+  gap: 14px;
+  padding: 6px 0;
+}
+
+.ai-copy-limit-custom {
+  width: 136px;
+  justify-self: end;
+}
+
+.ai-copy-output-group {
+  margin-top: 12px;
+}
+
+.ai-copy-output {
+  padding: 12px 13px;
+}
+
+.ai-copy-candidate-select {
+  margin-top: 10px;
+}
+
+.ai-copy-title-output h3 {
+  margin: 11px 0 13px;
+}
+
+.ai-copy-body-output p {
+  margin: 11px 0 13px;
+}
+
+.ai-copy-output-actions {
+  margin-top: 8px;
+}
+
+.ai-copy-output-actions button {
+  min-height: 34px;
+}
+
+@media (max-width: 1120px) {
+  .ai-copy-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 700px) {
+  .ai-copy-catalog-upload,
+  .ai-copy-catalog-status,
+  .ai-copy-limit-row {
+    grid-template-columns: 1fr;
+  }
+
+  .ai-copy-limit-chips {
+    flex-wrap: wrap;
+  }
+
+  .ai-copy-limit-custom {
+    width: 100%;
+  }
+}
+
+/* Wider results pass: move the split left and reduce low-value blank space in the input panel. */
+.ai-copy-layout {
+  grid-template-columns: minmax(620px, 48%) minmax(560px, 1fr);
+  gap: 18px;
+}
+
+.ai-copy-composer {
+  padding: 20px 22px;
+}
+
+.ai-copy-results {
+  padding: 21px;
+}
+
+.ai-copy-field input,
+.ai-copy-field textarea,
+.ai-copy-link-row textarea,
+.ai-copy-dropdown-trigger {
+  max-width: 100%;
+}
+
+.ai-copy-identifier-field textarea {
+  min-height: 58px;
+}
+
+.ai-copy-catalog-upload {
+  grid-template-columns: minmax(260px, 1fr) auto;
+  max-width: 720px;
+}
+
+.ai-copy-catalog-status {
+  grid-template-columns: auto minmax(260px, 1fr) auto;
+  max-width: 720px;
+}
+
+.ai-copy-selling-point-preview {
+  max-width: 720px;
+}
+
+.ai-copy-limit-row {
+  grid-template-columns: 118px minmax(220px, 1fr) 124px;
+  gap: 12px;
+}
+
+.ai-copy-limit-custom {
+  width: 124px;
+}
+
+.ai-copy-limit-custom input {
+  min-height: 32px;
+}
+
+.ai-copy-style-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.ai-copy-split-fields {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.ai-copy-field textarea,
+.ai-copy-link-row textarea {
+  min-height: 64px;
+}
+
+.ai-copy-product-panel {
+  max-width: 720px;
+}
+
+.ai-copy-title-output h3 {
+  font-size: 17px;
+  line-height: 1.32;
+}
+
+.ai-copy-body-output p {
+  font-size: 12px;
+  line-height: 1.68;
+}
+
+.ai-copy-output-actions {
+  gap: 7px;
+}
+
+.ai-copy-output-actions button {
+  min-height: 32px;
+  padding: 8px 10px;
+}
+
+@media (max-width: 1320px) {
+  .ai-copy-layout {
+    grid-template-columns: minmax(560px, .9fr) minmax(500px, 1fr);
+  }
+}
+
+@media (max-width: 1120px) {
+  .ai-copy-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 700px) {
+  .ai-copy-split-fields,
+  .ai-copy-style-grid,
+  .ai-copy-limit-row {
+    grid-template-columns: 1fr;
+  }
+
+  .ai-copy-catalog-upload,
+  .ai-copy-catalog-status,
+  .ai-copy-selling-point-preview,
+  .ai-copy-product-panel {
+    max-width: none;
+  }
+
+  .ai-copy-limit-custom {
+    width: 100%;
+  }
 }

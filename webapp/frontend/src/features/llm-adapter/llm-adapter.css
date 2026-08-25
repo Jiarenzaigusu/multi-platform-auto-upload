@@ -199,3 +199,248 @@
   .llm-adapter-console,
   .llm-adapter-notes { animation: none; }
 }
+
+/* 2026 visual refresh: align with the main console and reduce vertical drag. */
+.llm-adapter-layout {
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 18px;
+}
+
+.llm-adapter-console,
+.llm-adapter-notes {
+  border-radius: 15px;
+  box-shadow: 0 16px 42px rgba(29, 65, 56, .08);
+}
+
+.llm-adapter-console {
+  padding: clamp(22px, 2.7vw, 32px);
+  background:
+    radial-gradient(circle at 100% 0, rgba(231, 237, 106, .13), transparent 15rem),
+    rgba(252, 253, 249, .92);
+}
+
+.llm-adapter-heading {
+  margin-bottom: 16px;
+  padding-bottom: 13px;
+  border-bottom: 1px solid #e4e8e1;
+}
+
+.llm-adapter-heading p,
+.llm-key-head p,
+.llm-adapter-notes > p {
+  font-size: 9px;
+  letter-spacing: .18em;
+}
+
+.llm-adapter-heading h2,
+.llm-key-head h3,
+.llm-adapter-notes h2 {
+  font-weight: 850;
+  letter-spacing: -.025em;
+}
+
+.llm-adapter-heading h2 {
+  font-size: clamp(23px, 2.7vw, 31px);
+}
+
+.llm-live-indicator {
+  padding: 6px 9px;
+  font-size: 9px;
+}
+
+.llm-adapter-message {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  font-size: 11px;
+}
+
+.llm-current-strip {
+  gap: 11px;
+  margin-bottom: 18px;
+  padding: 12px 14px;
+  border-radius: 11px;
+}
+
+.llm-current-strip > span,
+.llm-current-strip small,
+.llm-current-strip .llm-current-endpoint {
+  font-size: 9px;
+}
+
+.llm-current-strip strong {
+  font-size: 13px;
+}
+
+.llm-current-strip button {
+  padding: 7px 10px;
+  font-size: 10px;
+}
+
+.llm-provider-fieldset legend {
+  margin-bottom: 9px;
+}
+
+.llm-provider-fieldset legend b {
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.llm-provider-fieldset legend span {
+  font-size: 10px;
+}
+
+.llm-provider-grid {
+  gap: 8px;
+}
+
+.llm-provider-card {
+  min-height: 138px;
+  padding: 12px;
+  border-radius: 11px;
+}
+
+.llm-provider-card:hover {
+  transform: translateY(-2px);
+}
+
+.llm-provider-active {
+  top: 10px;
+  right: 10px;
+  font-size: 8px;
+}
+
+.llm-provider-card > strong {
+  margin-top: 22px;
+  color: #203b38;
+  font-size: 18px;
+  font-weight: 850;
+}
+
+.llm-provider-card em {
+  margin-top: 3px;
+  font-size: 10px;
+}
+
+.llm-provider-card p {
+  margin: 9px 0 0;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.llm-key-form {
+  margin-top: 20px;
+  padding-top: 18px;
+}
+
+.llm-key-head h3 {
+  font-size: 19px;
+}
+
+.llm-key-head > span {
+  font-size: 10px;
+}
+
+.llm-key-input {
+  margin-top: 11px;
+}
+
+.llm-key-input input,
+.llm-endpoint-input input {
+  padding: 11px 12px;
+  font-size: 11px;
+}
+
+.llm-key-input button,
+.llm-delete-key {
+  font-size: 10px;
+}
+
+.llm-endpoint-input {
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.llm-endpoint-input > span {
+  font-size: 10px;
+}
+
+.llm-key-meta {
+  margin: 7px 1px 14px;
+  font-size: 9px;
+}
+
+.llm-activate {
+  padding: 12px 15px;
+  border-radius: 9px;
+  color: #173532;
+  background: #e7ed6a;
+  box-shadow: 0 9px 20px rgba(129, 145, 48, .2);
+  font-size: 12px;
+}
+
+.llm-activate:hover {
+  background: #dce761;
+}
+
+.llm-activate b {
+  color: #173532;
+  font-size: 18px;
+  font-weight: 850;
+}
+
+.llm-adapter-notes {
+  top: 20px;
+  min-height: 0;
+  padding: 23px;
+  background:
+    radial-gradient(circle at 100% 0, rgba(231, 237, 106, .2), transparent 14rem),
+    linear-gradient(145deg, #1a4846 0%, #122f2c 78%);
+}
+
+.llm-adapter-notes h2 {
+  max-width: 270px;
+  font-size: 24px;
+}
+
+.llm-route-visual {
+  margin: 34px 0 28px;
+}
+
+.llm-route-visual span,
+.llm-route-visual strong,
+.llm-adapter-notes li b {
+  font-size: 9px;
+}
+
+.llm-adapter-notes li {
+  grid-template-columns: 28px 1fr;
+  gap: 10px;
+  padding: 13px 0;
+}
+
+.llm-adapter-notes li span {
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.llm-adapter-notes li strong {
+  font-size: 11px;
+}
+
+@media (max-width: 1120px) {
+  .llm-adapter-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .llm-adapter-notes {
+    position: relative;
+    top: auto;
+  }
+}
+
+@media (max-width: 720px) {
+  .llm-provider-grid,
+  .llm-credential-actions {
+    grid-template-columns: 1fr;
+  }
+}

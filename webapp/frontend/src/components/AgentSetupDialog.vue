@@ -103,7 +103,155 @@ async function copyCode() {
 </template>
 
 <style scoped>
-.agent-dialog-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(18, 38, 32, .46); backdrop-filter: blur(5px); }.agent-dialog { position: relative; width: min(560px, 100%); padding: 34px; border: 1px solid rgba(32,75,65,.2); border-radius: 18px; color: #29483f; background: #fffefa; box-shadow: 0 30px 80px rgba(13, 42, 33, .35); }.agent-dialog > p:first-of-type { margin: 0 0 8px; color: #6b8161; font-size: 10px; font-weight: 800; letter-spacing: .15em; }.agent-dialog h2 { margin: 0; color: #1c4036; font: 500 29px Georgia, "Songti SC", serif; }.agent-dialog ol { display: grid; gap: 9px; margin: 20px 0; padding-left: 20px; color: #596e63; font-size: 13px; line-height: 1.55; }.agent-dialog-close { position: absolute; top: 13px; right: 15px; border: 0; color: #587067; background: transparent; font-size: 26px; line-height: 1; }.agent-download, .agent-code-button { display: block; width: 100%; padding: 12px 14px; border-radius: 9px; text-align: center; font-size: 13px; font-weight: 750; text-decoration: none; }.agent-download { box-sizing: border-box; color: #fff; background: #28594d; }.agent-code-button { margin-top: 10px; border: 1px solid #d07a56; color: #8d4329; background: #fff6ed; }.agent-code-button:disabled { cursor: wait; opacity: .65; }.agent-code { display: grid; width: 100%; gap: 5px; margin-top: 11px; padding: 12px; border: 1px dashed #8ba47c; border-radius: 9px; color: #224c3d; background: #f5f9ee; }.agent-code strong { font: 800 22px "SFMono-Regular", Consolas, monospace; letter-spacing: .12em; }.agent-code small { color: #6b8174; font-size: 11px; }.agent-dialog-error { margin: 12px 0 0; color: #923d2f; font-size: 12px; }.agent-dialog-note { margin: 18px 0 0; padding-top: 15px; border-top: 1px solid #dce5d7; color: #718177; font-size: 11px; line-height: 1.6; }.agent-dialog-note code { color: #315a4d; font-family: "SFMono-Regular", Consolas, monospace; }
-.agent-update-hint { margin: 12px 0 0; padding: 11px 13px; border: 1px solid #e5b892; border-radius: 9px; color: #7c4522; background: #fdf3e7; font-size: 12px; line-height: 1.6; }
-.agent-update-hint.current { border-color: #b7cdb0; color: #3d5c46; background: #f2f8ee; }
+.agent-dialog-backdrop {
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(13, 34, 31, .5);
+  backdrop-filter: blur(8px);
+}
+
+.agent-dialog {
+  position: relative;
+  width: min(560px, 100%);
+  padding: 30px;
+  border: 1px solid rgba(33, 67, 62, .16);
+  border-radius: 18px;
+  color: #29483f;
+  background:
+    radial-gradient(circle at 90% 0, rgba(231, 237, 106, .2), transparent 12rem),
+    #fcfdf8;
+  box-shadow: 0 28px 72px rgba(13, 42, 33, .28);
+}
+
+.agent-dialog > p:first-of-type {
+  margin: 0 0 8px;
+  color: #7a8f78;
+  font-size: 9px;
+  font-weight: 850;
+  letter-spacing: .16em;
+}
+
+.agent-dialog h2 {
+  margin: 0;
+  color: #183532;
+  font-size: 28px;
+  font-weight: 850;
+  line-height: 1.15;
+}
+
+.agent-dialog ol {
+  display: grid;
+  gap: 8px;
+  margin: 18px 0 0;
+  padding-left: 20px;
+  color: #5e7267;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.agent-dialog-close {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  border: 0;
+  color: #587067;
+  background: transparent;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.agent-download,
+.agent-code-button {
+  display: block;
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 9px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 850;
+  text-decoration: none;
+}
+
+.agent-download {
+  box-sizing: border-box;
+  margin-top: 14px;
+  color: #173532;
+  background: #e7ed6a;
+  box-shadow: 0 9px 20px rgba(129, 145, 48, .2);
+}
+
+.agent-code-button {
+  margin-top: 10px;
+  border: 1px solid #d09c45;
+  color: #8d4329;
+  background: #fff6ed;
+}
+
+.agent-code-button:disabled {
+  cursor: wait;
+  opacity: .65;
+}
+
+.agent-code {
+  display: grid;
+  width: 100%;
+  gap: 4px;
+  margin-top: 11px;
+  padding: 12px;
+  border: 1px dashed #a8bf9e;
+  border-radius: 9px;
+  color: #224c3d;
+  background: #f5f9ee;
+}
+
+.agent-code strong {
+  font-size: 20px;
+  font-weight: 900;
+  letter-spacing: .08em;
+}
+
+.agent-code small {
+  color: #6b8174;
+  font-size: 10px;
+}
+
+.agent-dialog-error {
+  margin: 12px 0 0;
+  color: #923d2f;
+  font-size: 11px;
+}
+
+.agent-dialog-note {
+  margin: 16px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid #dce5d7;
+  color: #718177;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.agent-dialog-note code {
+  color: #315a4d;
+}
+
+.agent-update-hint {
+  margin: 12px 0 0;
+  padding: 11px 13px;
+  border: 1px solid #e5b892;
+  border-radius: 9px;
+  color: #7c4522;
+  background: #fdf3e7;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.agent-update-hint.current {
+  border-color: #b7cdb0;
+  color: #3d5c46;
+  background: #f2f8ee;
+}
 </style>

@@ -1204,7 +1204,7 @@ onBeforeUnmount(() => {
       </div>
     </aside>
 
-    <section class="workspace">
+    <section :class="['workspace', { 'workspace-ai-copy': activeView === 'ai-copy' }]">
       <header class="topbar">
         <div>
           <p class="eyebrow">{{ viewEyebrow }}</p>
@@ -1238,28 +1238,31 @@ onBeforeUnmount(() => {
 
       <section v-else-if="activeView === 'publish'" class="publish-layout">
         <form class="editor-card" novalidate @submit.prevent="submitPublish">
-          <div class="section-heading"><span>01</span><div><h2>选择平台、内容与店铺</h2><p>同一平台同一店铺会自动串行执行，避免 Cookie 状态冲突。</p></div></div>
+          <div class="section-heading"><span>01</span><div><h2>选择平台、内容与店铺</h2></div></div>
+          <p class="choice-label">选择平台</p>
           <div class="platform-choice">
-            <label :class="{ selected: form.platform === 'tmall' }"><input v-model="form.platform" type="radio" value="tmall" /><span>天猫光合</span><small>支持视频与图文</small></label>
-            <label :class="{ selected: form.platform === 'jd' }"><input v-model="form.platform" type="radio" value="jd" /><span>京东京麦</span><small>视频、标题、商品、原创声明</small></label>
+            <label :class="{ selected: form.platform === 'tmall' }"><input v-model="form.platform" type="radio" value="tmall" /><span>天猫光合</span></label>
+            <label :class="{ selected: form.platform === 'jd' }"><input v-model="form.platform" type="radio" value="jd" /><span>京东京麦</span></label>
           </div>
+          <p class="choice-label">选择发布类型</p>
           <div class="platform-choice content-type-choice">
-            <label :class="{ selected: form.contentType === 'video' }"><input v-model="form.contentType" type="radio" value="video" /><span>视频</span><small>单视频，可选自定义封面</small></label>
-            <label :class="{ selected: form.contentType === 'article' }"><input v-model="form.contentType" type="radio" value="article" /><span>图文</span><small>{{ isTmall ? '1-9 张图片，按选择顺序发布' : '1-20 张 JPG/PNG 图片，支持正文' }}</small></label>
+            <label :class="{ selected: form.contentType === 'video' }"><input v-model="form.contentType" type="radio" value="video" /><span>视频</span></label>
+            <label :class="{ selected: form.contentType === 'article' }"><input v-model="form.contentType" type="radio" value="article" /><span>图文</span></label>
           </div>
           <p v-if="isTmall && isVideo" class="workflow-tip"><strong>天猫视频步骤：</strong>上传视频 → 可选设置自定义封面 → 填写标题、文案和标签 → 参与话题 → 可选添加音乐 → 关联商品 → 设置定时 → 选择创作者声明 → 提交发布。</p>
           <p v-else-if="isTmall" class="workflow-tip"><strong>天猫图文步骤：</strong>按顺序上传 1-9 张图片 → 填写标题、文案和标签 → 参与话题 → 可选添加音乐 → 关联商品 → 设置定时 → 选择创作者声明 → 提交发布。</p>
           <p v-else-if="isVideo" class="workflow-tip"><strong>京东视频步骤：</strong>上传视频 → 可选设置封面 → 填写标题 → 关联商品/参与话题 → 选择创作声明与自主原创 → 设置定时 → 提交发布。</p>
           <p v-else class="workflow-tip"><strong>京东图文步骤：</strong>按顺序上传 1-20 张 JPG/PNG 图片 → 填写标题与正文 → 关联商品/参与话题 → 选择创作声明与自主原创 → 设置定时 → 提交发布。</p>
 
+          <p class="choice-label">选择店铺</p>
           <div class="field-row">
-            <label class="field"><span>店铺账号标识</span><input v-model="form.account" list="account-list" required placeholder="例如 shop1" /><datalist id="account-list"><option v-for="item in visibleAccounts" :key="`${item.platform}-${item.account}`" :value="item.account" /></datalist></label>
+            <label class="field"><input v-model="form.account" list="account-list" required placeholder="例如 shop1" /><datalist id="account-list"><option v-for="item in visibleAccounts" :key="`${item.platform}-${item.account}`" :value="item.account" /></datalist></label>
             <div class="account-actions"><span>账号状态</span><div><button type="button" class="quiet" @click="accountAction('check')">校验 Cookie</button><button type="button" class="quiet" @click="accountAction('login')">登录 / 重新登录</button><button type="button" class="quiet" @click="deleteAccount()">删除账号</button></div></div>
           </div>
 
           <div class="section-heading section-heading-with-action">
             <span>02</span>
-            <div><h2>内容素材</h2><p>浏览器选择的文件会直接传给当前 Windows 助手，服务器不保存素材。</p></div>
+            <div><h2>内容素材</h2></div>
             <button type="button" class="quiet danger section-heading-action" @click="clearPublishDraft">一键清空发布配置与素材</button>
           </div>
           <template v-if="isVideo">
@@ -1270,7 +1273,7 @@ onBeforeUnmount(() => {
             </div>
           </template>
           <div v-else class="field image-upload-field">
-            <span>图文图片 <em>必选，1-{{ isTmall ? 9 : 20 }} 张</em></span>
+            <span>图文图片</span>
             <input id="article-image-files" ref="imageInput" class="native-file-input" type="file" multiple :accept="isTmall ? 'image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp' : 'image/jpeg,image/png,.jpg,.jpeg,.png'" @change="onImagesChange" />
             <label class="cover-file-picker" :class="{ selected: form.images.length }" for="article-image-files"><span class="cover-file-action">{{ form.images.length ? '重新选择图片' : '选择图片文件' }}</span><span class="cover-file-name">{{ form.images.length ? `已选择 ${form.images.length} 张图片` : `按选择顺序上传，最多 ${isTmall ? 9 : 20} 张` }}</span></label>
             <input id="article-image-folder" ref="imageFolderInput" class="native-file-input" type="file" multiple webkitdirectory directory @change="onImageFolderChange" />
@@ -1286,7 +1289,6 @@ onBeforeUnmount(() => {
               <span class="cover-file-name">{{ form.coverImage ? form.coverImage.name : '尚未选择封面图片' }}</span>
             </label>
             <small v-if="form.coverImage" class="cover-file-selected">已选择封面 · {{ form.coverImage.name }} · {{ (form.coverImage.size / 1024 / 1024).toFixed(1) }} MB</small>
-            <small v-else class="field-hint">上传后会在视频上传完成时自动打开“编辑封面”，选择本地上传的图片；支持 JPG、PNG、WebP，最大 20 MiB，图片宽高均需至少 720 像素。未上传则跳过封面编辑。</small>
             <button v-if="form.coverImage" class="clear-file" type="button" @click="clearCoverImage">移除封面</button>
           </div>
           <p v-if="draftRestoredAt" class="draft-restored-info" role="status">
@@ -1299,10 +1301,10 @@ onBeforeUnmount(() => {
           <template v-if="isTmall">
             <label class="field"><span>发布文案 <em>可选</em></span><textarea v-model="form.description" :maxlength="descriptionLimit" placeholder="填写视频描述与种草文案" /><small class="field-hint">文案与标签会写入同一富文本字段：{{ contentTextLength }} / 1000</small></label>
             <div class="field-row">
-              <label class="field"><span>标签 <em>最多 4 个</em></span><input v-model="form.tags" placeholder="女鞋,夏季穿搭,通勤鞋" /><small class="field-hint">用英文逗号分隔；上传器会在文案中逐个添加话题。</small></label>
-              <label class="field"><span>活动话题</span><input v-model="form.activityTopic" placeholder="例如：夏日上新" /><small class="field-hint">留空表示不参加话题活动；填写后会搜索并选择匹配活动。</small></label>
+              <label class="field"><span>标签 <em>可选</em></span><input v-model="form.tags" placeholder="女鞋,夏季穿搭,通勤鞋" /></label>
+              <label class="field"><span>活动话题 <em>可选</em></span><input v-model="form.activityTopic" placeholder="例如：夏日上新" /></label>
             </div>
-            <label class="field"><span>音乐名称 <em>可选</em></span><input v-model="form.musicName" maxlength="100" placeholder="例如：默契" /><small class="field-hint">留空即不添加音乐；填写后会在天猫音乐库中每次输入两个字符，选择第一个同名结果并确认。</small></label>
+            <label class="field"><span>音乐名称 <em>可选</em></span><input v-model="form.musicName" maxlength="100" placeholder="例如：默契" /></label>
           </template>
           <template v-else-if="isArticle">
             <label class="field"><span>正文内容 <em>可选</em></span><textarea v-model="form.description" maxlength="1001" placeholder="填写京东图文正文" /></label>
@@ -1310,18 +1312,17 @@ onBeforeUnmount(() => {
           </template>
           <p v-else class="platform-tip">京东京麦视频不支持独立文案与标签字段；标题会写入平台正文标题。</p>
 
-          <div class="section-heading"><span>03</span><div><h2>发布设置</h2><p>先用流程验证确认页面字段和商品匹配无误，再执行正式发布。</p></div></div>
+          <div class="section-heading"><span>03</span><div><h2>发布设置</h2></div></div>
           <div class="field-row">
-            <label class="field"><span>商品 ID <em>可选，最多 {{ isTmall ? 6 : 10 }} 个</em></span><textarea v-model="form.goodsId" maxlength="256" placeholder="每行一个商品 ID，或用逗号分隔" /><small class="field-hint">系统会按填写顺序关联商品；重复 ID 会自动去重。</small></label>
-            <div class="field"><span>定时发布 <em>可选</em></span><div class="schedule-input-wrap"><input ref="scheduleInput" v-model="form.schedule" :min="scheduleMinimum" aria-hidden="true" class="schedule-input" tabindex="-1" type="datetime-local" /><button aria-label="选择定时发布时间" class="schedule-display" type="button" @click="openSchedulePicker"><span>{{ scheduleDisplay }}</span><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="2" /><path d="M7.5 3.5v3M16.5 3.5v3M3.5 9h17M7.5 12h.01M12 12h.01M16.5 12h.01M7.5 16h.01M12 16h.01M16.5 16h.01" /></svg></button></div><small class="field-hint">至少提前 2 小时；排队过久导致不足 2 小时时，任务会在打开发布页前停止。</small></div>
+            <label class="field"><span>商品 ID <em>可选</em></span><textarea v-model="form.goodsId" maxlength="256" placeholder="每行一个商品 ID" /></label>
+            <div class="field"><span>定时发布 <em>可选</em></span><div class="schedule-input-wrap"><input ref="scheduleInput" v-model="form.schedule" :min="scheduleMinimum" aria-hidden="true" class="schedule-input" tabindex="-1" type="datetime-local" /><button aria-label="选择定时发布时间" class="schedule-display" type="button" @click="openSchedulePicker"><span>{{ scheduleDisplay }}</span><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="2" /><path d="M7.5 3.5v3M16.5 3.5v3M3.5 9h17M7.5 12h.01M12 12h.01M16.5 12h.01M7.5 16h.01M12 16h.01M16.5 16h.01" /></svg></button></div></div>
           </div>
-          <label class="field"><span>创作者声明 <em>必选</em></span><select v-model="form.creatorDeclaration" required><option disabled value="">请选择与实际内容相符的声明</option><option v-for="item in creatorDeclarationOptions" :key="item" :value="item">{{ item }}</option></select><small class="field-hint">系统会按此选项精确匹配平台声明，不再自动选择“内容无需标注”。</small></label>
+          <label class="field"><span>创作者声明</span><select v-model="form.creatorDeclaration" required><option disabled value="">请选择与实际内容相符的声明</option><option v-for="item in creatorDeclarationOptions" :key="item" :value="item">{{ item }}</option></select></label>
           <div class="toggles">
             <label><input v-model="form.dryRun" type="checkbox" /><span><strong>流程验证</strong><small>填写并上传，但不点击正式发布</small></span></label>
             <label><input v-model="form.headed" type="checkbox" /><span><strong>显示 Microsoft Edge</strong><small>登录、短信和京东验证码需要在可见浏览器中手动完成</small></span></label>
-            <label v-if="!isTmall"><input v-model="form.original" type="checkbox" /><span><strong>自主原创</strong><small>仅账号已开通该能力时可用</small></span></label>
+            <label v-if="!isTmall"><input v-model="form.original" type="checkbox" /><span><strong>自主原创 <em>可选</em></strong><small>仅账号已开通该能力时可用</small></span></label>
           </div>
-          <p class="uploader-note"><strong>创作者声明：</strong>必须根据视频和发布内容实际情况选择；如平台账号没有对应选项，任务会在点击发布前停止。</p>
           <p v-if="publishError" class="publish-error" role="alert">{{ publishError }}</p>
           <button class="primary" :disabled="submitting" type="submit">{{ submitting ? (localUploadStatus || '正在创建任务…') : form.dryRun ? '创建流程验证任务' : '创建正式发布任务' }}</button>
         </form>
