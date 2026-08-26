@@ -2443,10 +2443,19 @@ class LocalSecurityMiddlewareTests(unittest.TestCase):
                         app, "GET", "/api/health", {"host": "attacker.example"}
                     )
                 )
+                same_origin_status = asyncio.run(
+                    self.request_status(
+                        app,
+                        "POST",
+                        "/api/accounts/tmall/shop1/login",
+                        {"host": "127.0.0.1:8788", "origin": "http://127.0.0.1:8788"},
+                    )
+                )
 
                 self.assertEqual(cross_site_status, 403)
                 self.assertEqual(untrusted_host_status, 400)
-                self.assertEqual(store.list_jobs(), [])
+                self.assertIn(same_origin_status, {401, 403})
+                self.assertEqual(len(store.list_jobs()), 0)
             finally:
                 manager.shutdown()
 

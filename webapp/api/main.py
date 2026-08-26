@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import AsyncIterator
+from urllib.parse import urlsplit
 
 from fastapi import (
     BackgroundTasks,
@@ -329,7 +330,15 @@ def create_app(
     async def reject_cross_site_mutations(request: Request, call_next):
         origin = request.headers.get("origin")
         if request.method not in {"GET", "HEAD", "OPTIONS"} and origin:
-            if origin not in trusted_browser_origins:
+            normalized_origin = origin.strip().rstrip("/")
+            request_origin = f"{request.url.scheme}://{request.url.netloc}".rstrip("/")
+            parsed_origin = urlsplit(normalized_origin)
+            is_same_origin = (
+                parsed_origin.scheme
+                and parsed_origin.netloc
+                and normalized_origin == request_origin
+            )
+            if not is_same_origin and normalized_origin not in trusted_browser_origins:
                 return JSONResponse(status_code=403, content={"detail": "拒绝来自未授权页面的写操作"})
         return await call_next(request)
 
