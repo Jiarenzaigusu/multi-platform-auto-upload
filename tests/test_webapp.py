@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import tempfile
 import threading
 import time
@@ -32,6 +33,7 @@ from webapp.api.batch import BatchValidationError
 from webapp.api.batch_douyin_article import parse_douyin_article_batch_workbook
 from webapp.api.batch_douyin_video import parse_douyin_video_batch_workbook
 from webapp.api.batch_jd_video import parse_jd_video_batch_workbook
+from webapp.api.batch_tmall_article import parse_tmall_article_batch_workbook
 from webapp.api.batch_tmall_video import parse_tmall_video_batch_workbook
 from webapp.api.batch_templates import build_batch_template
 from webapp.api.batch_xiaohongshu_article import parse_xiaohongshu_article_batch_workbook
@@ -94,6 +96,10 @@ class _StaticWorkspaceRegistry:
             for error in self.workspace.task_manager.maintenance_errors
         ]
 
+    def delete_user_data(self, _user_id: str) -> None:
+        self.workspace.task_manager.shutdown()
+        shutil.rmtree(self.workspace.paths.root, ignore_errors=False)
+
     def close(self) -> None:
         return None
 
@@ -146,6 +152,19 @@ class PublishRequestValidationTests(unittest.TestCase):
 
         self.assertEqual(request.tags, ("女鞋", "夏季穿搭"))
         self.assertFalse(request.dry_run)
+
+    def test_parse_tags_accepts_chinese_commas(self):
+        request = validate_publish_request(
+            platform="tmall",
+            account="shop_1",
+            video_path=self.video,
+            original_filename="demo.mp4",
+            title="夏季女鞋测评",
+            description="轻便好穿",
+            raw_tags="#女鞋， 夏季穿搭,通勤鞋",
+        )
+
+        self.assertEqual(request.tags, ("女鞋", "夏季穿搭", "通勤鞋"))
 
     def test_batch_path_parser_accepts_windows_absolute_path_on_non_windows_server(self):
         path = resolve_local_path(
@@ -1252,6 +1271,26 @@ class TmallBatchWorkbookTests(unittest.TestCase):
         self.assertEqual(rows[0].request.goods_id, "12345,67890")
         self.assertTrue(rows[0].request.dry_run)
 
+    def test_tmall_article_batch_accepts_chinese_commas_in_tags(self):
+        image = self.base_dir / "photos" / "001.jpg"
+        image.write_bytes(b"image")
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append(["图片文件夹路径", "标题", "发布文案", "标签"])
+        worksheet.append([str(self.base_dir / "photos"), "夏季女鞋图文", "轻盈舒适", "女鞋，夏季穿搭,通勤鞋"])
+        output = BytesIO()
+        workbook.save(output)
+        workbook.close()
+
+        rows = parse_tmall_article_batch_workbook(
+            output.getvalue(),
+            account="shop1",
+            dry_run=True,
+            headed=True,
+        )
+
+        self.assertEqual(rows[0].request.tags, ("女鞋", "夏季穿搭", "通勤鞋"))
+
     def test_explicit_creator_declaration_maps_to_request(self):
         workbook = Workbook()
         worksheet = workbook.active
@@ -1531,7 +1570,7 @@ class SocialBatchWorkbookTests(unittest.TestCase):
         xhs_rows = parse_xiaohongshu_article_batch_workbook(
             self.workbook(
                 ["图片文件夹路径", "标题", "笔记正文", "标签"],
-                [str(self.image_dir), "小红书图文", "正文", "种草"],
+                [str(self.image_dir), "小红书图文", "正文", "种草，穿搭"],
             ),
             account="shop1",
             dry_run=True,
@@ -1542,11 +1581,12 @@ class SocialBatchWorkbookTests(unittest.TestCase):
             xhs_rows[0].request.image_paths,
             ((self.image_dir / "001.jpg").resolve(),),
         )
+        self.assertEqual(xhs_rows[0].request.tags, ("种草", "穿搭"))
 
         douyin_rows = parse_douyin_article_batch_workbook(
             self.workbook(
                 ["图片文件夹路径", "标题", "图文描述", "标签"],
-                [str(self.image_dir), "抖音图文", "描述", "热点"],
+                [str(self.image_dir), "抖音图文", "描述", "热点，穿搭"],
             ),
             account="shop1",
             dry_run=True,
@@ -1554,6 +1594,7 @@ class SocialBatchWorkbookTests(unittest.TestCase):
         )
         self.assertEqual(douyin_rows[0].request.platform, "douyin")
         self.assertEqual(douyin_rows[0].request.description, "描述")
+        self.assertEqual(douyin_rows[0].request.tags, ("热点", "穿搭"))
 
     def test_batch_template_dispatch_includes_social_platforms(self):
         cases = {

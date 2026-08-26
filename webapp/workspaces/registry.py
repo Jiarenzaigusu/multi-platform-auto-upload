@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import threading
 from typing import Callable
 
@@ -132,6 +133,12 @@ class UserWorkspaceRegistry:
             workspace = self._workspaces.pop(user_id, None)
         if workspace is not None:
             workspace.close()
+
+    def delete_user_data(self, user_id: str) -> None:
+        """Close and remove all persisted workspace files owned by one user."""
+        self.close_user(user_id)
+        paths = self.data_paths.for_user(user_id)
+        shutil.rmtree(paths.root, ignore_errors=False)
 
     def close(self) -> None:
         with self._lock:

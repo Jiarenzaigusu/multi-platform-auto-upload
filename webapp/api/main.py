@@ -99,6 +99,7 @@ class WebSettings:
     agent_installer_path: Path | None = None
     session_seconds: int = 12 * 60 * 60
     secure_cookies: bool = False
+    allow_remote_bootstrap: bool = False
     allowed_hosts: tuple[str, ...] = ("127.0.0.1", "localhost", "testserver")
     allowed_origins: tuple[str, ...] = (
         "http://localhost:5173",
@@ -161,6 +162,10 @@ class WebSettings:
             ).expanduser().resolve(),
             session_seconds=positive_int("MPAU_SESSION_SECONDS", 12 * 60 * 60),
             secure_cookies=os.getenv("MPAU_SECURE_COOKIES", "false").strip().lower()
+            in {"1", "true", "yes", "on"},
+            allow_remote_bootstrap=os.getenv(
+                "MPAU_ALLOW_REMOTE_BOOTSTRAP", "false"
+            ).strip().lower()
             in {"1", "true", "yes", "on"},
             allowed_hosts=allowed_hosts,
             allowed_origins=allowed_origins,
@@ -1201,7 +1206,12 @@ def create_app(
         )
 
     app.include_router(
-        create_auth_router(auth_service, secure_cookies=settings.secure_cookies)
+        create_auth_router(
+            auth_service,
+            secure_cookies=settings.secure_cookies,
+            allow_remote_bootstrap=settings.allow_remote_bootstrap,
+            delete_user_data=workspace_registry.delete_user_data,
+        )
     )
     app.include_router(
         create_llm_adapter_router(

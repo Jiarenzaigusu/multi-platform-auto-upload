@@ -66,6 +66,15 @@ def _show_update_failure(message: str) -> None:
         return
 
 
+def _allow_remote_http() -> bool:
+    return os.getenv("MPAU_AGENT_ALLOW_HTTP", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _log_and_show_unhandled_exception(exc_type, exc, tb) -> None:
     if issubclass(exc_type, KeyboardInterrupt):
         return sys.__excepthook__(exc_type, exc, tb)
@@ -217,7 +226,7 @@ def _pairing_dialog(
         raw_server = server_entry.get().strip()
         code = code_entry.get().strip()
         try:
-            server = _server_url(raw_server, allow_http=False)
+            server = _server_url(raw_server, allow_http=_allow_remote_http())
         except ValueError as exc:
             status.set(str(exc))
             return

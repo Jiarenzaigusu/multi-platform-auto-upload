@@ -107,7 +107,7 @@ onMounted(loadStatus)
         <h2>{{ setupRequired ? '创建初始管理员' : registering ? '创建操作者账号' : '进入发布台' }}</h2>
         <span class="auth-help">
           {{ setupRequired
-            ? '此入口仅在服务器本机且尚无用户时开放。'
+            ? '首次初始化仅在无用户时开放；服务器部署可临时开启远程初始化。'
             : registering
               ? '注册成功后默认获得操作者权限；管理员请直接登录。'
               : '使用已有账号登录，管理员无需重新注册。' }}

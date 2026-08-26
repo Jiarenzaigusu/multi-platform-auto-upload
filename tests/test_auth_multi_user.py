@@ -36,8 +36,9 @@ class _AsgiResponse:
 class _AsgiClient:
     """Drive the real ASGI middleware stack while retaining response Cookies."""
 
-    def __init__(self, app) -> None:
+    def __init__(self, app, *, client_host: str = "testclient") -> None:
         self.app = app
+        self.client_host = client_host
         self.cookies: dict[str, str] = {}
 
     def get(self, path: str, *, headers: dict[str, str] | None = None):
@@ -129,7 +130,7 @@ class _AsgiClient:
                 (name.lower().encode("ascii"), value.encode("utf-8"))
                 for name, value in request_headers.items()
             ],
-            "client": ("testclient", 12345),
+            "client": (self.client_host, 12345),
             "server": ("testserver", 80),
         }
         asyncio.run(self.app(scope, receive, send))
@@ -297,6 +298,49 @@ class MultiUserApiTests(unittest.TestCase):
         )
         self.assertEqual(second_bootstrap.status_code, 409)
 
+    def test_remote_bootstrap_is_blocked_unless_deployment_allows_it(self):
+        remote_client = _AsgiClient(self.app, client_host="10.0.0.2")
+        blocked = remote_client.post(
+            "/api/auth/bootstrap",
+            json={
+                "username": "remoteadmin",
+                "display_name": "Remote Admin",
+                "password": "admin-password-123",
+            },
+        )
+        self.assertEqual(blocked.status_code, 403, blocked.text)
+        self.assertEqual(self.app.state.auth_service.store.user_count(), 0)
+
+        self.registry.close()
+        settings = WebSettings(
+            data_dir=self.data_paths.root,
+            frontend_dist_dir=Path(self.temp_dir.name) / "missing-frontend",
+            allow_remote_bootstrap=True,
+        )
+        self.registry = UserWorkspaceRegistry(
+            self.data_paths,
+            user_workers=1,
+            global_browser_tasks=1,
+            browser_idle_timeout_seconds=0,
+            manager_factory=lambda store, **kwargs: TaskManager(
+                store,
+                runner=lambda job: {"message": f"{job['kind']} complete"},
+                **kwargs,
+            ),
+        )
+        allowed_app = create_app(settings, self.registry)
+        allowed_client = _AsgiClient(allowed_app, client_host="10.0.0.2")
+        created = allowed_client.post(
+            "/api/auth/bootstrap",
+            json={
+                "username": "remoteadmin",
+                "display_name": "Remote Admin",
+                "password": "admin-password-123",
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        self.assertEqual(created.json()["role"], "admin")
+
     def test_public_registration_creates_only_operators_and_signs_them_in(self):
         before_setup = self.client.post(
             "/api/auth/register",
@@ -423,6 +467,105 @@ class MultiUserApiTests(unittest.TestCase):
         self.assertEqual(reset.status_code, 200, reset.text)
         self.login("operator", "replacement-password-123")
         self.assertEqual(self.client.get("/api/auth/me").json()["id"], operator["id"])
+
+    def test_admin_can_delete_operator_but_not_current_account(self):
+        admin = self.bootstrap_admin()
+        operator = self.create_user("operator")
+        operator_workspace = self.registry.get(operator["id"])
+        operator_workspace.store.remember_account("tmall", "shop1")
+        operator_workspace.paths.cookie_file("tmall", "shop1").write_text(
+            '{"cookie":"operator"}', encoding="utf-8"
+        )
+        (operator_workspace.paths.media / "operator.mp4").write_bytes(b"video")
+        upload_dir = operator_workspace.paths.uploads / ("a" * 32)
+        upload_dir.mkdir()
+        (upload_dir / "cover.png").write_bytes(b"cover")
+        (operator_workspace.paths.job_logs / "job.log").write_text(
+            "operator job", encoding="utf-8"
+        )
+        (operator_workspace.paths.platform_logs / "platform.log").write_text(
+            "operator platform", encoding="utf-8"
+        )
+        (operator_workspace.paths.secrets / "llm-adapter-credentials.json").write_text(
+            '{"secret":"operator"}', encoding="utf-8"
+        )
+        operator_root = operator_workspace.paths.root
+
+        operator_client = _AsgiClient(self.app)
+        login = operator_client.post(
+            "/api/auth/login",
+            json={
+                "username": "operator",
+                "password": "operator-password-123",
+            },
+        )
+        self.assertEqual(login.status_code, 200, login.text)
+
+        delete_self = self.client.request(
+            "DELETE",
+            f"/api/admin/users/{admin['id']}",
+            headers=self.csrf_headers(),
+        )
+        self.assertEqual(delete_self.status_code, 409)
+        self.assertIn("不能删除当前登录账号", delete_self.text)
+
+        deleted = self.client.request(
+            "DELETE",
+            f"/api/admin/users/{operator['id']}",
+            headers=self.csrf_headers(),
+        )
+        self.assertEqual(deleted.status_code, 204, deleted.text)
+        users = self.client.get("/api/admin/users").json()
+        self.assertNotIn(operator["id"], [user["id"] for user in users])
+        self.assertEqual(operator_client.get("/api/auth/me").status_code, 401)
+        self.assertFalse(operator_root.exists())
+
+        connection = sqlite3.connect(self.data_paths.auth_database)
+        try:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM users WHERE id = ?",
+                    (operator["id"],),
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM sessions WHERE user_id = ?",
+                    (operator["id"],),
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM agent_devices WHERE user_id = ?",
+                    (operator["id"],),
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM agent_pairing_codes WHERE user_id = ?",
+                    (operator["id"],),
+                ).fetchone()[0],
+                0,
+            )
+            audit_count = connection.execute(
+                "SELECT COUNT(*) FROM audit_logs WHERE user_id = ? OR resource_id = ?",
+                (operator["id"], operator["id"]),
+            ).fetchone()[0]
+            self.assertEqual(audit_count, 0)
+        finally:
+            connection.close()
+
+        relogin = self.client.post(
+            "/api/auth/login",
+            json={
+                "username": "operator",
+                "password": "operator-password-123",
+            },
+        )
+        self.assertEqual(relogin.status_code, 401)
 
 
 class LocalAgentApiTests(unittest.TestCase):

@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, patch
 from local_agent.client import AgentApiError
 from local_agent.client import AgentApiClient
 from local_agent.credentials import AgentConnectionStore
-from local_agent.desktop import _connect_when_available
+from local_agent.desktop import _allow_remote_http, _connect_when_available
 from local_agent import autostart
 from local_agent.main import LocalAgentApplication
 from local_agent.runner import AgentJobRunner
@@ -306,6 +306,12 @@ class AgentAutostartTests(unittest.TestCase):
         with patch.object(autostart.sys, "frozen", False, create=True):
             arguments = autostart.autostart_arguments()
         self.assertEqual(arguments[-3:], ["-m", "local_agent.desktop", "--background"])
+
+    def test_desktop_http_pairing_requires_explicit_environment_flag(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(_allow_remote_http())
+        with patch.dict(os.environ, {"MPAU_AGENT_ALLOW_HTTP": "true"}):
+            self.assertTrue(_allow_remote_http())
 
 
 class LocalAgentApplicationTests(unittest.TestCase):

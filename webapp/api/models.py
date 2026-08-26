@@ -129,11 +129,15 @@ def validate_account_name(account: str) -> str:
 
 
 def parse_tags(raw_tags: str, max_tags: int = 4) -> tuple[str, ...]:
-    """解析话题标签字符串，逗号分隔，去 # 前缀，过滤空项。
+    """解析话题标签字符串，支持中英文逗号分隔，去 # 前缀，过滤空项。
 
     :raises ValidationError: 标签数超过 4 个
     """
-    tags = tuple(tag.strip().lstrip("#") for tag in raw_tags.split(",") if tag.strip().lstrip("#"))
+    tags = tuple(
+        tag.strip().lstrip("#")
+        for tag in re.split(r"[,，]", raw_tags)
+        if tag.strip().lstrip("#")
+    )
     if len(tags) > max_tags:
         raise ValidationError(f"最多支持 {max_tags} 个标签")
     return tags

@@ -5,17 +5,17 @@
 系统由云端控制面和用户电脑上的本地执行面组成：
 
 - 云端 FastAPI 负责应用认证、用户隔离、素材上传、任务排队、租约、结果展示和 AI 文案；
-- 用户电脑预装自包含的“MPAU 本地执行助手”，主动通过 HTTPS 轮询并领取当前应用账号的任务；
+- 用户电脑预装自包含的“MPAU 本地执行助手”，主动通过服务器地址轮询并领取当前应用账号的任务；
 - Microsoft Edge、Patchright `BrowserRuntime`、平台 Cookie、扫码、短信、验证码和浏览器日志都只在用户电脑上运行或保存；
 - 云服务器不会创建 Edge、Browser、BrowserContext 或 Page，也不需要图形桌面、RDP 常驻会话；
-- 视频和可选的天猫自定义封面会先通过 HTTPS 上传到云端任务区，再由代理下载到用户电脑，因此云服务器仍承担素材带宽和临时存储，不承担浏览器 CPU/内存负载。
+- 视频和可选的天猫自定义封面会先上传到云端任务区，再由代理下载到用户电脑，因此云服务器仍承担素材带宽和临时存储，不承担浏览器 CPU/内存负载。
 
 本系统面向公司内部可信运营人员，不会绕过平台扫码、密码、短信、验证码或风控，也不是平台开放 API。
 
 ```text
-用户浏览器 ── HTTPS ──┐
-                      ├─ Caddy ── FastAPI ── auth.db / 任务 / 云端素材
-mpau-agent ── HTTPS ──┘                    （不启动 Edge）
+用户浏览器 ── HTTP 8788 ──┐
+                          ├─ FastAPI ── auth.db / 任务 / 云端素材
+mpau-agent ── HTTP 8788 ──┘                  （不启动 Edge）
      │
      ├─ 下载任务视频到本机临时目录
      ├─ 启动本机 Microsoft Edge
@@ -23,7 +23,7 @@ mpau-agent ── HTTPS ──┘                    （不启动 Edge）
      └─ 回传状态、结果和最多 500 行任务日志
 ```
 
-代理只建立出站 HTTPS 连接，云服务器不需要反向连接用户电脑，也不需要给用户电脑开放入站端口。
+代理只建立出站连接，云服务器不需要反向连接用户电脑，也不需要给用户电脑开放入站端口。
 
 ## 2. 任务流程
 
@@ -131,7 +131,7 @@ mpau-agent ── HTTPS ──┘                    （不启动 Edge）
 
 单条发布视频和可选封面进入 `uploads/<uuid>/`，任务进入成功、失败、取消或“结果待核对”后清理。批量素材属于用户维护的源文件，任务引用期间拒绝删除。
 
-视频依赖 HTTPS 传输，但没有额外的应用层端到端加密；云服务器会暂存可读取的视频文件。生产环境必须使用受控主机、持久盘权限、备份权限和保留策略。
+视频没有额外的应用层端到端加密；云服务器会暂存可读取的视频文件。HTTP 直连部署必须限制网络访问范围，并配合受控主机、持久盘权限、备份权限和保留策略。
 
 ### 4.2 用户电脑
 
@@ -198,8 +198,8 @@ Windows 助手默认将数据保存在当前用户的 Local AppData 目录。可
 
 - 4-8 vCPU、8-16 GB RAM；按 API 请求、AI 请求和视频中转并发扩容；
 - 系统盘与数据盘分离，视频容量按团队峰值、并发量和保留策略估算；
-- FastAPI 仅监听 `127.0.0.1:8788`，由 Caddy 或公司网关提供 HTTPS；
-- 443 只允许办公网、VPN 或受控公网来源，禁止直接暴露 8788；
+- FastAPI 直接监听 `0.0.0.0:8788`；
+- 8788 只允许办公网、VPN 或受控来源访问，禁止对公网完全开放；
 - 只运行一个 Uvicorn worker/项目实例，当前文件任务存储和租约不支持多进程共享；
 - 为大视频上传与代理下载预留双向公网或专线带宽。
 
@@ -246,11 +246,14 @@ notepad deploy\windows\mpau.local.ps1
 | 变量 | 默认值 | 生产建议 |
 | --- | --- | --- |
 | `MPAU_DATA_DIR` | `<项目>/data` | 指向独立持久盘 |
+| `MPAU_BIND_HOST` | `0.0.0.0` | FastAPI 监听地址；直连服务器使用 `0.0.0.0` |
+| `MPAU_PORT` | `8788` | FastAPI 监听端口 |
 | `MPAU_SESSION_SECONDS` | `43200` | 按公司会话策略设置 |
-| `MPAU_SECURE_COOKIES` | `false` | HTTPS 环境设为 `true` |
-| `MPAU_ALLOWED_HOSTS` | 本机地址 | 加入准确的内网域名 |
-| `MPAU_ALLOWED_ORIGINS` | 本机开发地址 | 只保留实际 HTTPS Origin |
-| `MPAU_MAX_UPLOAD_REQUEST_BYTES` | `21474836480` | 与 Caddy 请求体上限保持一致 |
+| `MPAU_SECURE_COOKIES` | `false` | HTTP 直连保持 `false`；改用 HTTPS 时再设为 `true` |
+| `MPAU_ALLOW_REMOTE_BOOTSTRAP` | `false` | 首次远程创建管理员时临时设为 `true`，完成后改回 `false` |
+| `MPAU_ALLOWED_HOSTS` | 本机地址 | 加入准确的服务器 IP 或域名 |
+| `MPAU_ALLOWED_ORIGINS` | 本机开发地址 | 只保留实际 Origin，直连需包含 `http://服务器IP:8788` |
+| `MPAU_MAX_UPLOAD_REQUEST_BYTES` | `21474836480` | 单个 HTTP 上传请求上限 |
 | `MPAU_MAX_MEDIA_TOTAL_BYTES` | `107374182400` | 限制每用户批量素材与待执行上传总量 |
 | `MPAU_MAX_MEDIA_FILES` | `1000` | 按素材保留策略调整 |
 
@@ -258,9 +261,12 @@ Windows 示例：
 
 ```powershell
 $env:MPAU_DATA_DIR = "D:\MPAU\data"
-$env:MPAU_ALLOWED_HOSTS = "mpau.internal.example.com,127.0.0.1,localhost"
-$env:MPAU_ALLOWED_ORIGINS = "https://mpau.internal.example.com"
-$env:MPAU_SECURE_COOKIES = "true"
+$env:MPAU_BIND_HOST = "0.0.0.0"
+$env:MPAU_PORT = "8788"
+$env:MPAU_ALLOWED_HOSTS = "10.31.108.221,127.0.0.1,localhost"
+$env:MPAU_ALLOWED_ORIGINS = "http://10.31.108.221:8788,http://127.0.0.1:8788,http://localhost:8788"
+$env:MPAU_SECURE_COOKIES = "false"
+$env:MPAU_ALLOW_REMOTE_BOOTSTRAP = "true"
 $env:MPAU_MAX_MEDIA_TOTAL_BYTES = "107374182400"
 ```
 
@@ -270,32 +276,22 @@ $env:MPAU_MAX_MEDIA_TOTAL_BYTES = "107374182400"
 
 ### 7.4 初始管理员
 
-初始管理员接口只接受服务器视角的本机来源。推荐用 SSH 端口转发完成一次性初始化：
+初始管理员默认只接受服务器视角的本机来源。直连部署需要远程初始化时，临时设置 `MPAU_ALLOW_REMOTE_BOOTSTRAP=true`，在浏览器访问 `http://服务器IP:8788` 创建初始管理员。完成后停止服务，把 `MPAU_ALLOW_REMOTE_BOOTSTRAP=false`，再重新启动。
 
-```bash
-ssh -L 8788:127.0.0.1:8788 server-user@server-host
-```
-
-临时以 `MPAU_SECURE_COOKIES=false` 启动 FastAPI，在本机浏览器访问 `http://127.0.0.1:8788` 创建初始管理员。完成后停止服务，启用生产 HTTPS 和 `MPAU_SECURE_COOKIES=true`，以后管理员直接登录。
-
-Windows Server 也可以在一次性管理会话中访问 `http://127.0.0.1:8788` 初始化，但上线运行不需要保留该桌面会话。不要长期关闭 Secure Cookie。
-
-### 7.5 HTTPS 与后台启动
-
-仓库的 `deploy/windows/Caddyfile.example` 把 HTTPS 反向代理到 `127.0.0.1:8788`。使用 `tls internal` 时，需要把 Caddy 根证书分发到网页浏览器和所有运行代理的用户电脑；代理不会忽略无效证书。
+### 7.5 直接启动与后台运行
 
 Windows 可用 `deploy/windows/start-mpau.ps1` 启动 FastAPI，并配置为“无论用户是否登录都运行”的任务计划或公司批准的服务。Linux 可用 systemd。云端服务没有交互式浏览器，后台会话不影响任务执行。
 
-Caddy 与 FastAPI 应分别设置失败重启，且不得并行启动第二个 FastAPI 实例。
+后台启动只保留一个 FastAPI 实例，不要并行启动第二个 Uvicorn 进程。`deploy/windows/Caddyfile.example` 仅作为旧 HTTPS 反向代理示例，直连部署不需要使用。
 
 ### 7.6 上线检查
 
 ```text
-[ ] 8788 仅监听 127.0.0.1
-[ ] 443 仅允许办公网、VPN 或批准来源
-[ ] HTTPS 证书被网页浏览器和本地代理电脑信任
-[ ] Secure Cookie 已启用
-[ ] Allowed Hosts/Origins 使用准确域名而非通配符
+[ ] FastAPI 监听 0.0.0.0:8788
+[ ] 防火墙仅允许办公网、VPN 或批准来源访问 8788
+[ ] HTTP 直连时 Secure Cookie 保持 false
+[ ] 首次管理员创建后已关闭 MPAU_ALLOW_REMOTE_BOOTSTRAP
+[ ] Allowed Hosts/Origins 使用准确服务器 IP 或域名而非通配符
 [ ] 只运行一个 Uvicorn worker/项目实例
 [ ] /api/health 返回 execution_mode=local_agent
 [ ] /api/readiness 不依赖 Edge 且返回 ready
@@ -311,8 +307,8 @@ Caddy 与 FastAPI 应分别设置失败重启，且不得并行启动第二个 F
 
 - Windows 10/11；
 - Microsoft Edge；
-- 能访问发布台 HTTPS 地址和平台站点；
-- 信任公司 HTTPS 根证书；
+- 能访问发布台地址和平台站点；
+- 直连 HTTP 部署时，桌面助手需要启用 `MPAU_AGENT_ALLOW_HTTP=true`；
 - 允许用户桌面显示 Edge 并处理验证码。
 
 普通用户不安装 Python、不下载项目代码，也不运行命令。管理员在 Windows 构建机安装 Python 3.12 和 Inno Setup 6，然后在项目根目录生成安装包：
@@ -333,7 +329,7 @@ deploy\windows\output\MPAU-Agent-Setup.exe
 
 1. 登录发布台；
 2. 离线提示中点击“生成一次性配对码”；
-3. 打开本地执行助手，填写发布台 HTTPS 地址和配对码；
+3. 打开本地执行助手，填写发布台地址和配对码；
 4. 配对成功后系统托盘显示助手，页面在下一次轮询时显示在线；
 5. 以后登录 Windows 时助手自动启动，用户日常只访问发布台网页。
 

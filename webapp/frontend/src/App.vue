@@ -529,7 +529,7 @@ const viewEyebrow = computed(() => ({
   users: 'ACCESS DIRECTORY',
 }[activeView.value] || 'COMMERCE PUBLISHING'))
 const uploaderTags = computed(() => form.tags
-  .split(',')
+  .split(/[,，]+/)
   .map((tag) => tag.trim().replace(/^#+/, ''))
   .filter(Boolean))
 const enteredGoodsIds = computed(() => form.goodsId

@@ -477,6 +477,36 @@ class AuthStore:
             connection.commit()
         return self._user(current)
 
+    def delete_user(self, user_id: str) -> User:
+        """Remove one user and rely on foreign keys to clean linked records."""
+        with self._write_lock, self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT * FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            if current is None:
+                raise KeyError(user_id)
+
+            row = connection.execute(
+                "SELECT COUNT(*) AS count FROM users "
+                "WHERE role = 'admin' AND status = 'active'"
+            ).fetchone()
+            if (
+                current["role"] == "admin"
+                and current["status"] == "active"
+                and row
+                and int(row["count"]) <= 1
+            ):
+                raise ValueError("必须保留至少一个启用状态的管理员")
+
+            connection.execute(
+                "DELETE FROM audit_logs WHERE user_id = ? OR resource_id = ?",
+                (user_id, user_id),
+            )
+            connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            connection.commit()
+        return self._user(current)
+
     def create_agent_pairing_code(
         self, *, user_id: str, code_hash: str, expires_at: str
     ) -> str:

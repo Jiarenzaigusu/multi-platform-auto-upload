@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from webapp.auth.contracts import (
@@ -74,6 +76,8 @@ def create_auth_router(
     service: AuthService,
     *,
     secure_cookies: bool,
+    allow_remote_bootstrap: bool = False,
+    delete_user_data: Callable[[str], None] | None = None,
 ) -> APIRouter:
     """Expose authentication without coupling it to publishing workspaces."""
     router = APIRouter(tags=["auth"])
@@ -93,11 +97,10 @@ def create_auth_router(
         request: Request,
         response: Response,
     ) -> UserResponse:
-        if not request.client or request.client.host not in {
-            "127.0.0.1",
-            "::1",
-            "testclient",
-        }:
+        if not allow_remote_bootstrap and (
+            not request.client
+            or request.client.host not in {"127.0.0.1", "::1", "testclient"}
+        ):
             raise HTTPException(status_code=403, detail="初始管理员只能在服务器本机创建")
         try:
             user = service.bootstrap_admin(
@@ -264,5 +267,26 @@ def create_auth_router(
         except UserNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return _admin_user_response(user)
+
+    @router.delete("/api/admin/users/{user_id}", status_code=204)
+    def delete_user(user_id: str, request: Request, response: Response) -> Response:
+        actor = require_admin(request)
+        try:
+            service.validate_user_deletion(actor_user_id=actor.id, user_id=user_id)
+            if delete_user_data is not None:
+                delete_user_data(user_id)
+            service.delete_user(
+                actor_user_id=actor.id,
+                user_id=user_id,
+                ip_address=_client_ip(request),
+            )
+        except UserNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except AuthenticationError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"删除用户工作区数据失败：{exc}") from exc
+        response.status_code = 204
+        return response
 
     return router

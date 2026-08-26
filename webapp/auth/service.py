@@ -281,6 +281,41 @@ class AuthService:
         )
         return user
 
+    def validate_user_deletion(self, *, actor_user_id: str, user_id: str) -> User:
+        """Check destructive user deletion before workspace files are removed."""
+        if actor_user_id == user_id:
+            raise AuthenticationError("不能删除当前登录账号")
+        user = self.store.get_user(user_id)
+        if user is None:
+            raise UserNotFoundError("用户不存在")
+        if user.role == "admin" and user.status == "active":
+            active_admins = sum(
+                1
+                for item in self.store.list_users()
+                if item.role == "admin" and item.status == "active"
+            )
+            if active_admins <= 1:
+                raise AuthenticationError("必须保留至少一个启用状态的管理员")
+        return user
+
+    def delete_user(
+        self, *, actor_user_id: str, user_id: str, ip_address: str
+    ) -> User:
+        """Remove a company login while preserving the acting administrator."""
+        self.validate_user_deletion(actor_user_id=actor_user_id, user_id=user_id)
+        try:
+            user = self.store.delete_user(user_id)
+        except KeyError as exc:
+            raise UserNotFoundError("用户不存在") from exc
+        except ValueError as exc:
+            raise AuthenticationError(str(exc)) from exc
+        self.store.record_audit(
+            user_id=actor_user_id,
+            action="delete_user",
+            ip_address=ip_address,
+        )
+        return user
+
     @staticmethod
     def _normalize_pairing_code(code: str) -> str:
         return "".join(character for character in code.upper() if character.isalnum())

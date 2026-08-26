@@ -333,9 +333,9 @@
 .ai-copy-style-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .ai-copy-style-grid label {
   display: grid;
-  min-height: 76px;
-  align-content: space-between;
-  padding: 10px 11px;
+  min-height: 50px;
+  align-content: center;
+  padding: 8px 12px;
   border: 1px solid var(--ai-line);
   border-radius: 11px;
   background: rgba(255, 255, 255, .58);
@@ -345,7 +345,7 @@
 .ai-copy-style-grid label:hover { transform: translateY(-2px); border-color: #c7aa9e; }
 .ai-copy-style-grid label.selected { border-color: var(--ai-coral); background: #fff0eb; box-shadow: inset 0 0 0 1px var(--ai-coral); }
 .ai-copy-style-grid input { position: absolute; opacity: 0; }
-.ai-copy-style-grid strong { font-size: 12px; }
+.ai-copy-style-grid strong { font-size: 15px; line-height: 1.25; }
 .ai-copy-custom-context { margin-top: 10px; }
 
 .ai-copy-limits {
@@ -878,18 +878,18 @@
 }
 
 .ai-copy-style-grid {
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 7px;
 }
 
 .ai-copy-style-grid label {
-  min-height: 58px;
-  padding: 9px 10px;
+  min-height: 48px;
+  padding: 8px 10px;
   border-radius: 9px;
 }
 
 .ai-copy-style-grid strong {
-  font-size: 11px;
+  font-size: 14px;
 }
 
 .ai-copy-custom-context {
@@ -1118,7 +1118,7 @@
 }
 
 .ai-copy-style-grid strong {
-  font-size: 11px;
+  font-size: 14px;
 }
 
 .ai-copy-custom-context {
@@ -1398,7 +1398,7 @@
 }
 
 .ai-copy-style-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .ai-copy-split-fields {

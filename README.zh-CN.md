@@ -17,7 +17,7 @@
 
 两个用户即使填写相同的店铺标识，也会解析到不同云端任务目录和不同本机 Cookie 目录。每个应用账号同时只允许连接一台本地代理；不同用户的浏览器负载由各自电脑承担，不占用云服务器 CPU 和内存。
 
-登录应用的用户仍可访问自己的云端任务和上传素材，但新登录产生的平台 Cookie 只保存在用户电脑。视频和可选的天猫自定义封面创建任务时先通过 HTTPS 上传到云端，代理领取后再下载到本机临时目录，任务终态后删除单条发布的云端和本机临时副本。
+登录应用的用户仍可访问自己的云端任务和上传素材，但新登录产生的平台 Cookie 只保存在用户电脑。视频和可选的天猫自定义封面创建任务时先上传到云端，代理领取后再下载到本机临时目录，任务终态后删除单条发布的云端和本机临时副本。
 
 ## 角色
 
@@ -89,19 +89,17 @@ corepack pnpm run dev
 
 Vite 会把 `/api` 代理到本机 `8788`，认证 Cookie 仍保持同源。
 
-## 公司云服务器推荐方案
+## 公司云服务器直接部署方案
 
 云端不执行浏览器自动化，可部署在 Windows Server 或 Linux。FastAPI 可以作为普通后台服务运行，不需要交互式桌面或 RDP 常驻会话。
 
 ```text
 公司电脑
-  └─ HTTPS 443
-      └─ Caddy（Windows 服务，仅负责 TLS/反向代理）
-          └─ 127.0.0.1:8788
-              └─ 单个 FastAPI 进程（认证、素材、任务租约）
+  └─ HTTP 8788
+      └─ 单个 FastAPI 进程（认证、素材、任务租约）
 
 用户 A 电脑 → MPAU 执行助手 → Edge A ─┐
-                                    ├─ HTTPS → 云端任务队列
+                                    ├─ HTTP → 云端任务队列
 用户 B 电脑 → MPAU 执行助手 → Edge B ─┘
 ```
 
@@ -109,9 +107,8 @@ Vite 会把 `/api` 代理到本机 `8788`，认证 Cookie 仍保持同源。
 
 - 按 Web/API 与视频中转负载选型；起步可使用 4-8 vCPU、8-16 GB 内存，并按并发视频上传扩容；
 - 视频素材放在独立持久盘，容量按团队保留策略配置；
-- FastAPI 和 Caddy 均可作为普通后台服务；
-- FastAPI 只监听 `127.0.0.1:8788`，Caddy 对公司内网提供 HTTPS；
-- 防火墙只允许办公网或 VPN 访问 443，禁止把 8788 暴露到公网；
+- FastAPI 作为普通后台服务直接监听 `0.0.0.0:8788`；
+- 防火墙只允许办公网、VPN 或指定 IP 访问 8788，不要对公网完全开放；
 - 只运行一个 Uvicorn worker，不要用多进程共享数据目录。
 
 仓库提供：
@@ -120,21 +117,24 @@ Vite 会把 `/api` 代理到本机 `8788`，认证 Cookie 仍保持同源。
 - `deploy/windows/build-mpau-agent.ps1`：构建自包含 Windows 安装包；
 - `deploy/windows/start-mpau-agent.ps1`：开发环境启动桌面助手；
 - `deploy/windows/mpau.env.example.ps1`：生产环境变量示例；
-- `deploy/windows/Caddyfile.example`：Caddy 内网 HTTPS 示例。
+- `deploy/windows/Caddyfile.example`：旧的 Caddy HTTPS 示例，直连部署不需要使用。
 
-详细安装、首次初始化、任务计划程序和 Caddy 操作见 [Web 发布台与服务器部署文档](docs/web-app.md)。
+详细安装、首次初始化和后台启动见 [Web 发布台与服务器部署文档](docs/web-app.md)。
 
 ## 运行配置
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `MPAU_DATA_DIR` | `<项目>/data` | 系统数据库与全部用户目录；生产必须放持久盘 |
+| `MPAU_BIND_HOST` | `0.0.0.0` | FastAPI 监听地址；直连服务器使用 `0.0.0.0` |
+| `MPAU_PORT` | `8788` | FastAPI 监听端口 |
 | `MPAU_SESSION_SECONDS` | `43200` | 应用登录 Session 有效期 |
-| `MPAU_SECURE_COOKIES` | `false` | HTTPS 生产环境必须设为 `true` |
-| `MPAU_ALLOWED_HOSTS` | `127.0.0.1,localhost` | 允许的 Host；生产加入内网域名 |
-| `MPAU_ALLOWED_ORIGINS` | 本机开发地址 | 允许发起写请求的完整 Origin |
+| `MPAU_SECURE_COOKIES` | `false` | HTTP 直连保持 `false`；改用 HTTPS 时再设为 `true` |
+| `MPAU_ALLOW_REMOTE_BOOTSTRAP` | `false` | 首次远程创建管理员时临时设为 `true`，完成后改回 `false` |
+| `MPAU_ALLOWED_HOSTS` | `127.0.0.1,localhost` | 允许的 Host；生产加入服务器 IP 或域名 |
+| `MPAU_ALLOWED_ORIGINS` | 本机开发地址 | 允许发起写请求的完整 Origin，直连需包含 `http://服务器IP:8788` |
 | `MPAU_AGENT_INSTALLER_PATH` | `deploy/windows/output/MPAU-Agent-Setup.exe` | 网页提供下载的 Windows 安装包 |
-| `MPAU_MAX_UPLOAD_REQUEST_BYTES` | `21474836480` | 单个 HTTP 上传请求上限；反向代理应设置相同或更小的限制 |
+| `MPAU_MAX_UPLOAD_REQUEST_BYTES` | `21474836480` | 单个 HTTP 上传请求上限 |
 | `MPAU_MAX_MEDIA_TOTAL_BYTES` | `107374182400` | 每个用户批量素材与待执行上传的总容量上限 |
 | `MPAU_MAX_MEDIA_FILES` | `1000` | 每个用户批量素材库最多保留的文件数 |
 
@@ -142,9 +142,12 @@ Vite 会把 `/api` 代理到本机 `8788`，认证 Cookie 仍保持同源。
 
 ```powershell
 $env:MPAU_DATA_DIR = "D:\MPAU\data"
-$env:MPAU_ALLOWED_HOSTS = "mpau.internal.example.com,127.0.0.1,localhost"
-$env:MPAU_ALLOWED_ORIGINS = "https://mpau.internal.example.com"
-$env:MPAU_SECURE_COOKIES = "true"
+$env:MPAU_BIND_HOST = "0.0.0.0"
+$env:MPAU_PORT = "8788"
+$env:MPAU_ALLOWED_HOSTS = "10.31.108.221,127.0.0.1,localhost"
+$env:MPAU_ALLOWED_ORIGINS = "http://10.31.108.221:8788,http://127.0.0.1:8788,http://localhost:8788"
+$env:MPAU_SECURE_COOKIES = "false"
+$env:MPAU_ALLOW_REMOTE_BOOTSTRAP = "true"
 $env:MPAU_MAX_MEDIA_TOTAL_BYTES = "107374182400"
 ```
 
@@ -206,7 +209,7 @@ webapp/llm_adapter/          # 用户级模型凭据和激活路由
 webapp/frontend/src/         # 登录、用户管理与业务界面
 local_agent/                 # 用户电脑代理、云端客户端和本机任务执行器
 uploader/                    # 天猫与京东浏览器自动化
-deploy/windows/              # Windows Server 与 Caddy 示例
+deploy/windows/              # Windows Server 启动与打包示例
 tests/                       # 单元测试和多用户 ASGI 集成测试
 ```
 

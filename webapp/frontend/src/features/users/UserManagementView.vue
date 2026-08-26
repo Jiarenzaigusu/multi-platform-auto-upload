@@ -127,6 +127,30 @@ async function revokeSessions(user) {
   }
 }
 
+/** Delete a company login and all data owned by the target user. */
+async function deleteUser(user) {
+  if (user.id === props.currentUserId) {
+    error.value = '不能删除当前登录账号。'
+    return
+  }
+  const message = `确定删除 ${user.username} 吗？\n\n会删除该登录账号，以及该用户名下的任务记录、素材文件、店铺 Cookie、日志、LLM 密钥和本地助手配对记录。`
+  if (!window.confirm(message)) return
+  busyUserId.value = user.id
+  error.value = ''
+  notice.value = ''
+  try {
+    await apiRequest(`/api/admin/users/${user.id}`, { method: 'DELETE' })
+    users.value = users.value.filter((entry) => entry.id !== user.id)
+    delete resetPasswords[user.id]
+    notice.value = `${user.username} 已删除。`
+  } catch (requestError) {
+    error.value = requestError.message
+    await loadUsers()
+  } finally {
+    busyUserId.value = ''
+  }
+}
+
 onMounted(loadUsers)
 </script>
 
@@ -141,16 +165,44 @@ onMounted(loadUsers)
         <article v-for="user in users" :key="user.id" class="user-row">
           <div class="user-identity">
             <span>{{ user.username.slice(0, 1).toUpperCase() }}</span>
-            <div><strong>{{ user.username }} <em v-if="user.id === currentUserId">当前账号</em></strong><small>{{ user.id }}</small></div>
+            <div>
+              <strong>{{ user.username }} <em v-if="user.id === currentUserId">当前账号</em></strong>
+              <small>{{ user.id }}</small>
+            </div>
           </div>
-          <label><span>显示名称</span><input v-model="user.display_name" maxlength="80" /></label>
-          <label><span>角色</span><select v-model="user.role"><option value="admin">管理员</option><option value="operator">操作员</option></select></label>
-          <label><span>状态</span><select v-model="user.status"><option value="active">启用</option><option value="disabled">停用</option></select></label>
-          <button class="user-save" :disabled="busyUserId === user.id" type="button" @click="saveUser(user)">保存资料</button>
-          <div class="user-security">
-            <input v-model="resetPasswords[user.id]" autocomplete="new-password" minlength="10" placeholder="输入新密码（至少 10 位）" type="password" />
-            <button :disabled="busyUserId === user.id" type="button" @click="resetPassword(user)">重置密码</button>
-            <button :disabled="busyUserId === user.id" type="button" @click="revokeSessions(user)">退出所有会话</button>
+
+          <div class="user-panel">
+            <div class="user-profile">
+              <label>
+                <span>显示名称</span>
+                <input v-model="user.display_name" maxlength="80" />
+              </label>
+              <label>
+                <span>角色</span>
+                <select v-model="user.role">
+                  <option value="admin">管理员</option>
+                  <option value="operator">操作员</option>
+                </select>
+              </label>
+              <label>
+                <span>状态</span>
+                <select v-model="user.status">
+                  <option value="active">启用</option>
+                  <option value="disabled">停用</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="user-save-row">
+              <button class="user-save" :disabled="busyUserId === user.id" type="button" @click="saveUser(user)">保存资料</button>
+            </div>
+
+            <div class="user-security">
+              <input v-model="resetPasswords[user.id]" autocomplete="new-password" minlength="10" placeholder="输入新密码（至少 10 位）" type="password" />
+              <button :disabled="busyUserId === user.id" type="button" @click="resetPassword(user)">重置密码</button>
+              <button :disabled="busyUserId === user.id" type="button" @click="revokeSessions(user)">退出所有会话</button>
+              <button class="user-delete" :disabled="busyUserId === user.id || user.id === currentUserId" type="button" @click="deleteUser(user)">删除账号</button>
+            </div>
           </div>
         </article>
       </div>
@@ -223,33 +275,41 @@ onMounted(loadUsers)
 
 .user-row {
   display: grid;
-  grid-template-columns: minmax(190px, 1.35fr) minmax(140px, 1fr) 108px 92px auto;
-  gap: 9px;
-  align-items: end;
-  padding: 13px;
+  grid-template-columns: 1fr;
+  gap: 14px;
+  padding: 18px;
   border: 1px solid #d6dfd9;
-  border-radius: 11px;
-  background: #f7faf6;
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, .66), rgba(247, 250, 246, .96)),
+    #f7faf6;
+}
+
+.user-row + .user-row {
+  margin-top: 2px;
 }
 
 .user-identity {
   display: flex;
-  gap: 10px;
+  gap: 12px;
   align-items: center;
-  align-self: center;
+  min-width: 0;
+  padding: 0 0 13px;
+  border-bottom: 1px dashed #dfe8df;
 }
 
 .user-identity > span {
   display: grid;
-  flex: 0 0 34px;
-  width: 34px;
-  height: 34px;
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
   place-items: center;
   border-radius: 50%;
   color: #173532;
   background: #e7ed6a;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 900;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.35);
 }
 
 .user-identity strong,
@@ -259,21 +319,21 @@ onMounted(loadUsers)
 
 .user-identity strong {
   color: #24473c;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .user-identity small {
   overflow: hidden;
-  max-width: 190px;
-  margin-top: 3px;
+  max-width: min(520px, 62vw);
+  margin-top: 4px;
   color: #829087;
-  font-size: 9px;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .user-identity em {
-  margin-left: 4px;
+  margin-left: 6px;
   padding: 3px 6px;
   border-radius: 99px;
   color: #2e6448;
@@ -282,21 +342,35 @@ onMounted(loadUsers)
   font-style: normal;
 }
 
-.user-row label,
-.create-user-card label {
+.user-panel {
   display: grid;
-  gap: 5px;
+  gap: 10px;
+  min-width: 0;
 }
 
-.user-row label > span,
+.user-profile {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(132px, .48fr) minmax(118px, .42fr);
+  gap: 10px;
+  align-items: end;
+  min-width: 0;
+}
+
+.user-profile label,
+.create-user-card label {
+  display: grid;
+  gap: 6px;
+}
+
+.user-profile label > span,
 .create-user-card label > span {
   color: #496158;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 850;
 }
 
-.user-row input,
-.user-row select,
+.user-profile input,
+.user-profile select,
 .create-user-card input,
 .create-user-card select {
   min-width: 0;
@@ -310,8 +384,8 @@ onMounted(loadUsers)
   font-size: 12px;
 }
 
-.user-row input:focus,
-.user-row select:focus,
+.user-profile input:focus,
+.user-profile select:focus,
 .create-user-card input:focus,
 .create-user-card select:focus {
   border-color: #779e65;
@@ -320,6 +394,7 @@ onMounted(loadUsers)
 
 .user-row button,
 .create-user-card button {
+  min-height: 40px;
   padding: 9px 10px;
   border: 1px solid #91a88f;
   border-radius: 8px;
@@ -327,6 +402,8 @@ onMounted(loadUsers)
   background: #f9fbf5;
   font-size: 10px;
   font-weight: 800;
+  line-height: 1.25;
+  white-space: nowrap;
 }
 
 .user-row button:disabled,
@@ -339,14 +416,40 @@ onMounted(loadUsers)
   background: #eef6e3;
 }
 
-.user-security {
-  display: grid;
-  grid-template-columns: minmax(180px, 1fr) auto auto;
-  grid-column: 2 / -1;
-  gap: 7px;
+.user-save-row {
+  display: flex;
+  justify-content: flex-start;
 }
 
-.user-security button:last-child {
+.user-save-row .user-save {
+  min-width: 112px;
+}
+
+.user-security {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.user-security input {
+  flex: 1 1 240px;
+  min-height: 40px;
+}
+
+.user-security button {
+  flex: 0 0 auto;
+  min-width: 96px;
+}
+
+.user-security button:nth-of-type(3) {
+  min-width: 118px;
+}
+
+.user-security button:last-child,
+.user-delete {
   border-color: #c4968b;
   color: #843d31;
 }
@@ -439,38 +542,34 @@ onMounted(loadUsers)
     position: static;
   }
 
-  .user-row {
-    grid-template-columns: minmax(170px, 1.4fr) minmax(140px, 1fr) 108px 92px;
-  }
-
-  .user-save {
-    grid-column: 4;
+  .user-profile {
+    grid-template-columns: minmax(200px, 1fr) minmax(128px, .55fr) minmax(112px, .5fr);
   }
 
   .user-security {
-    grid-column: 1 / -1;
+    flex-wrap: wrap;
   }
 }
 
 @media (max-width: 700px) {
   .user-row {
-    grid-template-columns: 1fr 1fr;
+    gap: 10px;
   }
 
-  .user-identity {
-    grid-column: 1 / -1;
-  }
-
-  .user-save {
-    grid-column: auto;
-  }
-
-  .user-security {
+  .user-profile {
     grid-template-columns: 1fr;
   }
 
+  .user-security {
+    align-items: stretch;
+  }
+
   .user-security input {
-    grid-column: 1 / -1;
+    flex-basis: 100%;
+  }
+
+  .user-security button {
+    flex: 1 1 130px;
   }
 }
 </style>

@@ -14,5 +14,7 @@ if (-not (Test-Path $Python)) {
 }
 
 Set-Location $ProjectRoot
-& $Python -m uvicorn webapp.api.main:app --host 127.0.0.1 --port 8788 --workers 1
+$HostAddress = if ($env:MPAU_BIND_HOST) { $env:MPAU_BIND_HOST } else { "0.0.0.0" }
+$Port = if ($env:MPAU_PORT) { $env:MPAU_PORT } else { "8788" }
+& $Python -m uvicorn webapp.api.main:app --host $HostAddress --port $Port --workers 1
 exit $LASTEXITCODE
