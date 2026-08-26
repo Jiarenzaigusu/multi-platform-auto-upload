@@ -13,6 +13,9 @@
   --accent-deep: #9aa83a;
   --coral: #dc6f58;
   --danger: #a94c42;
+  --account-label-height: 18px;
+  --account-control-height: 39px;
+  --account-row-gap: 6px;
   color: var(--ink);
   background: var(--canvas);
   font-family: var(--font-sans);
@@ -595,17 +598,24 @@ svg {
   align-items: start;
 }
 
+.account-row {
+  margin-top: 10px;
+}
+
 .field {
   display: grid;
-  gap: 6px;
-  margin-bottom: 13px;
+  grid-template-rows: var(--account-label-height) var(--account-control-height);
+  gap: var(--account-row-gap);
+  margin-bottom: 0;
 }
 
 .field > span,
 .account-actions > span {
+  height: var(--account-label-height);
   color: #3b5b52;
   font-size: 13px;
   font-weight: 900;
+  line-height: var(--account-label-height);
   letter-spacing: .01em;
 }
 
@@ -629,6 +639,7 @@ svg {
 .field select,
 .account-actions input {
   width: 100%;
+  min-height: var(--account-control-height);
   border: 1px solid #cbd8d0;
   border-radius: 8px;
   outline: none;
@@ -715,20 +726,32 @@ svg {
 
 .account-actions {
   display: grid;
-  gap: 6px;
-  align-content: start;
+  grid-template-rows: var(--account-label-height) var(--account-control-height);
+  gap: var(--account-row-gap);
+  align-self: start;
+}
+
+.account-actions > span {
+  line-height: var(--account-label-height);
 }
 
 .account-actions > div {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 7px;
+  width: 100%;
+  min-height: var(--account-control-height);
 }
 
 .account-actions .quiet {
+  width: 100%;
+  min-height: var(--account-control-height);
   margin: 0;
-  padding: 7px 9px;
+  padding: 7px 8px;
   font-size: 10px;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 .workflow-tip,

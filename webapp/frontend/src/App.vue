@@ -1346,9 +1346,8 @@ onBeforeUnmount(() => {
           </div>
           <p class="workflow-tip"><strong>{{ workflowTip.split('：')[0] }}：</strong>{{ workflowTip.split('：').slice(1).join('：') }}</p>
 
-          <p class="choice-label">选择店铺</p>
-          <div class="field-row">
-            <label class="field"><input v-model="form.account" list="account-list" required placeholder="例如 shop1" /><datalist id="account-list"><option v-for="item in visibleAccounts" :key="`${item.platform}-${item.account}`" :value="item.account" /></datalist></label>
+          <div class="field-row account-row">
+            <label class="field"><span>选择店铺</span><input v-model="form.account" list="account-list" required placeholder="例如 shop1" /><datalist id="account-list"><option v-for="item in visibleAccounts" :key="`${item.platform}-${item.account}`" :value="item.account" /></datalist></label>
             <div class="account-actions"><span>账号状态</span><div><button type="button" class="quiet" @click="accountAction('check')">校验 Cookie</button><button type="button" class="quiet" @click="accountAction('login')">登录 / 重新登录</button><button type="button" class="quiet" @click="deleteAccount()">删除账号</button></div></div>
           </div>
 
@@ -1446,9 +1445,8 @@ onBeforeUnmount(() => {
             <label :class="{ selected: batchForm.contentType === 'video' }"><input v-model="batchForm.contentType" type="radio" value="video" /><span>视频发布</span></label>
             <label :class="{ selected: batchForm.contentType === 'article' }"><input v-model="batchForm.contentType" type="radio" value="article" /><span>图文发布</span></label>
           </div>
-          <p class="choice-label">选择店铺</p>
-          <div class="field-row">
-            <label class="field"><input v-model="batchForm.account" aria-label="店铺账号标识" list="batch-account-list" required placeholder="例如 shop1" /><datalist id="batch-account-list"><option v-for="item in batchAccounts" :key="`${batchForm.platform}-batch-${item.account}`" :value="item.account" /></datalist></label>
+          <div class="field-row account-row">
+            <label class="field"><span>选择店铺</span><input v-model="batchForm.account" aria-label="店铺账号标识" list="batch-account-list" required placeholder="例如 shop1" /><datalist id="batch-account-list"><option v-for="item in batchAccounts" :key="`${batchForm.platform}-batch-${item.account}`" :value="item.account" /></datalist></label>
             <div class="account-actions"><span>账号状态</span><div><button type="button" class="quiet" @click="accountAction('check', batchForm.platform, batchForm.account)">校验 Cookie</button><button type="button" class="quiet" @click="accountAction('login', batchForm.platform, batchForm.account)">登录 / 重新登录</button><button type="button" class="quiet" @click="deleteAccount(batchForm.platform, batchForm.account)">删除账号</button></div></div>
           </div>
 
