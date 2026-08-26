@@ -30,17 +30,25 @@ from utils.config import BASE_DIR
 from webapp.ai_copy import create_ai_copy_router
 from webapp.api.agent import create_agent_router
 from webapp.api.agent_batch import (
+    parse_remote_douyin_article_batch_workbook,
+    parse_remote_douyin_video_batch_workbook,
     parse_remote_jd_article_batch_workbook,
     parse_remote_jd_video_batch_workbook,
     parse_remote_tmall_article_batch_workbook,
     parse_remote_tmall_video_batch_workbook,
+    parse_remote_xiaohongshu_article_batch_workbook,
+    parse_remote_xiaohongshu_video_batch_workbook,
 )
 from webapp.api.batch import BatchValidationError
+from webapp.api.batch_douyin_article import parse_douyin_article_batch_workbook
+from webapp.api.batch_douyin_video import parse_douyin_video_batch_workbook
 from webapp.api.batch_jd_article import parse_jd_article_batch_workbook
 from webapp.api.batch_jd_video import parse_jd_video_batch_workbook
 from webapp.api.batch_templates import build_batch_template
 from webapp.api.batch_tmall_article import parse_tmall_article_batch_workbook
 from webapp.api.batch_tmall_video import parse_tmall_video_batch_workbook
+from webapp.api.batch_xiaohongshu_article import parse_xiaohongshu_article_batch_workbook
+from webapp.api.batch_xiaohongshu_video import parse_xiaohongshu_video_batch_workbook
 from webapp.api.media import (
     MediaQuotaExceededError,
     UploadTooLargeError,
@@ -53,6 +61,7 @@ from webapp.api.media import (
 )
 from webapp.api.models import (
     MAX_JD_ARTICLE_IMAGE_BYTES,
+    MAX_SOCIAL_ARTICLE_IMAGES,
     PublishRequest,
     SUPPORTED_COVER_IMAGE_EXTENSIONS,
     ValidationError,
@@ -406,7 +415,7 @@ def create_app(
                 "browser_capacity_location": "user_device",
             },
             "maintenance_errors": maintenance_errors,
-            "platforms": ["tmall", "jd"],
+            "platforms": ["tmall", "jd", "xiaohongshu", "douyin"],
         }
 
     @app.get("/api/health")
@@ -414,7 +423,7 @@ def create_app(
         return {
             "status": "ok",
             "execution_mode": "local_agent",
-            "platforms": ["tmall", "jd"],
+            "platforms": ["tmall", "jd", "xiaohongshu", "douyin"],
         }
 
     @app.get("/api/readiness")
@@ -594,15 +603,17 @@ def create_app(
             content = build_batch_template(selected_platform, selected_content_type)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        filename = (
-            "%E5%A4%A9%E7%8C%AB_%E5%9B%BE%E6%96%87_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx"
-            if selected_platform == "tmall" and selected_content_type == "article"
-            else "%E5%A4%A9%E7%8C%AB_%E8%A7%86%E9%A2%91_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx"
-            if selected_platform == "tmall"
-            else "%E4%BA%AC%E4%B8%9C_%E5%9B%BE%E6%96%87_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx"
-            if selected_content_type == "article"
-            else "%E4%BA%AC%E4%B8%9C_%E8%A7%86%E9%A2%91_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx"
-        )
+        filename_map = {
+            ("tmall", "video"): "%E5%A4%A9%E7%8C%AB_%E8%A7%86%E9%A2%91_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx",
+            ("tmall", "article"): "%E5%A4%A9%E7%8C%AB_%E5%9B%BE%E6%96%87_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx",
+            ("jd", "video"): "%E4%BA%AC%E4%B8%9C_%E8%A7%86%E9%A2%91_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx",
+            ("jd", "article"): "%E4%BA%AC%E4%B8%9C_%E5%9B%BE%E6%96%87_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx",
+            ("xiaohongshu", "video"): "%E5%B0%8F%E7%BA%A2%E4%B9%A6_%E8%A7%86%E9%A2%91_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx",
+            ("xiaohongshu", "article"): "%E5%B0%8F%E7%BA%A2%E4%B9%A6_%E5%9B%BE%E6%96%87_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx",
+            ("douyin", "video"): "%E6%8A%96%E9%9F%B3_%E8%A7%86%E9%A2%91_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx",
+            ("douyin", "article"): "%E6%8A%96%E9%9F%B3_%E5%9B%BE%E6%96%87_%E6%89%B9%E9%87%8F%E5%8F%91%E5%B8%83%E6%A8%A1%E6%9D%BF.xlsx",
+        }
+        filename = filename_map[(selected_platform, selected_content_type)]
         return StreamingResponse(
             iter([content]),
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -894,21 +905,23 @@ def create_app(
         if selected_content_type == "video":
             if not video_asset_id or parsed_image_asset_ids:
                 raise HTTPException(status_code=422, detail="视频发布必须提交本机视频素材 ID")
-        elif (
-            video_asset_id
-            or cover_asset_id
-            or not 1 <= len(parsed_image_asset_ids) <= (
-                9 if selected_platform == "tmall" else 20
-            )
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "天猫图文必须提交 1-9 个本机素材 ID"
-                    if selected_platform == "tmall"
-                    else "京东图文必须提交 1-20 个本机素材 ID"
-                ),
-            )
+        else:
+            if selected_platform == "tmall":
+                max_article_images = 9
+                image_count_detail = "天猫图文必须提交 1-9 个本机素材 ID"
+            elif selected_platform == "jd":
+                max_article_images = 20
+                image_count_detail = "京东图文必须提交 1-20 个本机素材 ID"
+            else:
+                max_article_images = MAX_SOCIAL_ARTICLE_IMAGES
+                platform_name = "小红书" if selected_platform == "xiaohongshu" else "抖音"
+                image_count_detail = f"{platform_name}图文必须提交 1-35 个本机素材 ID"
+            if (
+                video_asset_id
+                or cover_asset_id
+                or not 1 <= len(parsed_image_asset_ids) <= max_article_images
+            ):
+                raise HTTPException(status_code=422, detail=image_count_detail)
 
         try:
             manager.start()
@@ -1108,6 +1121,76 @@ def create_app(
             )
         return await create_batch_jobs(
             platform_label="京东",
+            parser=parser,
+            account=account,
+            workbook=workbook,
+            content_type=selected_content_type,
+            dry_run=dry_run,
+            headed=headed,
+            workspace=workspace,
+        )
+
+    @app.post("/api/jobs/batch/xiaohongshu", status_code=202)
+    async def create_xiaohongshu_batch_jobs(
+        account: str = Form(...),
+        workbook: UploadFile = File(...),
+        content_type: str = Form("video"),
+        dry_run: bool = Form(False),
+        headed: bool = Form(True),
+        workspace: UserWorkspace = Depends(operator_workspace),
+    ) -> JSONResponse:
+        selected_content_type = validate_content_type(
+            content_type if isinstance(content_type, str) else "video"
+        )
+        if getattr(workspace.task_manager, "remote_execution", False):
+            parser = (
+                parse_remote_xiaohongshu_video_batch_workbook
+                if selected_content_type == "video"
+                else parse_remote_xiaohongshu_article_batch_workbook
+            )
+        else:
+            parser = (
+                parse_xiaohongshu_video_batch_workbook
+                if selected_content_type == "video"
+                else parse_xiaohongshu_article_batch_workbook
+            )
+        return await create_batch_jobs(
+            platform_label="小红书",
+            parser=parser,
+            account=account,
+            workbook=workbook,
+            content_type=selected_content_type,
+            dry_run=dry_run,
+            headed=headed,
+            workspace=workspace,
+        )
+
+    @app.post("/api/jobs/batch/douyin", status_code=202)
+    async def create_douyin_batch_jobs(
+        account: str = Form(...),
+        workbook: UploadFile = File(...),
+        content_type: str = Form("video"),
+        dry_run: bool = Form(False),
+        headed: bool = Form(True),
+        workspace: UserWorkspace = Depends(operator_workspace),
+    ) -> JSONResponse:
+        selected_content_type = validate_content_type(
+            content_type if isinstance(content_type, str) else "video"
+        )
+        if getattr(workspace.task_manager, "remote_execution", False):
+            parser = (
+                parse_remote_douyin_video_batch_workbook
+                if selected_content_type == "video"
+                else parse_remote_douyin_article_batch_workbook
+            )
+        else:
+            parser = (
+                parse_douyin_video_batch_workbook
+                if selected_content_type == "video"
+                else parse_douyin_article_batch_workbook
+            )
+        return await create_batch_jobs(
+            platform_label="抖音",
             parser=parser,
             account=account,
             workbook=workbook,

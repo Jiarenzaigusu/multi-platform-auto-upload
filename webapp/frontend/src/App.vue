@@ -44,6 +44,32 @@ const jdCreatorDeclarationOptions = [
   '内容为转载',
   '个人观点，仅供参考',
 ]
+const platformMeta = {
+  tmall: {
+    label: '天猫光合',
+    imageLimit: 9,
+    imageAccept: 'image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp',
+    creatorDeclarations: tmallCreatorDeclarationOptions,
+  },
+  jd: {
+    label: '京东京麦',
+    imageLimit: 20,
+    imageAccept: 'image/jpeg,image/png,.jpg,.jpeg,.png',
+    creatorDeclarations: jdCreatorDeclarationOptions,
+  },
+  xiaohongshu: {
+    label: '小红书',
+    imageLimit: 35,
+    imageAccept: 'image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp',
+    creatorDeclarations: [],
+  },
+  douyin: {
+    label: '抖音',
+    imageLimit: 35,
+    imageAccept: 'image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp',
+    creatorDeclarations: [],
+  },
+}
 const draftRestoredVideoName = ref('')
 const draftRestoredAt = ref('')
 const isRestoringDraft = ref(true)
@@ -96,7 +122,7 @@ function workspaceKey(platform, contentType) {
 
 function createWorkspaceDrafts() {
   return Object.fromEntries(
-    ['tmall', 'jd'].flatMap((platform) => ['video', 'article'].map((contentType) => [
+    ['tmall', 'jd', 'xiaohongshu', 'douyin'].flatMap((platform) => ['video', 'article'].map((contentType) => [
       workspaceKey(platform, contentType), createEmptyWorkspaceDraft(),
     ])),
   )
@@ -248,7 +274,7 @@ function persistFormDraft() {
 
 function applySavedFormDraft(saved) {
   if (!saved || typeof saved !== 'object') return
-  const savedPlatform = saved.platform === 'tmall' || saved.platform === 'jd'
+  const savedPlatform = Object.prototype.hasOwnProperty.call(platformMeta, saved.platform)
     ? saved.platform
     : form.platform
   if (saved.workspaceDrafts && typeof saved.workspaceDrafts === 'object') {
@@ -257,7 +283,7 @@ function applySavedFormDraft(saved) {
     }
   } else if (saved.platformDrafts && typeof saved.platformDrafts === 'object') {
     const contentType = saved.contentType === 'article' ? 'article' : 'video'
-    for (const platform of ['tmall', 'jd']) {
+    for (const platform of ['tmall', 'jd', 'xiaohongshu', 'douyin']) {
       Object.assign(workspaceDrafts[workspaceKey(platform, contentType)], normalizeWorkspaceDraft(saved.platformDrafts[platform]))
     }
   }
@@ -374,8 +400,9 @@ function applyWorkspaceDraft(platform, contentType) {
   for (const key of WORKSPACE_DRAFT_KEYS) {
     form[key] = draft[key]
   }
-  const options = platform === 'tmall' ? tmallCreatorDeclarationOptions : jdCreatorDeclarationOptions
-  if (!options.includes(form.creatorDeclaration)) form.creatorDeclaration = ''
+  const options = platformMeta[platform]?.creatorDeclarations || []
+  if (options.length && !options.includes(form.creatorDeclaration)) form.creatorDeclaration = ''
+  if (!options.length) form.creatorDeclaration = ''
 }
 
 const batchForm = reactive({
@@ -388,18 +415,55 @@ const batchForm = reactive({
 })
 
 const isTmall = computed(() => form.platform === 'tmall')
-const creatorDeclarationOptions = computed(() => (
-  isTmall.value ? tmallCreatorDeclarationOptions : jdCreatorDeclarationOptions
-))
+const isJD = computed(() => form.platform === 'jd')
+const isXiaohongshu = computed(() => form.platform === 'xiaohongshu')
+const isDouyin = computed(() => form.platform === 'douyin')
+const creatorDeclarationOptions = computed(() => platformMeta[form.platform]?.creatorDeclarations || [])
 const isVideo = computed(() => form.contentType === 'video')
 const isArticle = computed(() => form.contentType === 'article')
 const isAdmin = computed(() => currentUser.value?.role === 'admin')
-const platformLabel = (platform) => (platform === 'tmall' ? '天猫光合' : '京东京麦')
+const platformLabel = (platform) => platformMeta[platform]?.label || platform
 const batchPlatformLabel = computed(() => platformLabel(batchForm.platform))
 const batchContentTypeLabel = computed(() => batchForm.contentType === 'article' ? '图文' : '视频')
 const batchTemplateUrl = computed(() => apiUrl(
   `/api/batch-templates-v2/${batchForm.platform}?content_type=${batchForm.contentType}`,
 ))
+const platformEntries = computed(() => Object.entries(platformMeta))
+const articleImageLimit = computed(() => platformMeta[form.platform]?.imageLimit || 20)
+const articleImageAccept = computed(() => platformMeta[form.platform]?.imageAccept || platformMeta.jd.imageAccept)
+const titleLimit = computed(() => {
+  if (isTmall.value || isDouyin.value) return 30
+  if (isXiaohongshu.value) return 20
+  return isVideo.value ? 27 : 20
+})
+const titlePlaceholder = computed(() => {
+  if (isTmall.value) return '最多 30 个字符'
+  if (isJD.value) return `京东要求 5-${isVideo.value ? 27 : 20} 个字符`
+  if (isXiaohongshu.value) return '小红书最多 20 个字符'
+  return '抖音最多 30 个字符'
+})
+const workflowTip = computed(() => {
+  if (isTmall.value && isVideo.value) return '天猫视频步骤：上传视频 → 可选设置自定义封面 → 填写标题、文案和标签 → 参与话题 → 可选添加音乐 → 关联商品 → 设置定时 → 选择创作者声明 → 提交发布。'
+  if (isTmall.value) return '天猫图文步骤：按顺序上传 1-9 张图片 → 填写标题、文案和标签 → 参与话题 → 可选添加音乐 → 关联商品 → 设置定时 → 选择创作者声明 → 提交发布。'
+  if (isJD.value && isVideo.value) return '京东视频步骤：上传视频 → 可选设置封面 → 填写标题 → 关联商品/参与话题 → 选择创作声明与自主原创 → 设置定时 → 提交发布。'
+  if (isJD.value) return '京东图文步骤：按顺序上传 1-20 张 JPG/PNG 图片 → 填写标题与正文 → 关联商品/参与话题 → 选择创作声明与自主原创 → 设置定时 → 提交发布。'
+  if (isXiaohongshu.value && isVideo.value) return '小红书视频步骤：上传视频 → 可选设置封面 → 填写标题、正文和标签 → 可选定时 → 提交发布。'
+  if (isXiaohongshu.value) return '小红书图文步骤：按顺序上传 1-35 张 JPG/PNG/WebP 图片 → 填写标题、正文和标签 → 可选定时 → 提交发布。'
+  if (isDouyin.value && isVideo.value) return '抖音视频步骤：上传视频 → 可选设置横版封面 → 填写标题、描述和标签 → 可选定时 → 提交发布。'
+  return '抖音图文步骤：按顺序上传 1-35 张 JPG/PNG/WebP 图片 → 填写标题、描述和标签 → 可选定时 → 提交发布。'
+})
+const descriptionLabel = computed(() => {
+  if (isTmall.value) return '发布文案'
+  if (isJD.value) return '正文内容'
+  if (isXiaohongshu.value) return '笔记正文'
+  return isVideo.value ? '视频描述' : '图文描述'
+})
+const descriptionPlaceholder = computed(() => {
+  if (isTmall.value) return '填写视频描述与种草文案'
+  if (isJD.value) return '填写京东图文正文'
+  if (isXiaohongshu.value) return '填写小红书笔记正文'
+  return '填写抖音描述文案'
+})
 const jobLabel = (kind) => ({ publish: '发布', login: '登录', check: '校验', delete_account: '删除本地账号' }[kind] || kind)
 const statusLabel = (status) => ({ queued: '排队中', running: '执行中', cancelling: '正在中断', cancelled: '已中断', succeeded: '已完成', failed: '失败', uncertain: '结果待核对' }[status] || status)
 const statusClass = (status) => `status status-${status}`
@@ -536,10 +600,10 @@ function showNotice(message, type = 'info') {
 
 function importAiCopyToWorkbench(draft) {
   if (!draft || typeof draft.title !== 'string' || typeof draft.body !== 'string') return
-  if (!['tmall', 'jd'].includes(draft.platform) || !['video', 'article'].includes(draft.contentType)) return
+  if (!Object.prototype.hasOwnProperty.call(platformMeta, draft.platform) || !['video', 'article'].includes(draft.contentType)) return
   activateWorkspace(draft.platform, draft.contentType)
   form.title = draft.title
-  const supportsDescription = draft.platform === 'tmall' || draft.contentType === 'article'
+  const supportsDescription = draft.platform !== 'jd' || draft.contentType === 'article'
   if (supportsDescription) form.description = draft.body
   snapshotWorkspaceDraft(draft.platform, draft.contentType)
   persistFormDraft()
@@ -828,13 +892,13 @@ function clearVideo() {
 function onImagesChange(event) {
   form.images = Array.from(event.target.files || [])
   if (imageFolderInput.value) imageFolderInput.value.value = ''
-  const maxImages = isTmall.value ? 9 : 20
+  const maxImages = platformMeta[form.platform]?.imageLimit || 20
   publishError.value = form.images.length > maxImages ? `图片超过 ${maxImages} 张，请移除多余图片后重试` : ''
 }
 
 function onImageFolderChange(event) {
   const images = Array.from(event.target.files || [])
-    .filter((file) => (isTmall.value ? /\.(jpe?g|png|webp)$/i : /\.(jpe?g|png)$/i).test(file.name))
+    .filter((file) => (isJD.value ? /\.(jpe?g|png)$/i : /\.(jpe?g|png|webp)$/i).test(file.name))
     .sort((left, right) => (left.webkitRelativePath || left.name).localeCompare(
       right.webkitRelativePath || right.name,
       undefined,
@@ -842,7 +906,7 @@ function onImageFolderChange(event) {
     ))
   form.images = images
   if (imageInput.value) imageInput.value.value = ''
-  const maxImages = isTmall.value ? 9 : 20
+  const maxImages = platformMeta[form.platform]?.imageLimit || 20
   publishError.value = images.length > maxImages ? `文件夹内图片超过 ${maxImages} 张，请移除多余图片后重试` : ''
 }
 
@@ -915,17 +979,17 @@ async function submitPublish() {
     publishError.value = '请先重新选择一个视频文件'
     return
   }
-  const articleImageLimit = isTmall.value ? 9 : 20
+  const articleImageLimit = platformMeta[form.platform]?.imageLimit || 20
   if (isArticle.value && (!form.images.length || form.images.length > articleImageLimit)) {
-    publishError.value = `${isTmall.value ? '天猫' : '京东'}图文必须选择 1-${articleImageLimit} 张图片`
+    publishError.value = `${platformLabel(form.platform)}图文必须选择 1-${articleImageLimit} 张图片`
     return
   }
   if (isArticle.value && form.images.some((image) => !(
-    isTmall.value ? /\.(jpe?g|png|webp)$/i : /\.(jpe?g|png)$/i
+    isJD.value ? /\.(jpe?g|png)$/i : /\.(jpe?g|png|webp)$/i
   ).test(image.name))) {
-    publishError.value = isTmall.value
-      ? '图文图片仅支持 JPG、PNG 或 WebP 格式'
-      : '京东图文图片仅支持 JPG 或 PNG 格式'
+    publishError.value = isJD.value
+      ? '京东图文图片仅支持 JPG 或 PNG 格式'
+      : '图文图片仅支持 JPG、PNG 或 WebP 格式'
     return
   }
   if (isVideo.value && form.coverImage && form.coverImage.size > MAX_COVER_IMAGE_BYTES) {
@@ -936,19 +1000,20 @@ async function submitPublish() {
     publishError.value = `请先填写${isArticle.value ? '图文' : '视频'}标题`
     return
   }
-  if (!creatorDeclarationOptions.value.includes(form.creatorDeclaration)) {
+  if (creatorDeclarationOptions.value.length && !creatorDeclarationOptions.value.includes(form.creatorDeclaration)) {
     publishError.value = '请选择与实际内容相符的创作者声明'
     return
   }
-  if (isTmall.value && uploaderTags.value.length > 4) {
-    publishError.value = '天猫光合最多支持 4 个标签'
+  const tagLimit = isTmall.value ? 4 : 20
+  if (uploaderTags.value.length > tagLimit) {
+    publishError.value = `${platformLabel(form.platform)}最多支持 ${tagLimit} 个标签`
     return
   }
   if (isTmall.value && contentTextLength.value > 1000) {
     publishError.value = '天猫发布文案与标签合计最多 1000 个字符'
     return
   }
-  if (enteredGoodsIds.value.some((goodsId) => !/^\d+$/.test(goodsId))) {
+  if ((isTmall.value || isJD.value) && enteredGoodsIds.value.some((goodsId) => !/^\d+$/.test(goodsId))) {
     publishError.value = '商品 ID 必须为纯数字，多个 ID 请使用逗号或换行分隔'
     return
   }
@@ -956,7 +1021,7 @@ async function submitPublish() {
     publishError.value = '天猫一次最多关联 6 个商品 ID'
     return
   }
-  if (!isTmall.value && uniqueGoodsIds.value.length > 10) {
+  if (isJD.value && uniqueGoodsIds.value.length > 10) {
     publishError.value = '京东一次最多关联 10 个商品 ID'
     return
   }
@@ -966,14 +1031,14 @@ async function submitPublish() {
   data.append('account', form.account)
   data.append('content_type', form.contentType)
   data.append('title', form.title)
-  data.append('description', isTmall.value || isArticle.value ? form.description : '')
-  data.append('tags', isTmall.value ? form.tags : '')
-  data.append('goods_id', form.goodsId)
-  data.append('activity_topic', form.activityTopic)
+  data.append('description', isJD.value && isVideo.value ? '' : form.description)
+  data.append('tags', isJD.value ? '' : form.tags)
+  data.append('goods_id', isTmall.value || isJD.value ? form.goodsId : '')
+  data.append('activity_topic', isTmall.value || isJD.value ? form.activityTopic : '')
   data.append('music_name', isTmall.value ? form.musicName : '')
-  data.append('creator_declaration', form.creatorDeclaration)
+  data.append('creator_declaration', creatorDeclarationOptions.value.length ? form.creatorDeclaration : '')
   data.append('schedule', form.schedule.replace('T', ' '))
-  data.append('original', String(isTmall.value ? false : form.original))
+  data.append('original', String(isJD.value ? form.original : false))
   data.append('dry_run', String(form.dryRun))
   data.append('headed', String(form.headed))
 
@@ -1080,7 +1145,7 @@ async function accountAction(action, platform = form.platform, account = form.ac
   try {
     const query = action === 'login' ? '?headed=true' : ''
     const result = await request(`/api/accounts/${platform}/${encodeURIComponent(account)}/${action}${query}`, { method: 'POST' })
-    showNotice(action === 'login' ? '登录任务已发送到当前电脑，请在本机 Microsoft Edge 完成登录' : '账号校验任务已发送到当前电脑', 'success')
+    showNotice(action === 'login' ? '登录任务已发送到当前电脑，请在本机 Chrome/Edge 完成登录' : '账号校验任务已发送到当前电脑', 'success')
     await refreshDashboard()
     await loadJob(result.job.id)
   } catch (error) {
@@ -1230,8 +1295,8 @@ onBeforeUnmount(() => {
 
       <div class="rail-note">
         <span>运行范围</span>
-        <strong>仅天猫与京东</strong>
-        <p>浏览器自动化在本机运行。登录、短信和风控验证需要你在 Microsoft Edge 中完成。</p>
+        <strong>天猫 / 京东 / 小红书 / 抖音</strong>
+        <p>浏览器自动化在本机运行。登录、短信和风控验证需要你在本机 Chrome/Edge 中完成。</p>
       </div>
     </aside>
 
@@ -1272,18 +1337,14 @@ onBeforeUnmount(() => {
           <div class="section-heading"><span>01</span><div><h2>选择平台、发布类型与店铺</h2></div></div>
           <p class="choice-label">选择平台</p>
           <div class="platform-choice">
-            <label :class="{ selected: form.platform === 'tmall' }"><input v-model="form.platform" type="radio" value="tmall" /><span>天猫光合</span></label>
-            <label :class="{ selected: form.platform === 'jd' }"><input v-model="form.platform" type="radio" value="jd" /><span>京东京麦</span></label>
+            <label v-for="[platform, meta] in platformEntries" :key="`publish-${platform}`" :class="{ selected: form.platform === platform }"><input v-model="form.platform" type="radio" :value="platform" /><span>{{ meta.label }}</span></label>
           </div>
           <p class="choice-label">选择发布类型</p>
           <div class="platform-choice content-type-choice">
             <label :class="{ selected: form.contentType === 'video' }"><input v-model="form.contentType" type="radio" value="video" /><span>视频发布</span></label>
             <label :class="{ selected: form.contentType === 'article' }"><input v-model="form.contentType" type="radio" value="article" /><span>图文发布</span></label>
           </div>
-          <p v-if="isTmall && isVideo" class="workflow-tip"><strong>天猫视频步骤：</strong>上传视频 → 可选设置自定义封面 → 填写标题、文案和标签 → 参与话题 → 可选添加音乐 → 关联商品 → 设置定时 → 选择创作者声明 → 提交发布。</p>
-          <p v-else-if="isTmall" class="workflow-tip"><strong>天猫图文步骤：</strong>按顺序上传 1-9 张图片 → 填写标题、文案和标签 → 参与话题 → 可选添加音乐 → 关联商品 → 设置定时 → 选择创作者声明 → 提交发布。</p>
-          <p v-else-if="isVideo" class="workflow-tip"><strong>京东视频步骤：</strong>上传视频 → 可选设置封面 → 填写标题 → 关联商品/参与话题 → 选择创作声明与自主原创 → 设置定时 → 提交发布。</p>
-          <p v-else class="workflow-tip"><strong>京东图文步骤：</strong>按顺序上传 1-20 张 JPG/PNG 图片 → 填写标题与正文 → 关联商品/参与话题 → 选择创作声明与自主原创 → 设置定时 → 提交发布。</p>
+          <p class="workflow-tip"><strong>{{ workflowTip.split('：')[0] }}：</strong>{{ workflowTip.split('：').slice(1).join('：') }}</p>
 
           <p class="choice-label">选择店铺</p>
           <div class="field-row">
@@ -1305,8 +1366,8 @@ onBeforeUnmount(() => {
           </template>
           <div v-else class="field image-upload-field">
             <span>图文图片</span>
-            <input id="article-image-files" ref="imageInput" class="native-file-input" type="file" multiple :accept="isTmall ? 'image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp' : 'image/jpeg,image/png,.jpg,.jpeg,.png'" @change="onImagesChange" />
-            <label class="cover-file-picker" :class="{ selected: form.images.length }" for="article-image-files"><span class="cover-file-action">{{ form.images.length ? '重新选择图片' : '选择图片文件' }}</span><span class="cover-file-name">{{ form.images.length ? `已选择 ${form.images.length} 张图片` : `按选择顺序上传，最多 ${isTmall ? 9 : 20} 张` }}</span></label>
+            <input id="article-image-files" ref="imageInput" class="native-file-input" type="file" multiple :accept="articleImageAccept" @change="onImagesChange" />
+            <label class="cover-file-picker" :class="{ selected: form.images.length }" for="article-image-files"><span class="cover-file-action">{{ form.images.length ? '重新选择图片' : '选择图片文件' }}</span><span class="cover-file-name">{{ form.images.length ? `已选择 ${form.images.length} 张图片` : `按选择顺序上传，最多 ${articleImageLimit} 张` }}</span></label>
             <input id="article-image-folder" ref="imageFolderInput" class="native-file-input" type="file" multiple webkitdirectory directory @change="onImageFolderChange" />
             <label class="cover-file-picker" for="article-image-folder"><span class="cover-file-action">选择图片文件夹</span><span class="cover-file-name">读取文件夹第一层图片，并按文件名顺序发布</span></label>
             <ol v-if="form.images.length" class="image-file-list"><li v-for="(image, index) in form.images" :key="`${image.name}-${image.lastModified}-${index}`"><b>{{ index + 1 }}</b><span>{{ image.name }}</span><small>{{ (image.size / 1024 / 1024).toFixed(1) }} MB</small><div class="image-file-actions"><button type="button" :disabled="index === 0" @click="moveImage(index, -1)">上移</button><button type="button" :disabled="index === form.images.length - 1" @click="moveImage(index, 1)">下移</button><button type="button" @click="removeImage(index)">移除</button></div></li></ol>
@@ -1327,7 +1388,7 @@ onBeforeUnmount(() => {
             <small v-if="draftRestoredVideoName">含上次视频：<b>{{ draftRestoredVideoName }}</b></small>
             <small v-else>可在修改后直接再次发布。</small>
           </p>
-          <label class="field"><span>标题</span><input v-model="form.title" required :maxlength="isTmall ? 30 : (isVideo ? 27 : 20)" :placeholder="isTmall ? '最多 30 个字符' : `京东要求 5-${isVideo ? 27 : 20} 个字符`" /></label>
+          <label class="field"><span>标题</span><input v-model="form.title" required :maxlength="titleLimit" :placeholder="titlePlaceholder" /></label>
 
           <template v-if="isTmall">
             <label class="field"><span>发布文案 <em>可选</em></span><textarea v-model="form.description" :maxlength="descriptionLimit" placeholder="填写视频描述与种草文案" /><small class="field-hint">文案与标签会写入同一富文本字段：{{ contentTextLength }} / 1000</small></label>
@@ -1337,22 +1398,25 @@ onBeforeUnmount(() => {
             </div>
             <label class="field"><span>音乐名称 <em>可选</em></span><input v-model="form.musicName" maxlength="100" placeholder="例如：默契" /></label>
           </template>
-          <template v-else-if="isArticle">
-            <label class="field"><span>正文内容 <em>可选</em></span><textarea v-model="form.description" maxlength="1001" placeholder="填写京东图文正文" /></label>
-            <label class="field"><span>参与话题 <em>可选</em></span><input v-model="form.activityTopic" placeholder="例如：数码先锋" /></label>
+          <template v-else-if="isArticle || !isJD">
+            <label class="field"><span>{{ descriptionLabel }} <em>可选</em></span><textarea v-model="form.description" :maxlength="isJD ? 1001 : 1000" :placeholder="descriptionPlaceholder" /></label>
+            <div v-if="!isJD" class="field-row">
+              <label class="field"><span>标签 <em>可选</em></span><input v-model="form.tags" placeholder="女鞋,夏季穿搭,通勤鞋" /></label>
+            </div>
+            <label v-if="isJD" class="field"><span>参与话题 <em>可选</em></span><input v-model="form.activityTopic" placeholder="例如：数码先锋" /></label>
           </template>
           <p v-else class="platform-tip">京东京麦视频不支持独立文案与标签字段；标题会写入平台正文标题。</p>
 
           <div class="section-heading"><span>03</span><div><h2>发布设置</h2></div></div>
           <div class="field-row">
-            <label class="field"><span>商品 ID <em>可选</em></span><textarea v-model="form.goodsId" maxlength="256" placeholder="每行一个商品 ID" /></label>
+            <label v-if="isTmall || isJD" class="field"><span>商品 ID <em>可选</em></span><textarea v-model="form.goodsId" maxlength="256" placeholder="每行一个商品 ID" /></label>
             <div class="field"><span>定时发布 <em>可选</em></span><div class="schedule-input-wrap"><input ref="scheduleInput" v-model="form.schedule" :min="scheduleMinimum" aria-hidden="true" class="schedule-input" tabindex="-1" type="datetime-local" /><button aria-label="选择定时发布时间" class="schedule-display" type="button" @click="openSchedulePicker"><span>{{ scheduleDisplay }}</span><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="2" /><path d="M7.5 3.5v3M16.5 3.5v3M3.5 9h17M7.5 12h.01M12 12h.01M16.5 12h.01M7.5 16h.01M12 16h.01M16.5 16h.01" /></svg></button></div></div>
           </div>
-          <label class="field"><span>创作者声明</span><select v-model="form.creatorDeclaration" required><option disabled value="">请选择与实际内容相符的声明</option><option v-for="item in creatorDeclarationOptions" :key="item" :value="item">{{ item }}</option></select></label>
+          <label v-if="creatorDeclarationOptions.length" class="field"><span>创作者声明</span><select v-model="form.creatorDeclaration" required><option disabled value="">请选择与实际内容相符的声明</option><option v-for="item in creatorDeclarationOptions" :key="item" :value="item">{{ item }}</option></select></label>
           <div class="toggles">
             <label><input v-model="form.dryRun" type="checkbox" /><span><strong>流程验证</strong><small>填写并上传，但不点击正式发布</small></span></label>
-            <label><input v-model="form.headed" type="checkbox" /><span><strong>显示 Microsoft Edge</strong><small>登录、短信和京东验证码需要在可见浏览器中手动完成</small></span></label>
-            <label v-if="!isTmall"><input v-model="form.original" type="checkbox" /><span><strong>自主原创 <em>可选</em></strong><small>仅账号已开通该能力时可用</small></span></label>
+            <label><input v-model="form.headed" type="checkbox" /><span><strong>显示 Chrome/Edge</strong><small>登录、短信和风控验证需要在可见浏览器中手动完成</small></span></label>
+            <label v-if="isJD"><input v-model="form.original" type="checkbox" /><span><strong>自主原创 <em>可选</em></strong><small>仅账号已开通该能力时可用</small></span></label>
           </div>
           <p v-if="publishError" class="publish-error" role="alert">{{ publishError }}</p>
           <button class="primary" :disabled="submitting" type="submit">{{ submitting ? (localUploadStatus || '正在创建任务…') : form.dryRun ? '创建流程验证任务' : '创建正式发布任务' }}</button>
@@ -1362,7 +1426,7 @@ onBeforeUnmount(() => {
           <p class="eyebrow">TODAY'S PULSE</p>
           <div class="metric"><strong>{{ counts.total }}</strong><span>全部任务</span></div>
           <div class="metrics"><div><strong>{{ counts.running }}</strong><span>执行中</span></div><div><strong>{{ counts.done }}</strong><span>已完成</span></div><div><strong>{{ counts.failed }}</strong><span>需处理</span></div></div>
-          <div class="checklist"><h3>每次发布前</h3><p><b>1</b> 先校验店铺 Cookie</p><p><b>2</b> 确认视频、标题和商品 ID</p><p><b>3</b> 首次建议使用流程验证</p><p><b>4</b> 任务期间不要关闭 Microsoft Edge</p></div>
+          <div class="checklist"><h3>每次发布前</h3><p><b>1</b> 先校验账号 Cookie</p><p><b>2</b> 确认素材、标题和平台字段</p><p><b>3</b> 首次建议使用流程验证</p><p><b>4</b> 任务期间不要关闭 Chrome/Edge</p></div>
         </aside>
       </section>
 
@@ -1375,8 +1439,7 @@ onBeforeUnmount(() => {
           <div class="section-heading"><span>01</span><div><h2>选择平台、发布类型与店铺</h2></div></div>
           <p class="choice-label">选择平台</p>
           <div class="platform-choice batch-platform-choice">
-            <label :class="{ selected: batchForm.platform === 'tmall' }"><input v-model="batchForm.platform" type="radio" value="tmall" /><span>天猫光合</span></label>
-            <label :class="{ selected: batchForm.platform === 'jd' }"><input v-model="batchForm.platform" type="radio" value="jd" /><span>京东京麦</span></label>
+            <label v-for="[platform, meta] in platformEntries" :key="`batch-${platform}`" :class="{ selected: batchForm.platform === platform }"><input v-model="batchForm.platform" type="radio" :value="platform" /><span>{{ meta.label }}</span></label>
           </div>
           <p class="choice-label">选择发布类型</p>
           <div class="content-choice batch-content-choice">
@@ -1405,7 +1468,7 @@ onBeforeUnmount(() => {
           <div class="section-heading"><span>03</span><div><h2>执行方式</h2></div></div>
           <div class="toggles">
             <label><input v-model="batchForm.dryRun" type="checkbox" /><span><strong>流程验证</strong><small>填写并上传每一行内容，但不点击正式发布</small></span></label>
-            <label><input v-model="batchForm.headed" type="checkbox" /><span><strong>显示 Microsoft Edge</strong><small>登录、短信和风控验证需要在可见浏览器中手动完成</small></span></label>
+            <label><input v-model="batchForm.headed" type="checkbox" /><span><strong>显示 Chrome/Edge</strong><small>登录、短信和风控验证需要在可见浏览器中手动完成</small></span></label>
           </div>
           <p v-if="batchSubmitError" class="publish-error" role="alert">{{ batchSubmitError }}</p>
           <button class="primary" :disabled="batchSubmitting" type="submit">{{ batchSubmitting ? '正在校验并创建任务…' : batchForm.dryRun ? `创建${batchPlatformLabel}流程验证任务` : `创建${batchPlatformLabel}正式发布任务` }}</button>
@@ -1414,7 +1477,7 @@ onBeforeUnmount(() => {
         <aside class="summary-panel batch-summary-panel">
           <p class="eyebrow">{{ batchForm.platform.toUpperCase() }} BATCH</p>
           <div class="metric"><strong>200</strong><span>单次最多内容行</span></div>
-          <div class="checklist"><h3>导入前检查</h3><p><b>1</b> 先校验店铺 Cookie</p><p><b>2</b> 视频路径必须在本机存在</p><p><b>3</b> 首次建议整表流程验证</p><p><b>4</b> 任务期间不要关闭 Edge</p></div>
+          <div class="checklist"><h3>导入前检查</h3><p><b>1</b> 先校验店铺 Cookie</p><p><b>2</b> 视频路径必须在本机存在</p><p><b>3</b> 首次建议整表流程验证</p><p><b>4</b> 任务期间不要关闭 Chrome/Edge</p></div>
         </aside>
       </section>
 

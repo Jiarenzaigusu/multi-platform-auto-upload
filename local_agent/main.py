@@ -27,7 +27,7 @@ from local_agent.paths import (
 from local_agent.runner import AgentJobRunner
 from uploader.errors import PublishResultUncertainError
 from utils.files import validate_cover_image_filename, validate_media_filename
-from webapp.api.models import JD_ARTICLE_IMAGE_EXTENSIONS, SUPPORTED_COVER_IMAGE_EXTENSIONS
+from webapp.api.models import JD_ARTICLE_IMAGE_EXTENSIONS, MAX_SOCIAL_ARTICLE_IMAGES, SUPPORTED_COVER_IMAGE_EXTENSIONS
 
 _LOCAL_ASSET_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
@@ -84,7 +84,12 @@ def _article_images_from_folder(
         )
     except OSError as exc:
         raise RuntimeError("Excel 中的图文图片文件夹无法读取") from exc
-    max_images = 20 if platform_name == "jd" else 9
+    if platform_name == "tmall":
+        max_images = 9
+    elif platform_name == "jd":
+        max_images = 20
+    else:
+        max_images = MAX_SOCIAL_ARTICLE_IMAGES
     if not 1 <= len(image_paths) <= max_images:
         raise RuntimeError(
             f"图文图片文件夹必须包含 1-{max_images} 张"
@@ -255,7 +260,7 @@ class LocalAgentApplication:
                             )
                             local_asset_paths = tuple(resolved_images)
                         image_paths = tuple(resolved_images)
-                        max_images = 20 if job["platform"] == "jd" else 9
+                        max_images = 20 if job["platform"] == "jd" else MAX_SOCIAL_ARTICLE_IMAGES if job["platform"] in {"xiaohongshu", "douyin"} else 9
                         if not 1 <= len(image_paths) <= max_images:
                             raise RuntimeError("任务中的本机图文素材数量无效")
                         resolved_assets.extend(image_paths)
@@ -292,7 +297,7 @@ class LocalAgentApplication:
                                 raise RuntimeError("任务图文图片下载为空")
                             downloaded_images.append(image_path)
                         image_paths = tuple(downloaded_images)
-                        max_images = 20 if job["platform"] == "jd" else 9
+                        max_images = 20 if job["platform"] == "jd" else MAX_SOCIAL_ARTICLE_IMAGES if job["platform"] in {"xiaohongshu", "douyin"} else 9
                         if not 1 <= len(image_paths) <= max_images:
                             raise RuntimeError("任务图文图片数量无效")
                     else:

@@ -17,7 +17,7 @@ _LOGGER = logging.getLogger(__name__)
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled", "uncertain"}
 JOB_STATUSES = TERMINAL_STATUSES | {"queued", "running", "cancelling"}
 JOB_KINDS = {"login", "check", "publish", "delete_account", "inspect_product"}
-PLATFORMS = {"tmall", "jd"}
+PLATFORMS = {"tmall", "jd", "xiaohongshu", "douyin"}
 
 
 def utc_now() -> str:

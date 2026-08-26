@@ -45,11 +45,13 @@ class UserDataPaths:
         )
         _secure_directory(paths.cookies / "tmall")
         _secure_directory(paths.cookies / "jd")
+        _secure_directory(paths.cookies / "xiaohongshu")
+        _secure_directory(paths.cookies / "douyin")
         return paths
 
     def cookie_file(self, platform: str, account: str) -> Path:
         """Return one platform account state file inside this user workspace."""
-        if platform not in {"tmall", "jd"}:
+        if platform not in {"tmall", "jd", "xiaohongshu", "douyin"}:
             raise ValueError("平台不支持")
         return self.cookies / platform / f"{account}.json"
 

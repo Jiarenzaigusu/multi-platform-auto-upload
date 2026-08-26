@@ -22,7 +22,7 @@ from pathlib import Path
 
 
 # 支持的平台
-SUPPORTED_PLATFORMS = {"tmall", "jd"}
+SUPPORTED_PLATFORMS = {"tmall", "jd", "xiaohongshu", "douyin"}
 # 支持的视频和图文内容类型。
 SUPPORTED_CONTENT_TYPES = {"video", "article"}
 # 支持的视频扩展名
@@ -31,6 +31,7 @@ SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm"}
 SUPPORTED_COVER_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 JD_ARTICLE_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 MAX_JD_ARTICLE_IMAGES = 20
+MAX_SOCIAL_ARTICLE_IMAGES = 35
 MAX_JD_ARTICLE_IMAGE_BYTES = 5 * 1024 * 1024
 # 账号名正则：字母数字下划线连字符，1-64 字符
 ACCOUNT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -62,6 +63,8 @@ JD_CREATOR_DECLARATIONS = (
     "内容为转载",
     "个人观点，仅供参考",
 )
+# 小红书与抖音当前不强制创作者声明；保留空值以便前端表单复用同一结构。
+SOCIAL_CREATOR_DECLARATIONS = ("",)
 # 仅天猫兼容已下载旧模板的营销声明；京东始终要求其后台真实字段。
 TMALL_CREATOR_DECLARATION_ALIASES = {"内容含营销广告": "内容含营销信息"}
 # 保留旧名称，供天猫模块和第三方调用方继续使用。
@@ -80,7 +83,7 @@ class PublishRequest:
     所有平台字段统一在此结构中，京东不需要的字段（如 tags/music_name）留空。
     """
 
-    platform: str               # 平台 tmall/jd
+    platform: str               # 平台 tmall/jd/xiaohongshu/douyin
     content_type: str           # 内容类型 video/article
     account: str                # 店铺账号标识
     video_path: Path | None     # 视频文件绝对路径（仅视频）
@@ -105,7 +108,7 @@ def validate_platform(platform: str) -> str:
     """校验平台标识，返回归一化后的值。"""
     normalized = platform.strip().lower()
     if normalized not in SUPPORTED_PLATFORMS:
-        raise ValidationError("当前仅支持天猫光合（tmall）和京东京麦（jd）")
+        raise ValidationError("当前仅支持天猫光合、京东京麦、小红书和抖音")
     return normalized
 
 
@@ -125,14 +128,14 @@ def validate_account_name(account: str) -> str:
     return normalized
 
 
-def parse_tags(raw_tags: str) -> tuple[str, ...]:
+def parse_tags(raw_tags: str, max_tags: int = 4) -> tuple[str, ...]:
     """解析话题标签字符串，逗号分隔，去 # 前缀，过滤空项。
 
     :raises ValidationError: 标签数超过 4 个
     """
     tags = tuple(tag.strip().lstrip("#") for tag in raw_tags.split(",") if tag.strip().lstrip("#"))
-    if len(tags) > 4:
-        raise ValidationError("天猫最多支持 4 个标签")
+    if len(tags) > max_tags:
+        raise ValidationError(f"最多支持 {max_tags} 个标签")
     return tags
 
 
@@ -244,6 +247,8 @@ def validate_publish_request(
         creator_declaration = TMALL_CREATOR_DECLARATION_ALIASES.get(
             creator_declaration, creator_declaration
         )
+    elif selected_platform in {"xiaohongshu", "douyin"} and creator_declaration == "内容无需标注":
+        creator_declaration = ""
 
     normalized_video_path: Path | None = None
     normalized_image_paths: tuple[Path, ...] = ()
@@ -259,12 +264,18 @@ def validate_publish_request(
             raise ValidationError("仅支持 MP4、MOV、MKV、M4V、AVI 或 WebM 视频")
         normalized_video_path = video_path.resolve()
     else:
-        max_images = 9 if selected_platform == "tmall" else MAX_JD_ARTICLE_IMAGES
+        if selected_platform == "tmall":
+            max_images = 9
+            image_count_message = "天猫图文必须上传 1-9 张图片"
+        elif selected_platform == "jd":
+            max_images = MAX_JD_ARTICLE_IMAGES
+            image_count_message = "京东图文必须上传 1-20 张图片"
+        else:
+            max_images = MAX_SOCIAL_ARTICLE_IMAGES
+            platform_name = "小红书" if selected_platform == "xiaohongshu" else "抖音"
+            image_count_message = f"{platform_name}图文必须上传 1-35 张图片"
         if not 1 <= len(image_paths) <= max_images:
-            raise ValidationError(
-                "天猫图文必须上传 1-9 张图片" if selected_platform == "tmall"
-                else "京东图文必须上传 1-20 张图片"
-            )
+            raise ValidationError(image_count_message)
         normalized_paths: list[Path] = []
         for image_path in image_paths:
             if not image_path.is_file():
@@ -275,13 +286,15 @@ def validate_publish_request(
             except OSError as exc:
                 raise ValidationError("无法读取图文图片") from exc
             allowed_extensions = (
-                SUPPORTED_COVER_IMAGE_EXTENSIONS if selected_platform == "tmall"
-                else JD_ARTICLE_IMAGE_EXTENSIONS
+                JD_ARTICLE_IMAGE_EXTENSIONS
+                if selected_platform == "jd"
+                else SUPPORTED_COVER_IMAGE_EXTENSIONS
             )
             if image_path.suffix.lower() not in allowed_extensions:
                 raise ValidationError(
-                    "图文图片仅支持 JPG、PNG 或 WebP 格式" if selected_platform == "tmall"
-                    else "京东图文图片仅支持 JPG 或 PNG 格式"
+                    "京东图文图片仅支持 JPG 或 PNG 格式"
+                    if selected_platform == "jd"
+                    else "图文图片仅支持 JPG、PNG 或 WebP 格式"
                 )
             if selected_platform == "jd" and image_path.stat().st_size > MAX_JD_ARTICLE_IMAGE_BYTES:
                 raise ValidationError("京东图文单张图片不能超过 5 MiB")
@@ -307,13 +320,14 @@ def validate_publish_request(
         raise ValidationError("标题不能为空")
 
     # 创作者声明校验
-    platform_creator_declarations = (
-        TMALL_CREATOR_DECLARATIONS
-        if selected_platform == "tmall"
-        else JD_CREATOR_DECLARATIONS
-    )
+    if selected_platform == "tmall":
+        platform_creator_declarations = TMALL_CREATOR_DECLARATIONS
+    elif selected_platform == "jd":
+        platform_creator_declarations = JD_CREATOR_DECLARATIONS
+    else:
+        platform_creator_declarations = SOCIAL_CREATOR_DECLARATIONS
     if creator_declaration not in platform_creator_declarations:
-        raise ValidationError("请选择有效的创作者声明")
+        raise ValidationError("请选择有效的创作者声明" if selected_platform in {"tmall", "jd"} else "小红书和抖音当前不需要填写创作者声明")
 
     # 音乐名称长度校验
     if len(music_name) > MAX_MUSIC_NAME_LENGTH:
@@ -321,7 +335,7 @@ def validate_publish_request(
 
     # 定时发布时间解析
     schedule = parse_schedule(raw_schedule)
-    tags = parse_tags(raw_tags) if selected_platform == "tmall" else ()
+    tags = parse_tags(raw_tags, max_tags=4 if selected_platform == "tmall" else 20)
 
     # 平台专属校验
     if selected_platform == "tmall":
@@ -335,20 +349,54 @@ def validate_publish_request(
         if len(goods_ids) > MAX_TMALL_GOODS_IDS:
             raise ValidationError(f"天猫一次最多关联 {MAX_TMALL_GOODS_IDS} 个商品 ID")
     else:
-        # 京东专属校验
-        title_max = 27 if selected_content_type == "video" else 20
-        if not 5 <= len(normalized_title) <= title_max:
-            raise ValidationError(f"京东{'视频' if selected_content_type == 'video' else '图文'}标题长度必须为 5-{title_max} 个字符")
-        if selected_content_type == "video" and normalized_description:
-            raise ValidationError("当前京东视频发布器没有独立文案字段，请清空文案")
-        if selected_content_type == "article" and len(normalized_description) > 1001:
-            raise ValidationError("京东图文正文最多 1001 个字符")
-        if raw_tags.strip():
-            raise ValidationError("当前京东发布器不支持标签字段")
-        if music_name:
-            raise ValidationError("当前京东发布器不支持音乐字段")
-        if len(goods_ids) > MAX_JD_GOODS_IDS:
-            raise ValidationError(f"京东一次最多关联 {MAX_JD_GOODS_IDS} 个商品 ID")
+        if selected_platform == "jd":
+            title_max = 27 if selected_content_type == "video" else 20
+            if not 5 <= len(normalized_title) <= title_max:
+                raise ValidationError(f"京东{'视频' if selected_content_type == 'video' else '图文'}标题长度必须为 5-{title_max} 个字符")
+            if selected_content_type == "video" and normalized_description:
+                raise ValidationError("当前京东视频发布器没有独立文案字段，请清空文案")
+            if selected_content_type == "article" and len(normalized_description) > 1001:
+                raise ValidationError("京东图文正文最多 1001 个字符")
+            if raw_tags.strip():
+                raise ValidationError("当前京东发布器不支持标签字段")
+            if music_name:
+                raise ValidationError("当前京东发布器不支持音乐字段")
+            if len(goods_ids) > MAX_JD_GOODS_IDS:
+                raise ValidationError(f"京东一次最多关联 {MAX_JD_GOODS_IDS} 个商品 ID")
+        elif selected_platform == "xiaohongshu":
+            if not 1 <= len(normalized_title) <= 20:
+                raise ValidationError("小红书标题长度必须为 1-20 个字符")
+            if selected_content_type == "video":
+                if len(normalized_description) > 1000:
+                    raise ValidationError("小红书视频描述最多 1000 个字符")
+            else:
+                if len(normalized_description) > 1000:
+                    raise ValidationError("小红书图文正文最多 1000 个字符")
+            if music_name:
+                raise ValidationError("小红书发布器不支持音乐字段")
+            if goods_ids:
+                raise ValidationError("小红书发布器不支持商品 ID 字段")
+            if normalized_activity_topic:
+                raise ValidationError("小红书发布器不支持活动话题字段，请使用标签")
+            if original:
+                raise ValidationError("小红书发布器不支持自主原创开关")
+            if creator_declaration and creator_declaration not in SOCIAL_CREATOR_DECLARATIONS:
+                raise ValidationError("小红书当前不需要填写创作者声明")
+        elif selected_platform == "douyin":
+            if not 1 <= len(normalized_title) <= 30:
+                raise ValidationError("抖音标题长度必须为 1-30 个字符")
+            if len(normalized_description) > 1000:
+                raise ValidationError("抖音正文最多 1000 个字符")
+            if music_name:
+                raise ValidationError("抖音发布器不支持音乐字段")
+            if goods_ids:
+                raise ValidationError("抖音发布器当前不支持商品 ID 字段")
+            if normalized_activity_topic:
+                raise ValidationError("抖音发布器不支持参与话题字段，请使用标签")
+            if original:
+                raise ValidationError("抖音发布器不支持自主原创开关")
+            if creator_declaration and creator_declaration not in SOCIAL_CREATOR_DECLARATIONS:
+                raise ValidationError("抖音当前不需要填写创作者声明")
 
     return PublishRequest(
         platform=selected_platform,

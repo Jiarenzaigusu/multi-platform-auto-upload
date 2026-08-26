@@ -11,11 +11,20 @@ from unittest.mock import AsyncMock, patch
 
 from loguru import logger
 
+from uploader.douyin_session import DouyinSessionPool
 from uploader.jd_session import JdSessionPool
 from uploader.tmall_session import TmallSessionPool
+from uploader.xiaohongshu_session import XiaohongshuSessionPool
 from webapp.api.browser_runtime import BrowserRuntime
 from webapp.api.models import validate_publish_request
-from webapp.api.platforms import TmallVideoUploadRequest, upload_tmall_video
+from webapp.api.platforms import (
+    DouyinVideoUploadRequest,
+    TmallVideoUploadRequest,
+    XiaohongshuVideoUploadRequest,
+    upload_douyin_video,
+    upload_tmall_video,
+    upload_xiaohongshu_video,
+)
 from webapp.api.store import JobStore
 from webapp.api.tasks import TaskManager as _TaskManager
 from webapp.workspaces import AppDataPaths
@@ -199,6 +208,81 @@ class JdSessionPoolTests(unittest.TestCase):
         asyncio.run(scenario())
 
 
+class SocialSessionPoolTests(unittest.TestCase):
+    def test_xiaohongshu_pool_reuses_browser_and_injects_stealth_script(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as temp_dir:
+                account_file = Path(temp_dir) / "xiaohongshu_shop1.json"
+                playwright = FakePlaywright()
+                browsers = []
+
+                async def start_playwright():
+                    return playwright
+
+                async def launch_browser(_playwright, _headless):
+                    browser = FakeBrowser()
+                    browsers.append(browser)
+                    return browser
+
+                pool = XiaohongshuSessionPool(
+                    playwright_starter=start_playwright,
+                    launcher=launch_browser,
+                )
+                try:
+                    async with pool.lease(account_file, headless=False) as first:
+                        first_context = first.context
+                    async with pool.lease(account_file, headless=False) as second:
+                        self.assertIs(second, first)
+                        self.assertIs(second.context, first_context)
+                    self.assertEqual(len(browsers), 1)
+                    self.assertIn("permissions", browsers[0].context_options[0])
+                    self.assertEqual(browsers[0].context_options[0]["permissions"], ["geolocation"])
+                    self.assertTrue(first_context.init_scripts)
+                    self.assertTrue(str(first_context.init_scripts[0]).endswith("utils/stealth.min.js"))
+                finally:
+                    await pool.close()
+
+        asyncio.run(scenario())
+
+    def test_douyin_pool_is_independent_from_xiaohongshu_pool(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                playwright = FakePlaywright()
+                browsers = []
+
+                async def start_playwright():
+                    return playwright
+
+                async def launch_browser(_playwright, _headless):
+                    browser = FakeBrowser()
+                    browsers.append(browser)
+                    return browser
+
+                xhs_pool = XiaohongshuSessionPool(
+                    playwright_starter=start_playwright,
+                    launcher=launch_browser,
+                )
+                douyin_pool = DouyinSessionPool(
+                    playwright_starter=start_playwright,
+                    launcher=launch_browser,
+                )
+                try:
+                    async with xhs_pool.lease(root / "xhs.json", headless=True) as xhs_session:
+                        pass
+                    async with douyin_pool.lease(root / "douyin.json", headless=True) as douyin_session:
+                        pass
+                    self.assertIsNot(xhs_session, douyin_session)
+                    self.assertEqual(len(browsers), 2)
+                    self.assertTrue(xhs_session.context.init_scripts)
+                    self.assertTrue(douyin_session.context.init_scripts)
+                finally:
+                    await xhs_pool.close()
+                    await douyin_pool.close()
+
+        asyncio.run(scenario())
+
+
 class BrowserRuntimeTests(unittest.TestCase):
     def test_coroutines_share_one_long_lived_event_loop(self):
         runtime = BrowserRuntime(user_id=TEST_USER_ID)
@@ -258,8 +342,69 @@ class PooledPlatformAdapterTests(unittest.TestCase):
         setup.assert_awaited_once()
         self.assertIs(setup.await_args.kwargs["session"], leased_session)
         uploader_type.return_value.upload_in_session.assert_awaited_once_with(leased_session)
-        uploader_type.return_value.main.assert_not_called()
 
+    def test_social_uploads_use_the_leased_sessions(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        paths = AppDataPaths.create(Path(temp_dir.name) / "data").for_user(
+            TEST_USER_ID
+        )
+        video = Path(temp_dir.name) / "demo.mp4"
+        video.write_bytes(b"video")
+        leased_session = object()
+
+        class FakePool:
+            @asynccontextmanager
+            async def lease(self, path, *, headless, preserve_existing_mode=False):
+                self.path = path
+                self.headless = headless
+                yield leased_session
+
+        for platform, request_type, setup_name, uploader_name, upload in (
+            (
+                "xiaohongshu",
+                XiaohongshuVideoUploadRequest,
+                "xiaohongshu_setup",
+                "XiaoHongShuVideo",
+                upload_xiaohongshu_video,
+            ),
+            (
+                "douyin",
+                DouyinVideoUploadRequest,
+                "douyin_setup",
+                "DouYinVideo",
+                upload_douyin_video,
+            ),
+        ):
+            with self.subTest(platform=platform):
+                request = request_type(
+                    account_name="shop1",
+                    video_file=video,
+                    title="社媒视频标题",
+                    description="视频描述",
+                    tags=["种草"],
+                    headless=False,
+                    dry_run=True,
+                )
+                account_file = Path(temp_dir.name) / f"{platform}_shop1.json"
+                pool = FakePool()
+                setup = AsyncMock(return_value=True)
+                with patch(
+                    "webapp.api.platforms.resolve_account_file", return_value=account_file
+                ), patch(
+                    f"webapp.api.platforms.{setup_name}", new=setup
+                ), patch(f"webapp.api.platforms.{uploader_name}") as uploader_type:
+                    uploader_type.return_value.upload_in_session = AsyncMock(
+                        return_value={"mode": "dry_run"}
+                    )
+                    result = asyncio.run(upload(request, paths=paths, session_pool=pool))
+
+                self.assertEqual(result, {"mode": "dry_run"})
+                self.assertEqual(pool.path, account_file)
+                self.assertFalse(pool.headless)
+                self.assertIs(setup.await_args.kwargs["session"], leased_session)
+                uploader_type.return_value.upload_in_session.assert_awaited_once_with(leased_session)
+        
 
 class TaskManagerBrowserRuntimeIntegrationTests(unittest.TestCase):
     def test_sequential_tmall_jobs_receive_the_same_session_pool(self):

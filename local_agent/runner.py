@@ -20,18 +20,32 @@ from webapp.ai_copy.product_lookup.tmall_reader import TmallProductReader
 from webapp.api.browser_runtime import BrowserRuntime
 from webapp.api.models import MIN_SCHEDULE_LEAD_TIME
 from webapp.api.platforms import (
+    DouyinArticleUploadRequest,
+    DouyinVideoUploadRequest,
     JdArticleUploadRequest,
     JdVideoUploadRequest,
+    XiaohongshuArticleUploadRequest,
+    XiaohongshuVideoUploadRequest,
+    check_douyin_account,
+    check_xiaohongshu_account,
     TmallArticleUploadRequest,
     TmallVideoUploadRequest,
     check_jd_account,
     check_tmall_account,
+    douyin_publish_strategy,
+    login_douyin_account,
     login_jd_account,
+    login_xiaohongshu_account,
     login_tmall_account,
     resolve_account_file,
     tmall_publish_strategy,
+    upload_douyin_article,
+    upload_douyin_video,
     upload_jd_video,
     upload_jd_article,
+    upload_xiaohongshu_article,
+    upload_xiaohongshu_video,
+    xiaohongshu_publish_strategy,
     upload_tmall_article,
     upload_tmall_video,
 )
@@ -132,11 +146,15 @@ class AgentJobRunner:
         account = job["account"]
         payload = job.get("payload") or {}
         headed = bool(payload.get("headed", True))
-        session_pool = (
-            self.runtime.tmall_sessions()
-            if platform == "tmall"
-            else self.runtime.jd_sessions()
-        )
+        session_pool = None
+        if platform == "tmall":
+            session_pool = self.runtime.tmall_sessions()
+        elif platform == "jd":
+            session_pool = self.runtime.jd_sessions()
+        elif platform == "xiaohongshu":
+            session_pool = self.runtime.xiaohongshu_sessions()
+        elif platform == "douyin":
+            session_pool = self.runtime.douyin_sessions()
 
         if job["kind"] == "inspect_product":
             if platform != "tmall":
@@ -170,13 +188,29 @@ class AgentJobRunner:
                     paths=self.paths,
                     session_pool=session_pool,
                 )
-            else:
+            elif platform == "jd":
                 result = await login_jd_account(
                     account,
                     headless=not headed,
                     paths=self.paths,
                     session_pool=session_pool,
                 )
+            elif platform == "xiaohongshu":
+                result = await login_xiaohongshu_account(
+                    account,
+                    headless=not headed,
+                    paths=self.paths,
+                    session_pool=session_pool,
+                )
+            elif platform == "douyin":
+                result = await login_douyin_account(
+                    account,
+                    headless=not headed,
+                    paths=self.paths,
+                    session_pool=session_pool,
+                )
+            else:
+                raise RuntimeError(f"不支持的平台：{platform}")
             if not result.get("success"):
                 raise RuntimeError(result.get("message", "登录失败"))
             return {"message": result.get("message", "登录完成")}
@@ -186,17 +220,28 @@ class AgentJobRunner:
                 valid = await check_tmall_account(
                     account, paths=self.paths, session_pool=session_pool
                 )
-            else:
+            elif platform == "jd":
                 valid = await check_jd_account(
                     account, paths=self.paths, session_pool=session_pool
                 )
+            elif platform == "xiaohongshu":
+                valid = await check_xiaohongshu_account(
+                    account, paths=self.paths, session_pool=session_pool
+                )
+            elif platform == "douyin":
+                valid = await check_douyin_account(
+                    account, paths=self.paths, session_pool=session_pool
+                )
+            else:
+                raise RuntimeError(f"不支持的平台：{platform}")
             if not valid:
                 raise RuntimeError("Cookie 不存在或已失效，请先执行登录")
             return {"message": "用户电脑上的账号 Cookie 有效"}
 
         if job["kind"] == "delete_account":
             account_file = resolve_account_file(self.paths, platform, account)
-            await session_pool.close_account(str(account_file))
+            if session_pool is not None:
+                await session_pool.close_account(str(account_file))
             try:
                 account_file.unlink()
                 deleted = True
@@ -268,6 +313,80 @@ class AgentJobRunner:
                 dry_run=bool(payload["dry_run"]),
             )
             platform_result = await upload_tmall_video(
+                request, paths=self.paths, session_pool=session_pool
+            )
+        elif platform == "xiaohongshu" and content_type == "article":
+            request = XiaohongshuArticleUploadRequest(
+                account_name=account,
+                image_files=image_paths,
+                title=payload["title"],
+                description=payload["description"],
+                tags=list(payload["tags"]),
+                schedule=schedule,
+                publish_strategy=xiaohongshu_publish_strategy(schedule),
+                debug=True,
+                headless=not headed,
+                dry_run=bool(payload["dry_run"]),
+            )
+            platform_result = await upload_xiaohongshu_article(
+                request, paths=self.paths, session_pool=session_pool
+            )
+        elif platform == "xiaohongshu":
+            request = XiaohongshuVideoUploadRequest(
+                account_name=account,
+                video_file=video_path,
+                cover_image_file=(
+                    Path(payload["cover_image_path"])
+                    if payload.get("cover_image_path")
+                    else None
+                ),
+                title=payload["title"],
+                description=payload["description"],
+                tags=list(payload["tags"]),
+                schedule=schedule,
+                publish_strategy=xiaohongshu_publish_strategy(schedule),
+                debug=True,
+                headless=not headed,
+                dry_run=bool(payload["dry_run"]),
+            )
+            platform_result = await upload_xiaohongshu_video(
+                request, paths=self.paths, session_pool=session_pool
+            )
+        elif platform == "douyin" and content_type == "article":
+            request = DouyinArticleUploadRequest(
+                account_name=account,
+                image_files=image_paths,
+                title=payload["title"],
+                description=payload["description"],
+                tags=list(payload["tags"]),
+                schedule=schedule,
+                publish_strategy=douyin_publish_strategy(schedule),
+                debug=True,
+                headless=not headed,
+                dry_run=bool(payload["dry_run"]),
+            )
+            platform_result = await upload_douyin_article(
+                request, paths=self.paths, session_pool=session_pool
+            )
+        elif platform == "douyin":
+            request = DouyinVideoUploadRequest(
+                account_name=account,
+                video_file=video_path,
+                cover_image_file=(
+                    Path(payload["cover_image_path"])
+                    if payload.get("cover_image_path")
+                    else None
+                ),
+                title=payload["title"],
+                description=payload["description"],
+                tags=list(payload["tags"]),
+                schedule=schedule,
+                publish_strategy=douyin_publish_strategy(schedule),
+                debug=True,
+                headless=not headed,
+                dry_run=bool(payload["dry_run"]),
+            )
+            platform_result = await upload_douyin_video(
                 request, paths=self.paths, session_pool=session_pool
             )
         elif content_type == "article":

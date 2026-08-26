@@ -577,7 +577,9 @@
 }
 .workbench-import-dialog {
   position: relative;
-  width: min(560px, 100%);
+  width: min(560px, calc(100vw - 44px));
+  max-height: calc(100vh - 44px);
+  overflow: auto;
   padding: 30px;
   border: 1px solid rgba(220, 231, 97, .65);
   border-radius: 21px;

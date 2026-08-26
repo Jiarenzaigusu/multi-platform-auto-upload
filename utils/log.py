@@ -67,6 +67,8 @@ _configure_process_sink()
 # job_id through Loguru context so the same uploader code remains reusable.
 tmall_logger = logger.bind(business_name="tmall")
 jd_logger = logger.bind(business_name="jd")
+xiaohongshu_logger = logger.bind(business_name="xiaohongshu")
+douyin_logger = logger.bind(business_name="douyin")
 
 
 @dataclass(slots=True)
@@ -88,7 +90,7 @@ def create_user_log_sinks(user_id: str, directory: Path) -> UserLogSinks:
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     directory.chmod(0o700)
     sink_ids: list[int] = []
-    for platform in ("tmall", "jd"):
+    for platform in ("tmall", "jd", "xiaohongshu", "douyin"):
         path = directory / f"{platform}.log"
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         os.close(descriptor)
@@ -113,6 +115,6 @@ def create_user_log_sinks(user_id: str, directory: Path) -> UserLogSinks:
 
 def user_platform_logger(platform: str, user_id: str) -> Any:
     """Return a platform logger that retains user context outside a task."""
-    if platform not in {"tmall", "jd"}:
+    if platform not in {"tmall", "jd", "xiaohongshu", "douyin"}:
         raise ValueError("平台不支持")
     return logger.bind(business_name=platform, user_id=user_id)

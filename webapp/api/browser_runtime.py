@@ -31,6 +31,8 @@ class BrowserRuntime:
         self._thread: threading.Thread | None = None
         self._tmall_sessions = None
         self._jd_sessions = None
+        self._xiaohongshu_sessions = None
+        self._douyin_sessions = None
 
     @property
     def started(self) -> bool:
@@ -114,11 +116,39 @@ class BrowserRuntime:
             )
         return self._jd_sessions
 
+    def xiaohongshu_sessions(self):
+        if not self.is_current_loop():
+            raise RuntimeError("小红书会话池只能在浏览器运行时中使用")
+        if self._xiaohongshu_sessions is None:
+            from uploader.xiaohongshu_session import XiaohongshuSessionPool
+
+            self._xiaohongshu_sessions = XiaohongshuSessionPool(
+                idle_timeout_seconds=self.idle_timeout_seconds,
+                max_sessions=self.max_sessions,
+            )
+        return self._xiaohongshu_sessions
+
+    def douyin_sessions(self):
+        if not self.is_current_loop():
+            raise RuntimeError("抖音会话池只能在浏览器运行时中使用")
+        if self._douyin_sessions is None:
+            from uploader.douyin_session import DouyinSessionPool
+
+            self._douyin_sessions = DouyinSessionPool(
+                idle_timeout_seconds=self.idle_timeout_seconds,
+                max_sessions=self.max_sessions,
+            )
+        return self._douyin_sessions
+
     async def _close_account(self, platform: str, account_file: str) -> None:
         if platform == "tmall" and self._tmall_sessions is not None:
             await self._tmall_sessions.close_account(account_file)
         elif platform == "jd" and self._jd_sessions is not None:
             await self._jd_sessions.close_account(account_file)
+        elif platform == "xiaohongshu" and self._xiaohongshu_sessions is not None:
+            await self._xiaohongshu_sessions.close_account(account_file)
+        elif platform == "douyin" and self._douyin_sessions is not None:
+            await self._douyin_sessions.close_account(account_file)
 
     def close_account(self, platform: str, account_file: str) -> None:
         if not self.started:
@@ -132,6 +162,12 @@ class BrowserRuntime:
         if self._jd_sessions is not None:
             await self._jd_sessions.close()
             self._jd_sessions = None
+        if self._xiaohongshu_sessions is not None:
+            await self._xiaohongshu_sessions.close()
+            self._xiaohongshu_sessions = None
+        if self._douyin_sessions is not None:
+            await self._douyin_sessions.close()
+            self._douyin_sessions = None
 
     def shutdown(self) -> None:
         with self._guard:

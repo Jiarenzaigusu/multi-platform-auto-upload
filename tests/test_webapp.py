@@ -29,8 +29,13 @@ from uploader.tmall_video_uploader.main import (
 )
 from utils.files import validate_media_filename
 from webapp.api.batch import BatchValidationError
+from webapp.api.batch_douyin_article import parse_douyin_article_batch_workbook
+from webapp.api.batch_douyin_video import parse_douyin_video_batch_workbook
 from webapp.api.batch_jd_video import parse_jd_video_batch_workbook
 from webapp.api.batch_tmall_video import parse_tmall_video_batch_workbook
+from webapp.api.batch_templates import build_batch_template
+from webapp.api.batch_xiaohongshu_article import parse_xiaohongshu_article_batch_workbook
+from webapp.api.batch_xiaohongshu_video import parse_xiaohongshu_video_batch_workbook
 from webapp.api.agent_tasks import AgentTaskManager
 from webapp.api.main import WebSettings
 from webapp.api.batch import resolve_local_path
@@ -211,6 +216,51 @@ class PublishRequestValidationTests(unittest.TestCase):
                 video_path=self.video,
                 original_filename="demo.mp4",
                 title="太短",
+            )
+
+    def test_xiaohongshu_and_douyin_accept_social_content(self):
+        xhs_request = validate_publish_request(
+            platform="xiaohongshu",
+            account="shop1",
+            video_path=self.video,
+            original_filename="demo.mp4",
+            title="小红书标题",
+            description="正文内容",
+            raw_tags="种草,穿搭",
+        )
+        self.assertEqual(xhs_request.tags, ("种草", "穿搭"))
+        self.assertEqual(xhs_request.creator_declaration, "")
+
+        douyin_request = validate_publish_request(
+            platform="douyin",
+            account="shop1",
+            video_path=self.video,
+            original_filename="demo.mp4",
+            title="抖音标题",
+            description="视频描述",
+            raw_tags="热点,穿搭",
+        )
+        self.assertEqual(douyin_request.tags, ("热点", "穿搭"))
+        self.assertEqual(douyin_request.creator_declaration, "")
+
+    def test_xiaohongshu_and_douyin_reject_excess_tags(self):
+        with self.assertRaisesRegex(ValidationError, "最多支持 20 个标签"):
+            validate_publish_request(
+                platform="xiaohongshu",
+                account="shop1",
+                video_path=self.video,
+                original_filename="demo.mp4",
+                title="小红书标题",
+                raw_tags=",".join(f"标签{i}" for i in range(21)),
+            )
+        with self.assertRaisesRegex(ValidationError, "最多支持 20 个标签"):
+            validate_publish_request(
+                platform="douyin",
+                account="shop1",
+                video_path=self.video,
+                original_filename="demo.mp4",
+                title="抖音标题",
+                raw_tags=",".join(f"标签{i}" for i in range(21)),
             )
 
     def test_tmall_rejects_combined_description_and_tag_overflow(self):
@@ -1430,6 +1480,99 @@ class JdBatchWorkbookTests(unittest.TestCase):
 
         self.assertEqual(context.exception.errors[0].row, 2)
         self.assertEqual(context.exception.errors[0].field, "自主原创")
+
+
+class SocialBatchWorkbookTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.base_dir = Path(self.temp_dir.name)
+        self.video = self.base_dir / "demo.mp4"
+        self.video.write_bytes(b"video")
+        self.image_dir = self.base_dir / "images"
+        self.image_dir.mkdir()
+        (self.image_dir / "001.jpg").write_bytes(b"image")
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def workbook(self, header: list[str], row: list[object]) -> bytes:
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append(header)
+        worksheet.append(row)
+        output = BytesIO()
+        workbook.save(output)
+        workbook.close()
+        return output.getvalue()
+
+    def test_social_video_workbooks_map_to_publish_requests(self):
+        content = self.workbook(
+            ["视频路径", "标题", "视频描述", "标签"],
+            [str(self.video), "抖音标题", "描述", "热点，穿搭"],
+        )
+        rows = parse_douyin_video_batch_workbook(
+            content, account="shop1", dry_run=True, headed=False
+        )
+        self.assertEqual(rows[0].request.platform, "douyin")
+        self.assertEqual(rows[0].request.tags, ("热点", "穿搭"))
+        self.assertTrue(rows[0].request.dry_run)
+
+        content = self.workbook(
+            ["视频路径", "标题", "笔记正文", "标签"],
+            [str(self.video), "小红书标题", "正文", "种草，穿搭"],
+        )
+        rows = parse_xiaohongshu_video_batch_workbook(
+            content, account="shop1", dry_run=True, headed=True
+        )
+        self.assertEqual(rows[0].request.platform, "xiaohongshu")
+        self.assertEqual(rows[0].request.tags, ("种草", "穿搭"))
+
+    def test_social_article_workbooks_map_to_publish_requests(self):
+        xhs_rows = parse_xiaohongshu_article_batch_workbook(
+            self.workbook(
+                ["图片文件夹路径", "标题", "笔记正文", "标签"],
+                [str(self.image_dir), "小红书图文", "正文", "种草"],
+            ),
+            account="shop1",
+            dry_run=True,
+            headed=True,
+        )
+        self.assertEqual(xhs_rows[0].request.platform, "xiaohongshu")
+        self.assertEqual(
+            xhs_rows[0].request.image_paths,
+            ((self.image_dir / "001.jpg").resolve(),),
+        )
+
+        douyin_rows = parse_douyin_article_batch_workbook(
+            self.workbook(
+                ["图片文件夹路径", "标题", "图文描述", "标签"],
+                [str(self.image_dir), "抖音图文", "描述", "热点"],
+            ),
+            account="shop1",
+            dry_run=True,
+            headed=False,
+        )
+        self.assertEqual(douyin_rows[0].request.platform, "douyin")
+        self.assertEqual(douyin_rows[0].request.description, "描述")
+
+    def test_batch_template_dispatch_includes_social_platforms(self):
+        cases = {
+            ("xiaohongshu", "video"): ["视频路径", "自定义封面", "标题", "笔记正文", "标签", "定时发布"],
+            ("xiaohongshu", "article"): ["图片文件夹路径", "标题", "笔记正文", "标签", "定时发布"],
+            ("douyin", "video"): ["视频路径", "横版封面", "标题", "视频描述", "标签", "定时发布"],
+            ("douyin", "article"): ["图片文件夹路径", "标题", "图文描述", "标签", "定时发布"],
+        }
+        for (platform, content_type), expected_headers in cases.items():
+            workbook = load_workbook(BytesIO(build_batch_template(platform, content_type)))
+            try:
+                worksheet = workbook.active
+                headers = [
+                    worksheet.cell(1, column).value
+                    for column in range(1, len(expected_headers) + 1)
+                ]
+                self.assertEqual(headers, expected_headers)
+            finally:
+                workbook.close()
 
 
 class TmallBatchApiTests(unittest.TestCase):

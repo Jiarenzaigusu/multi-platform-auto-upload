@@ -48,6 +48,18 @@ async def launch_browser(playwright: Playwright, headless: bool) -> Browser:
     return await playwright.chromium.launch(headless=headless, channel="msedge")
 
 
+async def launch_chrome_browser(playwright: Playwright, headless: bool) -> Browser:
+    """启动 Chrome 浏览器实例，供小红书/抖音等社媒平台会话池使用。"""
+    from utils.config import LOCAL_CHROME_PATH
+
+    if LOCAL_CHROME_PATH:
+        return await playwright.chromium.launch(
+            headless=headless,
+            executable_path=LOCAL_CHROME_PATH,
+        )
+    return await playwright.chromium.launch(headless=headless, channel="chrome")
+
+
 class BrowserSession:
     """单个店铺账号对应的可复用浏览器会话。
 
@@ -143,6 +155,7 @@ class BrowserSession:
         await self.close()
         self.browser = await self.launcher(self.playwright, self.headless)
         context_options: dict[str, object] = {"viewport": self.viewport}
+        context_options.update(self.context_options())
         if self.account_file.is_file():
             context_options["storage_state"] = str(self.account_file)
         try:
@@ -152,11 +165,17 @@ class BrowserSession:
             if "storage_state" not in context_options:
                 raise
             self.logger.warning("cookie 状态文件无法载入，将使用空白会话等待重新登录")
-            self.context = await self.browser.new_context(viewport=self.viewport)
+            fallback_options = dict(context_options)
+            fallback_options.pop("storage_state", None)
+            self.context = await self.browser.new_context(**fallback_options)
         # 注入 stealth 反检测脚本（utils/stealth.min.js）
         self.context = await set_init_script(self.context)
         self.touch()
         return self.context
+
+    def context_options(self) -> dict[str, object]:
+        """Return platform-specific BrowserContext options."""
+        return {}
 
     async def save_storage_state(self) -> None:
         """将当前 BrowserContext 的 storage_state（Cookie）保存到 account_file。

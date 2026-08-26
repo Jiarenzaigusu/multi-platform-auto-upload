@@ -412,7 +412,7 @@ class TaskManager:
             raise first_error
 
     def close_account_session(self, platform: str, account: str) -> None:
-        if not self.browser_runtime or platform not in {"tmall", "jd"}:
+        if not self.browser_runtime or platform not in {"tmall", "jd", "xiaohongshu", "douyin"}:
             return
         from webapp.api.platforms import resolve_account_file
 
@@ -682,17 +682,31 @@ class TaskManager:
     async def _run_platform_task_async(self, job: dict[str, Any]) -> dict[str, Any]:
         # Import lazily so API startup does not initialize browser automation.
         from webapp.api.platforms import (
+            DouyinArticleUploadRequest,
+            DouyinVideoUploadRequest,
             JdArticleUploadRequest,
             JdVideoUploadRequest,
+            XiaohongshuArticleUploadRequest,
+            XiaohongshuVideoUploadRequest,
+            check_douyin_account,
             TmallArticleUploadRequest,
             TmallVideoUploadRequest,
             check_jd_account,
+            check_xiaohongshu_account,
             check_tmall_account,
+            login_douyin_account,
             login_jd_account,
+            login_xiaohongshu_account,
             login_tmall_account,
+            douyin_publish_strategy,
+            upload_douyin_article,
+            upload_douyin_video,
+            xiaohongshu_publish_strategy,
             tmall_publish_strategy,
             upload_jd_video,
             upload_jd_article,
+            upload_xiaohongshu_article,
+            upload_xiaohongshu_video,
             upload_tmall_article,
             upload_tmall_video,
         )
@@ -703,11 +717,14 @@ class TaskManager:
         headed = bool(payload.get("headed", True))
         session_pool = None
         if self.browser_runtime is not None and self.browser_runtime.is_current_loop():
-            session_pool = (
-                self.browser_runtime.tmall_sessions()
-                if platform == "tmall"
-                else self.browser_runtime.jd_sessions()
-            )
+            if platform == "tmall":
+                session_pool = self.browser_runtime.tmall_sessions()
+            elif platform == "jd":
+                session_pool = self.browser_runtime.jd_sessions()
+            elif platform == "xiaohongshu":
+                session_pool = self.browser_runtime.xiaohongshu_sessions()
+            elif platform == "douyin":
+                session_pool = self.browser_runtime.douyin_sessions()
 
         if job["kind"] == "login":
             if platform == "tmall":
@@ -719,7 +736,7 @@ class TaskManager:
                     paths=self.paths,
                     session_pool=session_pool,
                 )
-            else:
+            elif platform == "jd":
                 if session_pool is None:
                     raise RuntimeError("京东任务必须通过 BrowserRuntime 会话池运行")
                 result = await login_jd_account(
@@ -728,6 +745,26 @@ class TaskManager:
                     paths=self.paths,
                     session_pool=session_pool,
                 )
+            elif platform == "xiaohongshu":
+                if session_pool is None:
+                    raise RuntimeError("小红书任务必须通过 BrowserRuntime 会话池运行")
+                result = await login_xiaohongshu_account(
+                    account,
+                    headless=not headed,
+                    paths=self.paths,
+                    session_pool=session_pool,
+                )
+            elif platform == "douyin":
+                if session_pool is None:
+                    raise RuntimeError("抖音任务必须通过 BrowserRuntime 会话池运行")
+                result = await login_douyin_account(
+                    account,
+                    headless=not headed,
+                    paths=self.paths,
+                    session_pool=session_pool,
+                )
+            else:
+                raise RuntimeError(f"不支持的平台：{platform}")
             if not result.get("success"):
                 raise RuntimeError(result.get("message", "登录失败"))
             return {"message": result.get("message", "登录完成")}
@@ -739,12 +776,26 @@ class TaskManager:
                 valid = await check_tmall_account(
                     account, paths=self.paths, session_pool=session_pool
                 )
-            else:
+            elif platform == "jd":
                 if session_pool is None:
                     raise RuntimeError("京东任务必须通过 BrowserRuntime 会话池运行")
                 valid = await check_jd_account(
                     account, paths=self.paths, session_pool=session_pool
                 )
+            elif platform == "xiaohongshu":
+                if session_pool is None:
+                    raise RuntimeError("小红书任务必须通过 BrowserRuntime 会话池运行")
+                valid = await check_xiaohongshu_account(
+                    account, paths=self.paths, session_pool=session_pool
+                )
+            elif platform == "douyin":
+                if session_pool is None:
+                    raise RuntimeError("抖音任务必须通过 BrowserRuntime 会话池运行")
+                valid = await check_douyin_account(
+                    account, paths=self.paths, session_pool=session_pool
+                )
+            else:
+                raise RuntimeError(f"不支持的平台：{platform}")
             if not valid:
                 raise RuntimeError("Cookie 不存在或已失效，请先执行登录")
             return {"message": "账号 Cookie 有效"}
@@ -817,6 +868,88 @@ class TaskManager:
                 dry_run=bool(payload["dry_run"]),
             )
             platform_result = await upload_tmall_video(
+                request, paths=self.paths, session_pool=session_pool
+            )
+        elif platform == "xiaohongshu" and content_type == "article":
+            if session_pool is None:
+                raise RuntimeError("小红书任务必须通过 BrowserRuntime 会话池运行")
+            request = XiaohongshuArticleUploadRequest(
+                account_name=account,
+                image_files=image_paths,
+                title=payload["title"],
+                description=payload["description"],
+                tags=list(payload["tags"]),
+                schedule=schedule,
+                publish_strategy=xiaohongshu_publish_strategy(schedule),
+                debug=True,
+                headless=not headed,
+                dry_run=bool(payload["dry_run"]),
+            )
+            platform_result = await upload_xiaohongshu_article(
+                request, paths=self.paths, session_pool=session_pool
+            )
+        elif platform == "xiaohongshu":
+            if session_pool is None:
+                raise RuntimeError("小红书任务必须通过 BrowserRuntime 会话池运行")
+            request = XiaohongshuVideoUploadRequest(
+                account_name=account,
+                video_file=video_path,
+                cover_image_file=(
+                    Path(payload["cover_image_path"])
+                    if payload.get("cover_image_path")
+                    else None
+                ),
+                title=payload["title"],
+                description=payload["description"],
+                tags=list(payload["tags"]),
+                schedule=schedule,
+                publish_strategy=xiaohongshu_publish_strategy(schedule),
+                debug=True,
+                headless=not headed,
+                dry_run=bool(payload["dry_run"]),
+            )
+            platform_result = await upload_xiaohongshu_video(
+                request, paths=self.paths, session_pool=session_pool
+            )
+        elif platform == "douyin" and content_type == "article":
+            if session_pool is None:
+                raise RuntimeError("抖音任务必须通过 BrowserRuntime 会话池运行")
+            request = DouyinArticleUploadRequest(
+                account_name=account,
+                image_files=image_paths,
+                title=payload["title"],
+                description=payload["description"],
+                tags=list(payload["tags"]),
+                schedule=schedule,
+                publish_strategy=douyin_publish_strategy(schedule),
+                debug=True,
+                headless=not headed,
+                dry_run=bool(payload["dry_run"]),
+            )
+            platform_result = await upload_douyin_article(
+                request, paths=self.paths, session_pool=session_pool
+            )
+        elif platform == "douyin":
+            if session_pool is None:
+                raise RuntimeError("抖音任务必须通过 BrowserRuntime 会话池运行")
+            request = DouyinVideoUploadRequest(
+                account_name=account,
+                video_file=video_path,
+                cover_image_file=(
+                    Path(payload["cover_image_path"])
+                    if payload.get("cover_image_path")
+                    else None
+                ),
+                title=payload["title"],
+                description=payload["description"],
+                tags=list(payload["tags"]),
+                schedule=schedule,
+                publish_strategy=douyin_publish_strategy(schedule),
+                debug=True,
+                headless=not headed,
+                dry_run=bool(payload["dry_run"]),
+            )
+            platform_result = await upload_douyin_video(
                 request, paths=self.paths, session_pool=session_pool
             )
         elif content_type == "article":
