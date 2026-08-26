@@ -282,7 +282,7 @@ $env:MPAU_MAX_MEDIA_TOTAL_BYTES = "107374182400"
 
 Windows 可用 `deploy/windows/start-mpau.ps1` 启动 FastAPI，并配置为“无论用户是否登录都运行”的任务计划或公司批准的服务。Linux 可用 systemd。云端服务没有交互式浏览器，后台会话不影响任务执行。
 
-后台启动只保留一个 FastAPI 实例，不要并行启动第二个 Uvicorn 进程。`deploy/windows/Caddyfile.example` 仅作为旧 HTTPS 反向代理示例，直连部署不需要使用。
+后台启动只保留一个 FastAPI 实例，不要并行启动第二个 Uvicorn 进程。
 
 ### 7.6 上线检查
 

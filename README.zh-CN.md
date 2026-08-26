@@ -116,8 +116,7 @@ Vite 会把 `/api` 代理到本机 `8788`，认证 Cookie 仍保持同源。
 - `deploy/windows/start-mpau.ps1`：启动云端 FastAPI；
 - `deploy/windows/build-mpau-agent.ps1`：构建自包含 Windows 安装包；
 - `deploy/windows/start-mpau-agent.ps1`：开发环境启动桌面助手；
-- `deploy/windows/mpau.env.example.ps1`：生产环境变量示例；
-- `deploy/windows/Caddyfile.example`：旧的 Caddy HTTPS 示例，直连部署不需要使用。
+- `deploy/windows/mpau.env.example.ps1`：生产环境变量示例。
 
 详细安装、首次初始化和后台启动见 [Web 发布台与服务器部署文档](docs/web-app.md)。
 

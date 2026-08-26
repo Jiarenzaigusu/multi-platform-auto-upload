@@ -7,7 +7,7 @@ $env:MPAU_MAX_UPLOAD_REQUEST_BYTES = "21474836480"
 $env:MPAU_MAX_MEDIA_TOTAL_BYTES = "107374182400"
 $env:MPAU_MAX_MEDIA_FILES = "1000"
 
-# Direct FastAPI deployment without Caddy. Replace 10.31.108.221 with your server IP or domain.
+# Direct FastAPI deployment. Replace 10.31.108.221 with your server IP or domain.
 $env:MPAU_BIND_HOST = "0.0.0.0"
 $env:MPAU_PORT = "8788"
 $env:MPAU_ALLOWED_HOSTS = "10.31.108.221,127.0.0.1,localhost"
