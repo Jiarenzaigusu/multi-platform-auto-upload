@@ -251,6 +251,7 @@ function readSavedFormDraft() {
 function persistFormDraft() {
   if (isRestoringDraft.value || !formDraftStorageKey()) return
   snapshotWorkspaceDraft()
+  snapshotWorkspaceMedia()
   if (persistTimer) clearTimeout(persistTimer)
   persistTimer = setTimeout(() => {
     try {
@@ -300,13 +301,17 @@ async function restorePublishDraft() {
   draftRestoredAt.value = ''
   try {
     applySavedFormDraft(readSavedFormDraft())
+    const currentKey = workspaceKey(form.platform, form.contentType)
+    const media = workspaceMedia[currentKey]
     const videoDraft = await restoreDraftVideo(draftVideoKey(form.platform, form.contentType))
     if (videoDraft?.file && isVideo.value) {
-      form.video = videoDraft.file
-      draftRestoredVideoName.value = videoDraft.file.name
-      draftRestoredAt.value = videoDraft.savedAt || new Date().toISOString()
+      media.video = videoDraft.file
+      media.restoredVideoName = videoDraft.file.name
+      media.restoredAt = videoDraft.savedAt || new Date().toISOString()
+      applyWorkspaceMedia(form.platform, form.contentType)
       showNotice(`已自动恢复上次发布配置（含视频：${videoDraft.file.name}）`, 'info')
     } else {
+      applyWorkspaceMedia(form.platform, form.contentType)
       const textDraft = readSavedFormDraft()
       if (textDraft && (textDraft.title || textDraft.account)) {
         showNotice('已自动恢复上次发布配置', 'info')
@@ -386,12 +391,35 @@ const form = reactive({
 })
 
 const workspaceDrafts = reactive(createWorkspaceDrafts())
+const workspaceMedia = reactive(Object.fromEntries(
+  ['tmall', 'jd', 'xiaohongshu', 'douyin'].flatMap((platform) => ['video', 'article'].map((contentType) => [
+    workspaceKey(platform, contentType), {
+      video: null,
+      images: [],
+      coverImage: null,
+      restoredVideoName: '',
+      restoredAt: '',
+    },
+  ])),
+))
 
 function snapshotWorkspaceDraft(platform = form.platform, contentType = form.contentType) {
   const draft = workspaceDrafts[workspaceKey(platform, contentType)]
   if (!draft) return
   for (const key of WORKSPACE_DRAFT_KEYS) {
     draft[key] = form[key]
+  }
+}
+
+function snapshotWorkspaceMedia(platform = form.platform, contentType = form.contentType) {
+  const media = workspaceMedia[workspaceKey(platform, contentType)]
+  if (!media) return
+  media.video = form.video
+  media.images = [...form.images]
+  media.coverImage = form.coverImage
+  if (form.video) {
+    media.restoredVideoName = form.video.name || media.restoredVideoName || ''
+    media.restoredAt = media.restoredAt || new Date().toISOString()
   }
 }
 
@@ -403,6 +431,21 @@ function applyWorkspaceDraft(platform, contentType) {
   const options = platformMeta[platform]?.creatorDeclarations || []
   if (options.length && !options.includes(form.creatorDeclaration)) form.creatorDeclaration = ''
   if (!options.length) form.creatorDeclaration = ''
+}
+
+function applyWorkspaceMedia(platform, contentType) {
+  const media = workspaceMedia[workspaceKey(platform, contentType)] || {
+    video: null,
+    images: [],
+    coverImage: null,
+    restoredVideoName: '',
+    restoredAt: '',
+  }
+  form.video = media.video
+  form.images = [...(media.images || [])]
+  form.coverImage = media.coverImage
+  draftRestoredVideoName.value = media.restoredVideoName || ''
+  draftRestoredAt.value = media.restoredAt || ''
 }
 
 const batchForm = reactive({
@@ -547,13 +590,13 @@ const agentStatusDescription = computed(() => {
 
 function activateWorkspace(platform, contentType) {
   snapshotWorkspaceDraft()
+  snapshotWorkspaceMedia()
   isSwitchingWorkspace = true
   form.platform = platform
   form.contentType = contentType
   applyWorkspaceDraft(platform, contentType)
+  applyWorkspaceMedia(platform, contentType)
   isSwitchingWorkspace = false
-  if (contentType === 'article') clearVideo()
-  else clearImages()
 }
 
 watch(() => [form.platform, form.contentType], ([platform, contentType], [previousPlatform, previousContentType]) => {
@@ -562,10 +605,10 @@ watch(() => [form.platform, form.contentType], ([platform, contentType], [previo
     previousPlatform !== platform || previousContentType !== contentType
   )) {
     snapshotWorkspaceDraft(previousPlatform, previousContentType)
+    snapshotWorkspaceMedia(previousPlatform, previousContentType)
     applyWorkspaceDraft(platform, contentType)
+    applyWorkspaceMedia(platform, contentType)
   }
-  if (contentType === 'article') clearVideo()
-  else clearImages()
   publishError.value = ''
   persistFormDraft()
 }, { flush: 'sync' })
@@ -860,6 +903,7 @@ async function deleteAccount(platform = form.platform, account = form.account) {
 async function onFileChange(event) {
   const file = event.target.files?.[0] || null
   form.video = file
+  snapshotWorkspaceMedia()
   publishError.value = ''
   if (file) {
     if (file.size <= DRAFT_VIDEO_MAX_BYTES) {
@@ -879,6 +923,7 @@ function onCoverImageChange(event) {
   // Selecting "Cancel" must not discard the previously selected cover.
   if (!file) return
   form.coverImage = file
+  snapshotWorkspaceMedia()
   publishError.value = ''
 }
 
@@ -886,11 +931,19 @@ function clearVideo() {
   form.video = null
   if (videoInput.value) videoInput.value.value = ''
   deleteDraftVideo()
+  const media = workspaceMedia[workspaceKey(form.platform, form.contentType)]
+  if (media) {
+    media.video = null
+    media.restoredVideoName = ''
+    media.restoredAt = ''
+  }
   draftRestoredVideoName.value = ''
+  draftRestoredAt.value = ''
 }
 
 function onImagesChange(event) {
   form.images = Array.from(event.target.files || [])
+  snapshotWorkspaceMedia()
   if (imageFolderInput.value) imageFolderInput.value.value = ''
   const maxImages = platformMeta[form.platform]?.imageLimit || 20
   publishError.value = form.images.length > maxImages ? `图片超过 ${maxImages} 张，请移除多余图片后重试` : ''
@@ -905,6 +958,7 @@ function onImageFolderChange(event) {
       { numeric: true, sensitivity: 'base' },
     ))
   form.images = images
+  snapshotWorkspaceMedia()
   if (imageInput.value) imageInput.value.value = ''
   const maxImages = platformMeta[form.platform]?.imageLimit || 20
   publishError.value = images.length > maxImages ? `文件夹内图片超过 ${maxImages} 张，请移除多余图片后重试` : ''
@@ -914,6 +968,8 @@ function clearImages() {
   form.images = []
   if (imageInput.value) imageInput.value.value = ''
   if (imageFolderInput.value) imageFolderInput.value.value = ''
+  const media = workspaceMedia[workspaceKey(form.platform, form.contentType)]
+  if (media) media.images = []
 }
 
 function moveImage(index, direction) {
@@ -922,15 +978,19 @@ function moveImage(index, direction) {
   const images = [...form.images]
   ;[images[index], images[target]] = [images[target], images[index]]
   form.images = images
+  snapshotWorkspaceMedia()
 }
 
 function removeImage(index) {
   form.images = form.images.filter((_, imageIndex) => imageIndex !== index)
+  snapshotWorkspaceMedia()
 }
 
 function clearCoverImage() {
   form.coverImage = null
   if (coverImageInput.value) coverImageInput.value.value = ''
+  const media = workspaceMedia[workspaceKey(form.platform, form.contentType)]
+  if (media) media.coverImage = null
 }
 
 function clearPublishContent() {
@@ -939,6 +999,13 @@ function clearPublishContent() {
   clearCoverImage()
   const emptyDraft = createEmptyWorkspaceDraft()
   Object.assign(workspaceDrafts[workspaceKey(form.platform, form.contentType)], emptyDraft)
+  Object.assign(workspaceMedia[workspaceKey(form.platform, form.contentType)], {
+    video: null,
+    images: [],
+    coverImage: null,
+    restoredVideoName: '',
+    restoredAt: '',
+  })
   for (const key of WORKSPACE_DRAFT_KEYS) form[key] = emptyDraft[key]
 }
 

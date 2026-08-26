@@ -604,6 +604,11 @@ svg {
 
 .field {
   display: grid;
+  gap: 6px;
+  margin-bottom: 13px;
+}
+
+.account-row .field {
   grid-template-rows: var(--account-label-height) var(--account-control-height);
   gap: var(--account-row-gap);
   margin-bottom: 0;
@@ -611,12 +616,17 @@ svg {
 
 .field > span,
 .account-actions > span {
-  height: var(--account-label-height);
   color: #3b5b52;
   font-size: 13px;
   font-weight: 900;
-  line-height: var(--account-label-height);
+  line-height: 1.2;
   letter-spacing: .01em;
+}
+
+.account-row .field > span,
+.account-actions > span {
+  height: var(--account-label-height);
+  line-height: var(--account-label-height);
 }
 
 .field em {
