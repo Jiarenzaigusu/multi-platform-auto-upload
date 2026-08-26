@@ -10,8 +10,9 @@ import unittest
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from pathlib import Path
+from unittest.mock import patch
 
-from webapp.api.main import WebSettings, create_app
+from webapp.api.main import WebSettings, create_app, server_bind_address
 from webapp.api.models import validate_publish_request
 from webapp.api.tasks import TaskManager
 from webapp.auth import AuthStore
@@ -40,6 +41,7 @@ class _AsgiClient:
         self.app = app
         self.client_host = client_host
         self.cookies: dict[str, str] = {}
+        self.last_response_headers: list[tuple[bytes, bytes]] = []
 
     def get(self, path: str, *, headers: dict[str, str] | None = None):
         return self.request("GET", path, headers=headers)
@@ -71,6 +73,7 @@ class _AsgiClient:
         headers: dict[str, str] | None = None,
         json_body: dict | None = None,
         files: dict | None = None,
+        scheme: str = "http",
     ) -> _AsgiResponse:
         request_headers = {"host": "testserver", **(headers or {})}
         body = b""
@@ -121,7 +124,7 @@ class _AsgiClient:
             "asgi": {"version": "3.0", "spec_version": "2.3"},
             "http_version": "1.1",
             "method": method,
-            "scheme": "http",
+            "scheme": scheme,
             "path": raw_path,
             "raw_path": raw_path.encode("ascii"),
             "query_string": raw_query.encode("ascii"),
@@ -138,6 +141,7 @@ class _AsgiClient:
         start = next(
             message for message in messages if message["type"] == "http.response.start"
         )
+        self.last_response_headers = list(start.get("headers", []))
         for name, value in start.get("headers", []):
             if name.lower() != b"set-cookie":
                 continue
@@ -181,6 +185,8 @@ class MultiUserApiTests(unittest.TestCase):
         settings = WebSettings(
             data_dir=self.data_paths.root,
             frontend_dist_dir=root / "missing-frontend",
+            allowed_hosts=("testserver", "10.31.108.221"),
+            allowed_origins=("http://10.31.108.221:8788",),
         )
         self.app = create_app(settings, self.registry)
         self.client = _AsgiClient(self.app)
@@ -189,9 +195,73 @@ class MultiUserApiTests(unittest.TestCase):
         self.registry.close()
         self.temp_dir.cleanup()
 
+    def test_direct_http_listener_uses_deployment_environment(self):
+        with patch.dict(
+            "os.environ",
+            {"MPAU_BIND_HOST": "0.0.0.0", "MPAU_PORT": "8788"},
+            clear=False,
+        ):
+            self.assertEqual(server_bind_address(), ("0.0.0.0", 8788))
+
+    def test_direct_http_listener_rejects_invalid_port(self):
+        with patch.dict("os.environ", {"MPAU_PORT": "70000"}, clear=False):
+            with self.assertRaisesRegex(ValueError, "1-65535"):
+                server_bind_address()
+
+    def test_direct_http_ip_login_preserves_session_and_csrf_flow(self):
+        direct_headers = {
+            "host": "10.31.108.221:8788",
+            "origin": "http://10.31.108.221:8788",
+        }
+        created = self.client.post(
+            "/api/auth/bootstrap",
+            headers=direct_headers,
+            json={
+                "username": "admin",
+                "display_name": "Administrator",
+                "password": "admin-password-123",
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        cookies = [
+            value.lower()
+            for name, value in self.client.last_response_headers
+            if name.lower() == b"set-cookie"
+        ]
+        self.assertEqual(len(cookies), 2)
+        self.assertTrue(all(b"; secure" not in cookie for cookie in cookies))
+
+        session = self.client.get("/api/auth/me", headers=direct_headers)
+        self.assertEqual(session.status_code, 200, session.text)
+        paired = self.client.post(
+            "/api/agent/pairing-code",
+            headers={**direct_headers, **self.csrf_headers()},
+        )
+        self.assertEqual(paired.status_code, 200, paired.text)
+
+    def test_https_login_marks_session_cookies_secure(self):
+        created = self.client.request(
+            "POST",
+            "/api/auth/bootstrap",
+            json_body={
+                "username": "admin",
+                "display_name": "Administrator",
+                "password": "admin-password-123",
+            },
+            scheme="https",
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        cookies = [
+            value.lower()
+            for name, value in self.client.last_response_headers
+            if name.lower() == b"set-cookie"
+        ]
+        self.assertEqual(len(cookies), 2)
+        self.assertTrue(all(b"; secure" in cookie for cookie in cookies))
+
     def csrf_headers(self) -> dict[str, str]:
         """Return the double-submit token issued with the current test session."""
-        token = self.client.cookies.get("mpau_csrf")
+        token = self.client.cookies.get("mpau_csrf_v2")
         self.assertTrue(token)
         return {"X-CSRF-Token": token}
 
@@ -277,8 +347,8 @@ class MultiUserApiTests(unittest.TestCase):
 
         admin = self.bootstrap_admin()
         self.assertEqual(admin["role"], "admin")
-        self.assertTrue(self.client.cookies.get("mpau_session"))
-        self.assertTrue(self.client.cookies.get("mpau_csrf"))
+        self.assertTrue(self.client.cookies.get("mpau_session_v2"))
+        self.assertTrue(self.client.cookies.get("mpau_csrf_v2"))
 
         rejected = self.client.post("/api/accounts/tmall/shop1/check")
         self.assertEqual(rejected.status_code, 403)
@@ -356,8 +426,8 @@ class MultiUserApiTests(unittest.TestCase):
         self.bootstrap_admin()
         operator = self.register("selfservice")
         self.assertEqual(operator["role"], "operator")
-        self.assertTrue(self.client.cookies.get("mpau_session"))
-        self.assertTrue(self.client.cookies.get("mpau_csrf"))
+        self.assertTrue(self.client.cookies.get("mpau_session_v2"))
+        self.assertTrue(self.client.cookies.get("mpau_csrf_v2"))
         self.assertEqual(
             self.client.get("/api/auth/me").json()["id"], operator["id"]
         )
@@ -606,7 +676,7 @@ class LocalAgentApiTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def csrf_headers(self) -> dict[str, str]:
-        return {"X-CSRF-Token": self.client.cookies["mpau_csrf"]}
+        return {"X-CSRF-Token": self.client.cookies["mpau_csrf_v2"]}
 
     def post_json(self, path: str, payload: dict) -> _AsgiResponse:
         return self.client.post(path, headers=self.csrf_headers(), json=payload)

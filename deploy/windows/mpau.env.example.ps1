@@ -12,7 +12,6 @@ $env:MPAU_BIND_HOST = "0.0.0.0"
 $env:MPAU_PORT = "8788"
 $env:MPAU_ALLOWED_HOSTS = "10.31.108.221,127.0.0.1,localhost"
 $env:MPAU_ALLOWED_ORIGINS = "http://10.31.108.221:8788,http://127.0.0.1:8788,http://localhost:8788"
-$env:MPAU_SECURE_COOKIES = "false"
 
-# Set to true only for the first remote administrator setup, then switch it back to false.
-$env:MPAU_ALLOW_REMOTE_BOOTSTRAP = "true"
+# Keep this false in normal operation. Set it to true only for the first remote administrator setup.
+$env:MPAU_ALLOW_REMOTE_BOOTSTRAP = "false"

@@ -20,6 +20,10 @@ from webapp.auth.models import AuthenticatedSession, User
 from webapp.auth.service import AuthenticationError, AuthService, UserNotFoundError
 
 
+_SESSION_COOKIE = "mpau_session_v2"
+_CSRF_COOKIE = "mpau_csrf_v2"
+
+
 def _user_response(user: User) -> UserResponse:
     return UserResponse(
         id=user.id,
@@ -53,21 +57,21 @@ def _set_session_cookies(
     secure: bool,
 ) -> None:
     response.set_cookie(
-        "mpau_session",
+        _SESSION_COOKIE,
         session_token,
         max_age=max_age,
         httponly=True,
         secure=secure,
-        samesite="strict",
+        samesite="lax",
         path="/",
     )
     response.set_cookie(
-        "mpau_csrf",
+        _CSRF_COOKIE,
         csrf_token,
         max_age=max_age,
         httponly=False,
         secure=secure,
-        samesite="strict",
+        samesite="lax",
         path="/",
     )
 
@@ -75,7 +79,6 @@ def _set_session_cookies(
 def create_auth_router(
     service: AuthService,
     *,
-    secure_cookies: bool,
     allow_remote_bootstrap: bool = False,
     delete_user_data: Callable[[str], None] | None = None,
 ) -> APIRouter:
@@ -121,7 +124,7 @@ def create_auth_router(
             session_token=token,
             csrf_token=csrf_token,
             max_age=service.session_seconds,
-            secure=secure_cookies,
+            secure=request.url.scheme == "https",
         )
         return _user_response(session.user if session else user)
 
@@ -141,7 +144,7 @@ def create_auth_router(
             session_token=token,
             csrf_token=csrf_token,
             max_age=service.session_seconds,
-            secure=secure_cookies,
+            secure=request.url.scheme == "https",
         )
         return _user_response(session.user)
 
@@ -169,7 +172,7 @@ def create_auth_router(
             session_token=token,
             csrf_token=csrf_token,
             max_age=service.session_seconds,
-            secure=secure_cookies,
+            secure=request.url.scheme == "https",
         )
         return _user_response(session.user if session else user)
 
@@ -181,8 +184,8 @@ def create_auth_router(
     def logout(request: Request, response: Response) -> Response:
         session: AuthenticatedSession = require_session(request)
         service.logout(session, ip_address=_client_ip(request))
-        response.delete_cookie("mpau_session", path="/")
-        response.delete_cookie("mpau_csrf", path="/")
+        response.delete_cookie(_SESSION_COOKIE, path="/")
+        response.delete_cookie(_CSRF_COOKIE, path="/")
         response.status_code = 204
         return response
 

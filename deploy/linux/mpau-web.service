@@ -1,0 +1,21 @@
+[Unit]
+Description=MPAU Web publishing console
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=mpau
+Group=mpau
+WorkingDirectory=/opt/multi-platform-auto-upload-main
+EnvironmentFile=/etc/mpau/mpau.env
+ExecStart=/opt/multi-platform-auto-upload-main/.venv/bin/mpau-web
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -681,7 +681,7 @@ function applyAgentStatus(result) {
 async function refreshAgentStatus() {
   agentStatus.checking = true
   try {
-    const result = await request('/api/agent/status')
+    const result = await request('/api/agent/status', { skipUnauthorizedHandler: true })
     applyAgentStatus(result)
     return agentStatus.online
   } catch {
@@ -718,7 +718,7 @@ async function refreshDashboard() {
         const [jobsResult, accountsResult, agentResult] = await Promise.all([
           request(`/api/jobs?limit=${jobsPageSize}&offset=${jobsOffset.value}`),
           request('/api/accounts'),
-          request('/api/agent/status').catch(() => null),
+          request('/api/agent/status', { skipUnauthorizedHandler: true }).catch(() => null),
         ])
         if (currentUser.value?.id !== userId) return
         if (jobsResult.total > 0 && jobsOffset.value >= jobsResult.total) {

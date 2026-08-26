@@ -26,7 +26,7 @@
 | 管理员 `admin` | 用户管理、发布、AI 文案、自己的 LLM 配置、自己的任务与素材 |
 | 操作员 `operator` | 发布、AI 文案、自己的 LLM 配置、自己的任务与素材 |
 
-初始管理员只能在服务器本机、数据库中还没有任何用户时创建。初始化完成后，运营人员可以在登录页自助注册，服务端固定授予 `operator`，注册成功后自动登录；管理员继续使用已有账号直接登录，也可以在“用户与权限”页面创建或管理账号。密码使用 Argon2id 哈希，登录使用服务端不透明 Session，写请求同时校验 `SameSite=Strict` Cookie、Origin 和 CSRF Token。
+初始管理员只能在服务器本机、数据库中还没有任何用户时创建。初始化完成后，运营人员可以在登录页自助注册，服务端固定授予 `operator`，注册成功后自动登录；管理员继续使用已有账号直接登录，也可以在“用户与权限”页面创建或管理账号。密码使用 Argon2id 哈希，登录使用服务端不透明 Session，写请求同时校验 `SameSite=Lax` Cookie、Origin 和 CSRF Token。
 
 系统只接受 `admin` 和 `operator`。从含旧只读角色的版本升级时，原只读账号会被改为已禁用的操作员并撤销全部 Session，必须由管理员确认后手动启用。
 
@@ -58,6 +58,22 @@ mpau-web
 
 打开 <http://127.0.0.1:8788>。第一次启动会显示初始管理员表单。默认数据根目录是项目内的 `data/`；生产服务器必须通过 `MPAU_DATA_DIR` 改到独立持久盘。
 
+Linux 生产环境建议使用仓库提供的 systemd 配置：
+
+```bash
+sudo useradd --system --home /var/lib/mpau --shell /usr/sbin/nologin mpau
+sudo install -d -o mpau -g mpau -m 0700 /var/lib/mpau/data /var/lib/mpau/releases
+sudo install -d -m 0755 /etc/mpau
+sudo install -m 0640 -o root -g mpau deploy/linux/mpau.env.example /etc/mpau/mpau.env
+sudoedit /etc/mpau/mpau.env
+sudo install -m 0644 deploy/linux/mpau-web.service /etc/systemd/system/mpau-web.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now mpau-web
+sudo systemctl status mpau-web
+```
+
+把 `YOUR_SERVER_IP` 换成服务器实际 IP，并确认 unit 中的项目路径与服务器一致。查看日志使用 `journalctl -u mpau-web -f`；防火墙只放行办公网、VPN 或批准来源到 TCP `8788`。
+
 ## 用户电脑安装本地执行助手
 
 普通用户不需要 Python、项目代码、虚拟环境或命令行。管理员可在 Windows 构建机生成 Windows 安装包：
@@ -66,7 +82,7 @@ mpau-web
 .\deploy\windows\build-mpau-agent.ps1
 ```
 
-生成的 `deploy\windows\output\MPAU-Agent-Setup.exe` 放到云服务器默认路径，或通过 `MPAU_AGENT_INSTALLER_PATH` 指定。构建脚本会同时生成 `agent-installer.json` 版本清单（版本号、SHA-256、大小），两者必须一起上传。用户登录网页后下载并安装一次，在网页生成配对码并输入 Windows 助手窗口。Windows 助手使用 DPAPI 保存设备令牌，并随当前 Windows 用户登录自动启动，不保存应用密码。
+生成的 `deploy\windows\output\MPAU-Agent-Setup.exe` 放到 Linux 服务器的 `/var/lib/mpau/releases/MPAU-Agent-Setup.exe`，或通过 `MPAU_AGENT_INSTALLER_PATH` 指定。构建脚本会同时生成 `agent-installer.json` 版本清单（版本号、SHA-256、大小），两者必须一起上传到同一目录。用户登录网页后下载并安装一次，在网页生成配对码并输入 Windows 助手窗口。Windows 助手使用 DPAPI 保存设备令牌，并随当前 Windows 用户登录自动启动，不保存应用密码。
 
 ### Windows 助手自动更新
 
@@ -113,7 +129,9 @@ Vite 会把 `/api` 代理到本机 `8788`，认证 Cookie 仍保持同源。
 
 仓库提供：
 
-- `deploy/windows/start-mpau.ps1`：启动云端 FastAPI；
+- `deploy/linux/mpau-web.service`：Linux systemd 服务；
+- `deploy/linux/mpau.env.example`：Linux 生产环境变量示例；
+- `deploy/windows/start-mpau.ps1`：Windows Server 启动云端 FastAPI；
 - `deploy/windows/build-mpau-agent.ps1`：构建自包含 Windows 安装包；
 - `deploy/windows/start-mpau-agent.ps1`：开发环境启动桌面助手；
 - `deploy/windows/mpau.env.example.ps1`：生产环境变量示例。
@@ -128,7 +146,6 @@ Vite 会把 `/api` 代理到本机 `8788`，认证 Cookie 仍保持同源。
 | `MPAU_BIND_HOST` | `0.0.0.0` | FastAPI 监听地址；直连服务器使用 `0.0.0.0` |
 | `MPAU_PORT` | `8788` | FastAPI 监听端口 |
 | `MPAU_SESSION_SECONDS` | `43200` | 应用登录 Session 有效期 |
-| `MPAU_SECURE_COOKIES` | `false` | HTTP 直连保持 `false`；改用 HTTPS 时再设为 `true` |
 | `MPAU_ALLOW_REMOTE_BOOTSTRAP` | `false` | 首次远程创建管理员时临时设为 `true`，完成后改回 `false` |
 | `MPAU_ALLOWED_HOSTS` | `127.0.0.1,localhost` | 允许的 Host；生产加入服务器 IP 或域名 |
 | `MPAU_ALLOWED_ORIGINS` | 本机开发地址 | 允许发起写请求的完整 Origin，直连需包含 `http://服务器IP:8788` |
@@ -145,8 +162,7 @@ $env:MPAU_BIND_HOST = "0.0.0.0"
 $env:MPAU_PORT = "8788"
 $env:MPAU_ALLOWED_HOSTS = "YOUR_SERVER_IP_OR_DOMAIN,127.0.0.1,localhost"
 $env:MPAU_ALLOWED_ORIGINS = "http://YOUR_SERVER_IP_OR_DOMAIN:8788,http://127.0.0.1:8788,http://localhost:8788"
-$env:MPAU_SECURE_COOKIES = "false"
-$env:MPAU_ALLOW_REMOTE_BOOTSTRAP = "true"
+$env:MPAU_ALLOW_REMOTE_BOOTSTRAP = "false"
 $env:MPAU_MAX_MEDIA_TOTAL_BYTES = "107374182400"
 ```
 
@@ -208,6 +224,7 @@ webapp/llm_adapter/          # 用户级模型凭据和激活路由
 webapp/frontend/src/         # 登录、用户管理与业务界面
 local_agent/                 # 用户电脑代理、云端客户端和本机任务执行器
 uploader/                    # 天猫与京东浏览器自动化
+deploy/linux/                # Linux systemd 服务与环境示例
 deploy/windows/              # Windows Server 启动与打包示例
 tests/                       # 单元测试和多用户 ASGI 集成测试
 ```

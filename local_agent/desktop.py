@@ -66,15 +66,6 @@ def _show_update_failure(message: str) -> None:
         return
 
 
-def _allow_remote_http() -> bool:
-    return os.getenv("MPAU_AGENT_ALLOW_HTTP", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
 def _log_and_show_unhandled_exception(exc_type, exc, tb) -> None:
     if issubclass(exc_type, KeyboardInterrupt):
         return sys.__excepthook__(exc_type, exc, tb)
@@ -199,7 +190,7 @@ def _pairing_dialog(
         ipady=8,
         pady=(6, 16),
     )
-    server_entry.insert(0, initial_server or "https://")
+    server_entry.insert(0, initial_server or "http://")
     theme.field_label(form_inner, "一次性配对码", anchor="w", fill="x")
     code_entry = theme.styled_entry(
         form_inner,
@@ -226,7 +217,7 @@ def _pairing_dialog(
         raw_server = server_entry.get().strip()
         code = code_entry.get().strip()
         try:
-            server = _server_url(raw_server, allow_http=_allow_remote_http())
+            server = _server_url(raw_server)
         except ValueError as exc:
             status.set(str(exc))
             return

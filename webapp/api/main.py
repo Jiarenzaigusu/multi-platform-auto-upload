@@ -99,7 +99,6 @@ class WebSettings:
     global_browser_tasks: int = 10
     agent_installer_path: Path | None = None
     session_seconds: int = 12 * 60 * 60
-    secure_cookies: bool = False
     allow_remote_bootstrap: bool = False
     allowed_hosts: tuple[str, ...] = ("127.0.0.1", "localhost", "testserver")
     allowed_origins: tuple[str, ...] = (
@@ -162,8 +161,6 @@ class WebSettings:
                 )
             ).expanduser().resolve(),
             session_seconds=positive_int("MPAU_SESSION_SECONDS", 12 * 60 * 60),
-            secure_cookies=os.getenv("MPAU_SECURE_COOKIES", "false").strip().lower()
-            in {"1", "true", "yes", "on"},
             allow_remote_bootstrap=os.getenv(
                 "MPAU_ALLOW_REMOTE_BOOTSTRAP", "false"
             ).strip().lower()
@@ -302,6 +299,7 @@ def create_app(
         allow_origins=list(settings.allowed_origins),
         allow_methods=["*"],
         allow_headers=["*"],
+        allow_credentials=True,
     )
     app.add_middleware(AuthenticationMiddleware, service=auth_service)
 
@@ -1217,7 +1215,6 @@ def create_app(
     app.include_router(
         create_auth_router(
             auth_service,
-            secure_cookies=settings.secure_cookies,
             allow_remote_bootstrap=settings.allow_remote_bootstrap,
             delete_user_data=workspace_registry.delete_user_data,
         )
@@ -1264,7 +1261,21 @@ def create_app(
 app = create_app()
 
 
+def server_bind_address() -> tuple[str, int]:
+    """Read the direct-deployment listener from the shared environment config."""
+    host = os.getenv("MPAU_BIND_HOST", "0.0.0.0").strip() or "0.0.0.0"
+    raw_port = os.getenv("MPAU_PORT", "8788").strip()
+    try:
+        port = int(raw_port)
+    except ValueError as exc:
+        raise ValueError("MPAU_PORT 必须是 1-65535 之间的整数") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError("MPAU_PORT 必须是 1-65535 之间的整数")
+    return host, port
+
+
 def run() -> None:
     import uvicorn
 
-    uvicorn.run("webapp.api.main:app", host="127.0.0.1", port=8788, reload=False)
+    host, port = server_bind_address()
+    uvicorn.run("webapp.api.main:app", host=host, port=port, reload=False)

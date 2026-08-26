@@ -18,9 +18,9 @@ from unittest.mock import AsyncMock, patch
 from local_agent.client import AgentApiError
 from local_agent.client import AgentApiClient
 from local_agent.credentials import AgentConnectionStore
-from local_agent.desktop import _allow_remote_http, _connect_when_available
+from local_agent.desktop import _connect_when_available
 from local_agent import autostart
-from local_agent.main import LocalAgentApplication
+from local_agent.main import LocalAgentApplication, _server_url
 from local_agent.runner import AgentJobRunner
 from uploader.errors import PublishResultUncertainError
 from webapp.ai_copy.contracts import ProductReference
@@ -307,11 +307,12 @@ class AgentAutostartTests(unittest.TestCase):
             arguments = autostart.autostart_arguments()
         self.assertEqual(arguments[-3:], ["-m", "local_agent.desktop", "--background"])
 
-    def test_desktop_http_pairing_requires_explicit_environment_flag(self):
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertFalse(_allow_remote_http())
-        with patch.dict(os.environ, {"MPAU_AGENT_ALLOW_HTTP": "true"}):
-            self.assertTrue(_allow_remote_http())
+    def test_server_url_accepts_direct_http_and_https(self):
+        self.assertEqual(
+            _server_url("http://10.31.108.221:8788/"),
+            "http://10.31.108.221:8788",
+        )
+        self.assertEqual(_server_url("https://publish.example.com"), "https://publish.example.com")
 
 
 class LocalAgentApplicationTests(unittest.TestCase):

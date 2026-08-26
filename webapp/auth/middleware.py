@@ -14,6 +14,7 @@ _CSRF_EXEMPT_PATHS = {
     "/api/auth/register",
     "/api/agent/pair",
 }
+_SESSION_COOKIE = "mpau_session_v2"
 
 
 class AuthenticationMiddleware(BaseHTTPMiddleware):
@@ -38,7 +39,9 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
             request.state.agent_device = agent_auth
         # Device credentials authorize only execution endpoints. Browser
         # management endpoints still require their own cookie session and CSRF.
-        session = self._service.resolve(request.cookies.get("mpau_session"))
+        # Version the cookie name so an old HTTPS-only session cannot prevent
+        # an HTTP direct connection from storing its replacement session.
+        session = self._service.resolve(request.cookies.get(_SESSION_COOKIE))
         request.state.auth_session = session
 
         if (

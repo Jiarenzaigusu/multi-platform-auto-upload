@@ -455,14 +455,13 @@ class LocalAgentApplication:
                 break
 
 
-def _server_url(value: str, *, allow_http: bool) -> str:
+def _server_url(value: str) -> str:
     normalized = value.strip().rstrip("/")
     parsed = urlsplit(normalized)
-    local_host = (parsed.hostname or "").lower() in {"127.0.0.1", "localhost", "::1"}
     if not parsed.hostname or parsed.username or parsed.password:
         raise ValueError("服务地址格式无效")
-    if parsed.scheme != "https" and not (parsed.scheme == "http" and (local_host or allow_http)):
-        raise ValueError("本地代理必须连接 HTTPS；本机开发地址可使用 HTTP")
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("服务地址必须使用 HTTP 或 HTTPS")
     return normalized
 
 
@@ -470,15 +469,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="在用户电脑上执行 MPAU 天猫/京东 Edge 自动化任务"
     )
-    parser.add_argument("--server", help="发布台地址，例如 https://mpau.example.com")
+    parser.add_argument("--server", help="发布台地址，例如 http://10.31.108.221:8788")
     parser.add_argument("--pair-code", help="网页生成的一次性设备配对码")
     parser.add_argument("--data-dir", type=Path, default=default_data_root())
     parser.add_argument("--poll-seconds", type=float, default=2.0)
-    parser.add_argument(
-        "--allow-http",
-        action="store_true",
-        help="允许连接非本机 HTTP，仅限可信开发网络",
-    )
     return parser
 
 
@@ -495,7 +489,7 @@ def run() -> None:
     if not selected_server:
         raise SystemExit("尚未配对，请运行 MPAU 本地执行助手并输入网页生成的配对码")
     try:
-        server = _server_url(selected_server, allow_http=args.allow_http)
+        server = _server_url(selected_server)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     token = stored.agent_token if stored and stored.server_url == server else ""

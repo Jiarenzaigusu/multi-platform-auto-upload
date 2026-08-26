@@ -35,7 +35,7 @@ export async function apiFetch(path, options = {}) {
   const method = (options.method || 'GET').toUpperCase()
   const headers = new Headers(options.headers || {})
   if (!SAFE_METHODS.has(method)) {
-    const csrfToken = cookieValue('mpau_csrf')
+    const csrfToken = cookieValue('mpau_csrf_v2')
     if (csrfToken) headers.set('X-CSRF-Token', csrfToken)
   }
 
@@ -43,7 +43,7 @@ export async function apiFetch(path, options = {}) {
     ...options,
     method,
     headers,
-    credentials: 'same-origin',
+    credentials: 'include',
   })
   return response
 }
@@ -54,7 +54,9 @@ export async function apiRequest(path, options = {}) {
     ? null
     : await response.json().catch(() => ({}))
   if (!response.ok) {
-    if (response.status === 401 && unauthorizedHandler) unauthorizedHandler()
+    if (response.status === 401 && unauthorizedHandler && !options.skipUnauthorizedHandler) {
+      unauthorizedHandler()
+    }
     const error = new Error(errorMessage(body || {}))
     error.status = response.status
     error.details = body || {}

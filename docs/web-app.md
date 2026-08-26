@@ -103,9 +103,9 @@ mpau-agent ── HTTP 8788 ──┘                  （不启动 Edge）
 ### 3.3 Session 与 CSRF
 
 - 密码以 Argon2id 哈希保存，不保存可逆密码；
-- `mpau_session` 是 `HttpOnly` 不透明 Cookie，数据库只保存其 SHA-256 哈希；
-- `mpau_csrf` 可由前端读取，写请求还必须发送 `X-CSRF-Token`；
-- Cookie 使用 `SameSite=Strict`，生产 HTTPS 必须启用 `Secure`；
+- `mpau_session_v2` 是 `HttpOnly` 不透明 Cookie，数据库只保存其 SHA-256 哈希；
+- `mpau_csrf_v2` 可由前端读取，写请求还必须发送 `X-CSRF-Token`；
+- HTTP 直连 Cookie 使用 `SameSite=Lax`；
 - Session 默认 12 小时，禁用用户、重置密码或撤销会话会使旧 Session 失效；
 - 登录失败按用户名和客户端 IP 限速；安全事件写入审计表，但不记录密码或 Token。
 
@@ -221,6 +221,32 @@ corepack pnpm run build
 cd ../..
 ```
 
+Linux 生产环境使用 systemd：
+
+```bash
+sudo useradd --system --home /var/lib/mpau --shell /usr/sbin/nologin mpau
+sudo install -d -o mpau -g mpau -m 0700 /var/lib/mpau/data /var/lib/mpau/releases
+sudo install -d -m 0755 /etc/mpau
+sudo install -m 0640 -o root -g mpau deploy/linux/mpau.env.example /etc/mpau/mpau.env
+sudoedit /etc/mpau/mpau.env
+sudo install -m 0644 deploy/linux/mpau-web.service /etc/systemd/system/mpau-web.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now mpau-web
+```
+
+`deploy/linux/mpau-web.service` 默认项目路径是 `/opt/multi-platform-auto-upload-main`，如果实际路径不同，需要同步修改 `WorkingDirectory` 和 `ExecStart`。服务日志查看：
+
+```bash
+sudo systemctl status mpau-web
+sudo journalctl -u mpau-web -f
+```
+
+防火墙只允许办公网、VPN 或批准来源访问 TCP `8788`。例如使用 UFW 时，不要直接对公网开放：
+
+```bash
+sudo ufw allow from YOUR_ALLOWED_CIDR to any port 8788 proto tcp
+```
+
 Windows Server 示例：
 
 ```powershell
@@ -243,13 +269,14 @@ notepad deploy\windows\mpau.local.ps1
 
 ### 7.3 生产环境变量
 
+Linux 直接使用 `deploy/linux/mpau.env.example` 作为 `/etc/mpau/mpau.env`；Windows 使用 PowerShell 环境变量或 `deploy/windows/mpau.local.ps1`。两者使用相同的 `MPAU_*` 配置。
+
 | 变量 | 默认值 | 生产建议 |
 | --- | --- | --- |
 | `MPAU_DATA_DIR` | `<项目>/data` | 指向独立持久盘 |
 | `MPAU_BIND_HOST` | `0.0.0.0` | FastAPI 监听地址；直连服务器使用 `0.0.0.0` |
 | `MPAU_PORT` | `8788` | FastAPI 监听端口 |
 | `MPAU_SESSION_SECONDS` | `43200` | 按公司会话策略设置 |
-| `MPAU_SECURE_COOKIES` | `false` | HTTP 直连保持 `false`；改用 HTTPS 时再设为 `true` |
 | `MPAU_ALLOW_REMOTE_BOOTSTRAP` | `false` | 首次远程创建管理员时临时设为 `true`，完成后改回 `false` |
 | `MPAU_ALLOWED_HOSTS` | 本机地址 | 加入准确的服务器 IP 或域名 |
 | `MPAU_ALLOWED_ORIGINS` | 本机开发地址 | 只保留实际 Origin，直连需包含 `http://服务器IP:8788` |
@@ -265,8 +292,7 @@ $env:MPAU_BIND_HOST = "0.0.0.0"
 $env:MPAU_PORT = "8788"
 $env:MPAU_ALLOWED_HOSTS = "YOUR_SERVER_IP_OR_DOMAIN,127.0.0.1,localhost"
 $env:MPAU_ALLOWED_ORIGINS = "http://YOUR_SERVER_IP_OR_DOMAIN:8788,http://127.0.0.1:8788,http://localhost:8788"
-$env:MPAU_SECURE_COOKIES = "false"
-$env:MPAU_ALLOW_REMOTE_BOOTSTRAP = "true"
+$env:MPAU_ALLOW_REMOTE_BOOTSTRAP = "false"
 $env:MPAU_MAX_MEDIA_TOTAL_BYTES = "107374182400"
 ```
 
@@ -280,7 +306,7 @@ $env:MPAU_MAX_MEDIA_TOTAL_BYTES = "107374182400"
 
 ### 7.5 直接启动与后台运行
 
-Windows 可用 `deploy/windows/start-mpau.ps1` 启动 FastAPI，并配置为“无论用户是否登录都运行”的任务计划或公司批准的服务。Linux 可用 systemd。云端服务没有交互式浏览器，后台会话不影响任务执行。
+Linux 使用 `deploy/linux/mpau-web.service` 作为 systemd 服务；Windows Server 可用 `deploy/windows/start-mpau.ps1` 并配置为“无论用户是否登录都运行”的任务计划或公司批准的服务。云端服务没有交互式浏览器，后台会话不影响任务执行。
 
 后台启动只保留一个 FastAPI 实例，不要并行启动第二个 Uvicorn 进程。
 
@@ -289,7 +315,6 @@ Windows 可用 `deploy/windows/start-mpau.ps1` 启动 FastAPI，并配置为“�
 ```text
 [ ] FastAPI 监听 0.0.0.0:8788
 [ ] 防火墙仅允许办公网、VPN 或批准来源访问 8788
-[ ] HTTP 直连时 Secure Cookie 保持 false
 [ ] 首次管理员创建后已关闭 MPAU_ALLOW_REMOTE_BOOTSTRAP
 [ ] Allowed Hosts/Origins 使用准确服务器 IP 或域名而非通配符
 [ ] 只运行一个 Uvicorn worker/项目实例
@@ -308,7 +333,6 @@ Windows 可用 `deploy/windows/start-mpau.ps1` 启动 FastAPI，并配置为“�
 - Windows 10/11；
 - Microsoft Edge；
 - 能访问发布台地址和平台站点；
-- 直连 HTTP 部署时，桌面助手需要启用 `MPAU_AGENT_ALLOW_HTTP=true`；
 - 允许用户桌面显示 Edge 并处理验证码。
 
 普通用户不安装 Python、不下载项目代码，也不运行命令。管理员在 Windows 构建机安装 Python 3.12 和 Inno Setup 6，然后在项目根目录生成安装包：
@@ -316,6 +340,8 @@ Windows 可用 `deploy/windows/start-mpau.ps1` 启动 FastAPI，并配置为“�
 ```powershell
 .\deploy\windows\build-mpau-agent.ps1
 ```
+
+把生成的 `deploy\windows\output\MPAU-Agent-Setup.exe` 和 `agent-installer.json` 一起上传到 Linux 服务器的 `MPAU_AGENT_INSTALLER_PATH` 所在目录（默认 `/var/lib/mpau/releases/`），并保持文件名不变。新版本的 `local_agent/__init__.py` 版本号必须高于已发布版本，已安装助手才能检测并安装更新。
 
 脚本使用 PyInstaller 生成自包含桌面程序，再用 Inno Setup 输出：
 
@@ -363,7 +389,7 @@ Windows 登录时即使网络暂时不可用，助手也会在后台持续重连
 
 - 云端视频、LLM Key 和本机 Cookie 都是敏感数据，应使用最小权限账号、磁盘加密和受控备份；
 - 不要把 `data/`、代理数据目录、Cookie、日志或 `.env` 提交到代码仓库；
-- 不要为了代理连接而禁用 TLS 校验；开发环境的 `--allow-http` 只适用于明确可信的测试网络；
+- 只允许办公网、VPN 或批准来源访问 HTTP 服务，避免将发布台暴露到公网；
 - 禁用或重置应用用户密码会使代理 Session 失效，但不会远程擦除离线电脑；
 - 正式发布出现网络中断、浏览器崩溃或结果回传失败时，先在平台后台核对。
 

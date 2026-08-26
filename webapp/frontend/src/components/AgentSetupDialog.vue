@@ -61,11 +61,37 @@ async function generateCode() {
 
 async function copyCode() {
   if (!pairingCode.value) return
+  error.value = ''
   try {
-    await navigator.clipboard.writeText(pairingCode.value)
+    if (window.isSecureContext && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(pairingCode.value)
+    } else if (!copyWithLegacyClipboard(pairingCode.value)) {
+      throw new Error('clipboard unavailable')
+    }
     copied.value = true
   } catch {
-    error.value = '浏览器无法自动复制，请手动输入配对码。'
+    // HTTP server-IP access is not a secure context, so use the user-gesture
+    // fallback supported by browsers that still permit document.execCommand.
+    if (copyWithLegacyClipboard(pairingCode.value)) {
+      copied.value = true
+      return
+    }
+    error.value = '当前浏览器限制剪贴板权限，请手动输入配对码。'
+  }
+}
+
+function copyWithLegacyClipboard(value) {
+  if (typeof document.execCommand !== 'function') return false
+  const field = document.createElement('textarea')
+  field.value = value
+  field.setAttribute('readonly', '')
+  field.style.cssText = 'position:fixed;opacity:0;pointer-events:none;'
+  document.body.appendChild(field)
+  try {
+    field.select()
+    return document.execCommand('copy')
+  } finally {
+    field.remove()
   }
 }
 </script>
@@ -97,7 +123,7 @@ async function copyCode() {
         <small>{{ copied ? '已复制到剪贴板' : `${expiryLabel()} · 点击复制` }}</small>
       </button>
       <p v-if="error" class="agent-dialog-error" role="alert">{{ error }}</p>
-      <p class="agent-dialog-note">发布台地址填写当前网页地址，例如 <code>https://publish.example.com</code>。生产环境必须使用 HTTPS；本机开发时可使用 <code>http://127.0.0.1:8788</code>。</p>
+      <p class="agent-dialog-note">发布台地址填写当前网页地址，例如 <code>http://10.31.108.221:8788</code>。</p>
     </section>
   </div>
 </template>
