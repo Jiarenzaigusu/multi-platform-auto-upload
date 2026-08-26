@@ -455,6 +455,10 @@ def _run_tray(
                     stop_on_close=False,
                     start_update_checks=False,
                     auto_install_on_open=auto_install,
+                    on_install_started=lambda: (
+                        application.stop(),
+                        icon.stop(),
+                    ),
                 )
                 if installer is not None:
                     pending.append(installer)
@@ -553,6 +557,7 @@ def _run_status_window(
     stop_on_close: bool = True,
     start_update_checks: bool = True,
     auto_install_on_open: bool = False,
+    on_install_started=None,
 ) -> Path | None:
     import tkinter as tk
     from tkinter import messagebox, ttk
@@ -665,6 +670,7 @@ def _run_status_window(
     update_banner_visible = False
     update_status = tk.StringVar(value="有新版本时会在这里提示，也可手动检查")
     progress_label = tk.StringVar(value="")
+    installer_started = False
 
     progress_bar = ttk.Progressbar(
         update_inner,
@@ -802,6 +808,7 @@ def _run_status_window(
         threading.Thread(target=worker, name="mpau-update-check", daemon=True).start()
 
     def confirm_and_restart() -> None:
+        nonlocal installer_started
         installer = updater_state.pending_installer
         if installer is None:
             update_status.set("安装包状态异常，请重新检查更新")
@@ -812,7 +819,19 @@ def _run_status_window(
         ):
             update_status.set("已下载，可稍后点击“安装新版本”打开安装窗口")
             return
-        pending.append(installer)
+        update_status.set("正在打开安装窗口…")
+        try:
+            updater.launch_update(data_root, installer)
+        except Exception as exc:
+            update_status.set(f"启动安装失败：{exc}")
+            return
+        updater_state.pending_installer = None
+        installer_started = True
+        if on_install_started is not None:
+            try:
+                on_install_started()
+            except Exception:
+                logger.exception("停止助手托盘以安装更新失败")
         close(for_install=True)
 
     def install_updates() -> None:
@@ -908,7 +927,7 @@ def _run_status_window(
     except Exception:
         pass
     root.mainloop()
-    return pending[0] if pending else None
+    return None if installer_started else (pending[0] if pending else None)
 
 def _connect_when_available(application: LocalAgentApplication) -> bool:
     """Keep an autostarted helper alive while the local network is unavailable."""
