@@ -20,9 +20,11 @@ from openpyxl import Workbook, load_workbook
 
 from uploader.errors import PublishResultUncertainError
 from uploader.jd_video_uploader.main import JDVideo
+from uploader.tmall_article_uploader.main import TmallArticle
 from uploader.tmall_video_uploader.main import (
     TmallVideo,
     _contains_exact_product_id,
+    _select_cover_ratio_and_continue,
     _has_explicit_empty_product_result,
     _normalize_option_text,
     _normalized_goods_ids,
@@ -142,6 +144,7 @@ class PublishRequestValidationTests(unittest.TestCase):
     def test_tmall_request_normalizes_tags(self):
         request = validate_publish_request(
             platform="tmall",
+            cover_ratio="original",
             account="shop_1",
             video_path=self.video,
             original_filename="demo.mp4",
@@ -153,9 +156,63 @@ class PublishRequestValidationTests(unittest.TestCase):
         self.assertEqual(request.tags, ("女鞋", "夏季穿搭"))
         self.assertFalse(request.dry_run)
 
+    def test_tmall_request_preserves_selected_cover_ratio(self):
+        cover = Path(self.temp_dir.name) / "cover.png"
+        cover.write_bytes(b"image")
+        request = validate_publish_request(
+            platform="tmall",
+            cover_ratio="1:1",
+            account="shop_1",
+            video_path=self.video,
+            cover_image_path=cover,
+            original_filename="demo.mp4",
+            title="夏季女鞋测评",
+        )
+
+        self.assertEqual(request.cover_ratio, "1:1")
+
+    def test_tmall_rejects_unknown_cover_ratio(self):
+        cover = Path(self.temp_dir.name) / "cover.png"
+        cover.write_bytes(b"image")
+        with self.assertRaisesRegex(ValidationError, "封面比例"):
+            validate_publish_request(
+                platform="tmall",
+                cover_ratio="16:9",
+                account="shop_1",
+                video_path=self.video,
+                cover_image_path=cover,
+                original_filename="demo.mp4",
+                title="夏季女鞋测评",
+            )
+
+    def test_tmall_video_without_custom_cover_rejects_crop_ratio(self):
+        with self.assertRaisesRegex(ValidationError, "未上传自定义封面"):
+            validate_publish_request(
+                platform="tmall",
+                account="shop_1",
+                video_path=self.video,
+                cover_ratio="1:1",
+                original_filename="demo.mp4",
+                title="夏季女鞋测评",
+            )
+
+    def test_tmall_custom_cover_requires_cover_ratio(self):
+        cover = Path(self.temp_dir.name) / "cover.png"
+        cover.write_bytes(b"image")
+        with self.assertRaisesRegex(ValidationError, "封面比例"):
+            validate_publish_request(
+                platform="tmall",
+                account="shop_1",
+                video_path=self.video,
+                cover_image_path=cover,
+                original_filename="demo.mp4",
+                title="夏季女鞋测评",
+            )
+
     def test_parse_tags_accepts_chinese_commas(self):
         request = validate_publish_request(
             platform="tmall",
+            cover_ratio="original",
             account="shop_1",
             video_path=self.video,
             original_filename="demo.mp4",
@@ -184,6 +241,7 @@ class PublishRequestValidationTests(unittest.TestCase):
 
         request = validate_publish_request(
             platform="tmall",
+            cover_ratio="3:4",
             account="shop1",
             video_path=self.video,
             cover_image_path=cover,
@@ -210,6 +268,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "JPG、PNG 或 WebP"):
             validate_publish_request(
                 platform="tmall",
+                cover_ratio="3:4",
                 account="shop1",
                 video_path=self.video,
                 cover_image_path=cover,
@@ -286,6 +345,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "文案与标签合计"):
             validate_publish_request(
                 platform="tmall",
+                cover_ratio="original",
                 account="shop1",
                 video_path=self.video,
                 original_filename="demo.mp4",
@@ -300,6 +360,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "视频文件为空"):
             validate_publish_request(
                 platform="tmall",
+                cover_ratio="original",
                 account="shop1",
                 video_path=self.video,
                 original_filename="demo.mp4",
@@ -310,6 +371,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "创作者声明"):
             validate_publish_request(
                 platform="tmall",
+                cover_ratio="original",
                 account="shop1",
                 video_path=self.video,
                 original_filename="demo.mp4",
@@ -342,6 +404,7 @@ class PublishRequestValidationTests(unittest.TestCase):
     def test_tmall_accepts_up_to_six_unique_product_ids(self):
         request = validate_publish_request(
             platform="tmall",
+            cover_ratio="original",
             account="shop1",
             video_path=self.video,
             original_filename="demo.mp4",
@@ -356,6 +419,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "最多关联 6 个"):
             validate_publish_request(
                 platform="tmall",
+                cover_ratio="original",
                 account="shop1",
                 video_path=self.video,
                 original_filename="demo.mp4",
@@ -416,6 +480,7 @@ class PublishRequestValidationTests(unittest.TestCase):
     def test_tmall_music_name_is_normalized_and_jd_rejects_it(self):
         request = validate_publish_request(
             platform="tmall",
+            cover_ratio="original",
             account="shop1",
             video_path=self.video,
             original_filename="demo.mp4",
@@ -444,6 +509,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         cover.write_bytes(b"cover")
         uploader = object.__new__(TmallVideo)
         uploader.cover_image_path = str(cover)
+        uploader.cover_ratio = "3:4"
 
         def locator():
             item = MagicMock()
@@ -488,7 +554,7 @@ class PublishRequestValidationTests(unittest.TestCase):
 
         upload_picker_file = AsyncMock()
         click_visible_frame_button = AsyncMock()
-        select_three_to_four_cover_ratio_and_continue = AsyncMock()
+        select_cover_ratio_and_continue = AsyncMock()
 
         with (
             patch(
@@ -508,8 +574,8 @@ class PublishRequestValidationTests(unittest.TestCase):
                 new=click_visible_frame_button,
             ),
             patch(
-                "uploader.tmall_video_uploader.main._select_three_to_four_cover_ratio_and_continue",
-                new=select_three_to_four_cover_ratio_and_continue,
+                "uploader.tmall_video_uploader.main._select_cover_ratio_and_continue",
+                new=select_cover_ratio_and_continue,
             ),
         ):
             asyncio.run(uploader._set_custom_cover(frame, page))
@@ -519,7 +585,7 @@ class PublishRequestValidationTests(unittest.TestCase):
         upload_picker_file.assert_awaited_once()
         uploaded_cover_path = upload_picker_file.await_args.args[2]
         self.assertEqual(uploaded_cover_path.name, "mpau-cover-20260817-091530-a1b2c3d4e5f6.jpeg")
-        select_three_to_four_cover_ratio_and_continue.assert_awaited_once_with(page)
+        select_cover_ratio_and_continue.assert_awaited_once_with(page, "3:4")
         selection_script, selection_stem = picker_frame.evaluate.await_args.args
         self.assertIn("expectedStem", selection_script)
         self.assertEqual(selection_stem, "mpau-cover-20260817-091530-a1b2c3d4e5f6")
@@ -534,6 +600,72 @@ class PublishRequestValidationTests(unittest.TestCase):
             ],
         )
         frame.get_by_text.assert_called_once_with("智能封面图生成中", exact=False)
+
+    def test_tmall_cover_crop_chooses_requested_one_to_one_card(self):
+        from PIL import Image
+
+        image = Image.new("RGB", (1280, 900), "white")
+        buffer = BytesIO()
+        image.save(buffer, "PNG")
+        cards = (
+            (600.0, 532.0, 687.0, 532.0),
+            (710.0, 532.0, 797.0, 532.0),
+            (820.0, 532.0, 907.0, 532.0),
+        )
+        page = MagicMock()
+        page.screenshot = AsyncMock(return_value=buffer.getvalue())
+        page.evaluate = AsyncMock(return_value={"width": 1280, "height": 900})
+        page.mouse.click = AsyncMock()
+
+        with (
+            patch("uploader.tmall_video_uploader.main._find_cover_ratio_cards", return_value=cards),
+            patch("uploader.tmall_video_uploader.main._ratio_card_is_selected", return_value=True),
+            patch("uploader.tmall_video_uploader.main._find_cover_next_button", return_value=(1030.0, 824.5)),
+            patch("uploader.tmall_video_uploader.main.asyncio.sleep", new=AsyncMock()),
+        ):
+            asyncio.run(_select_cover_ratio_and_continue(page, "1:1"))
+
+        self.assertEqual(page.mouse.click.await_args_list[0].args, ((820.0 + 907.0) / 2, 532.0))
+
+    def test_tmall_original_cover_ratio_skips_ratio_card_click(self):
+        from PIL import Image
+
+        image = Image.new("RGB", (1280, 900), "white")
+        buffer = BytesIO()
+        image.save(buffer, "PNG")
+        page = MagicMock()
+        page.screenshot = AsyncMock(return_value=buffer.getvalue())
+        page.evaluate = AsyncMock(return_value={"width": 1280, "height": 900})
+        page.mouse.click = AsyncMock()
+
+        with patch(
+            "uploader.tmall_video_uploader.main._find_cover_next_button",
+            return_value=(1030.0, 824.5),
+        ):
+            asyncio.run(
+                _select_cover_ratio_and_continue(page, "original")
+            )
+
+        page.mouse.click.assert_awaited_once_with(1030.0, 824.5, delay=150)
+
+    def test_tmall_article_original_ratio_skips_crop_flow(self):
+        uploader = object.__new__(TmallArticle)
+        uploader.cover_ratio = "original"
+        uploader._crop_uploaded_images = AsyncMock()
+
+        asyncio.run(uploader._crop_images_if_requested(MagicMock()))
+
+        uploader._crop_uploaded_images.assert_not_awaited()
+
+    def test_tmall_article_one_to_one_ratio_triggers_requested_crop(self):
+        uploader = object.__new__(TmallArticle)
+        uploader.cover_ratio = "1:1"
+        uploader._crop_uploaded_images = AsyncMock()
+        frame = MagicMock()
+
+        asyncio.run(uploader._crop_images_if_requested(frame))
+
+        uploader._crop_uploaded_images.assert_awaited_once_with(frame, "1:1")
 
     def test_unknown_tmall_navigation_is_not_publish_confirmation(self):
         class Body:
@@ -723,6 +855,7 @@ class TaskManagerTests(unittest.TestCase):
             video.write_bytes(b"video")
             request = validate_publish_request(
                 platform="tmall",
+                cover_ratio="original",
                 account="shop1",
                 video_path=video,
                 original_filename=video.name,
@@ -786,6 +919,7 @@ class TaskManagerTests(unittest.TestCase):
             video.write_bytes(b"video")
             request = validate_publish_request(
                 platform="tmall",
+                cover_ratio="original",
                 account="shop1",
                 video_path=video,
                 original_filename=video.name,
@@ -1010,6 +1144,7 @@ class TaskManagerTests(unittest.TestCase):
             video.write_bytes(b"video")
             request = validate_publish_request(
                 platform="tmall",
+                cover_ratio="original",
                 account="shop1",
                 video_path=video,
                 original_filename=video.name,
@@ -1131,6 +1266,7 @@ class TaskManagerTests(unittest.TestCase):
             video.write_bytes(b"video")
             request = validate_publish_request(
                 platform="tmall",
+                cover_ratio="original",
                 account="shop1",
                 video_path=video,
                 original_filename=video.name,
@@ -1237,6 +1373,8 @@ class TmallBatchWorkbookTests(unittest.TestCase):
         self.video = self.base_dir / "photos" / "demo.mp4"
         self.video.parent.mkdir()
         self.video.write_bytes(b"video")
+        self.cover = self.base_dir / "photos" / "cover.png"
+        self.cover.write_bytes(b"cover")
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -1244,7 +1382,20 @@ class TmallBatchWorkbookTests(unittest.TestCase):
     def build_workbook(self, rows: list[list[object]]) -> bytes:
         workbook = Workbook()
         worksheet = workbook.active
-        worksheet.append(["视频路径", "标题", "文案", "标签", "商品ID", "活动话题", "定时发布", "创作者声明"])
+        worksheet.append(
+            [
+                "视频路径",
+                "自定义封面",
+                "封面比例",
+                "标题",
+                "文案",
+                "标签",
+                "商品ID",
+                "活动话题",
+                "定时发布",
+                "创作者声明",
+            ]
+        )
         for row in rows:
             worksheet.append([*row, "内容无需标注"])
         output = BytesIO()
@@ -1254,7 +1405,7 @@ class TmallBatchWorkbookTests(unittest.TestCase):
 
     def test_valid_rows_map_to_tmall_publish_requests(self):
         content = self.build_workbook(
-            [[str(self.video), "夏季女鞋穿搭", "轻盈舒适", "女鞋，夏季穿搭", "12345，67890", "夏日上新", ""]]
+            [[str(self.video), "", "", "夏季女鞋穿搭", "轻盈舒适", "女鞋，夏季穿搭", "12345，67890", "夏日上新", ""]]
         )
 
         rows = parse_tmall_video_batch_workbook(
@@ -1269,15 +1420,57 @@ class TmallBatchWorkbookTests(unittest.TestCase):
         self.assertEqual(rows[0].request.video_path, self.video.resolve())
         self.assertEqual(rows[0].request.tags, ("女鞋", "夏季穿搭"))
         self.assertEqual(rows[0].request.goods_id, "12345,67890")
+        self.assertEqual(rows[0].request.cover_ratio, "original")
         self.assertTrue(rows[0].request.dry_run)
+
+    def test_video_rows_map_each_selected_cover_ratio(self):
+        content = self.build_workbook(
+            [
+                [str(self.video), str(self.cover), "原始", "原始比例", "", "", "", "", ""],
+                [str(self.video), str(self.cover), "3:4", "三比四比例", "", "", "", "", ""],
+                [str(self.video), str(self.cover), "1:1", "一比一比例", "", "", "", "", ""],
+            ]
+        )
+
+        rows = parse_tmall_video_batch_workbook(
+            content, account="shop1", dry_run=True, headed=True
+        )
+
+        self.assertEqual(
+            [row.request.cover_ratio for row in rows], ["original", "3:4", "1:1"]
+        )
+
+    def test_video_without_custom_cover_rejects_populated_ratio(self):
+        content = self.build_workbook(
+            [[str(self.video), "", "3:4", "夏季女鞋穿搭", "", "", "", "", ""]]
+        )
+
+        with self.assertRaises(BatchValidationError) as context:
+            parse_tmall_video_batch_workbook(
+                content, account="shop1", dry_run=True, headed=True
+            )
+
+        self.assertIn("封面比例必须留空", context.exception.errors[0].message)
+
+    def test_video_with_custom_cover_requires_valid_ratio(self):
+        for ratio in ("", "16:9", "original"):
+            with self.subTest(ratio=ratio):
+                content = self.build_workbook(
+                    [[str(self.video), str(self.cover), ratio, "夏季女鞋穿搭", "", "", "", "", ""]]
+                )
+                with self.assertRaises(BatchValidationError) as context:
+                    parse_tmall_video_batch_workbook(
+                        content, account="shop1", dry_run=True, headed=True
+                    )
+                self.assertIn("封面比例", context.exception.errors[0].message)
 
     def test_tmall_article_batch_accepts_chinese_commas_in_tags(self):
         image = self.base_dir / "photos" / "001.jpg"
         image.write_bytes(b"image")
         workbook = Workbook()
         worksheet = workbook.active
-        worksheet.append(["图片文件夹路径", "标题", "发布文案", "标签"])
-        worksheet.append([str(self.base_dir / "photos"), "夏季女鞋图文", "轻盈舒适", "女鞋，夏季穿搭,通勤鞋"])
+        worksheet.append(["图片文件夹路径", "封面比例", "标题", "发布文案", "标签"])
+        worksheet.append([str(self.base_dir / "photos"), "3:4", "夏季女鞋图文", "轻盈舒适", "女鞋，夏季穿搭,通勤鞋"])
         output = BytesIO()
         workbook.save(output)
         workbook.close()
@@ -1291,11 +1484,45 @@ class TmallBatchWorkbookTests(unittest.TestCase):
 
         self.assertEqual(rows[0].request.tags, ("女鞋", "夏季穿搭", "通勤鞋"))
 
+    def test_tmall_article_rows_map_each_selected_cover_ratio(self):
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append(["图片文件夹路径", "封面比例", "标题"])
+        for ratio in ("原始", "3:4", "1:1"):
+            worksheet.append([str(self.base_dir / "photos"), ratio, f"{ratio} 图文"])
+        output = BytesIO()
+        workbook.save(output)
+        workbook.close()
+
+        rows = parse_tmall_article_batch_workbook(
+            output.getvalue(), account="shop1", dry_run=True, headed=True
+        )
+
+        self.assertEqual(
+            [row.request.cover_ratio for row in rows], ["original", "3:4", "1:1"]
+        )
+
+    def test_tmall_article_requires_valid_cover_ratio(self):
+        for ratio in ("", "16:9", "original"):
+            with self.subTest(ratio=ratio):
+                workbook = Workbook()
+                worksheet = workbook.active
+                worksheet.append(["图片文件夹路径", "封面比例", "标题"])
+                worksheet.append([str(self.base_dir / "photos"), ratio, "夏季女鞋图文"])
+                output = BytesIO()
+                workbook.save(output)
+                workbook.close()
+                with self.assertRaises(BatchValidationError) as context:
+                    parse_tmall_article_batch_workbook(
+                        output.getvalue(), account="shop1", dry_run=True, headed=True
+                    )
+                self.assertIn("封面比例", context.exception.errors[0].message)
+
     def test_explicit_creator_declaration_maps_to_request(self):
         workbook = Workbook()
         worksheet = workbook.active
-        worksheet.append(["视频路径", "标题", "创作者声明"])
-        worksheet.append([str(self.video), "夏季女鞋穿搭", "内容含营销广告"])
+        worksheet.append(["视频路径", "自定义封面", "封面比例", "标题", "创作者声明"])
+        worksheet.append([str(self.video), "", "", "夏季女鞋穿搭", "内容含营销广告"])
         output = BytesIO()
         workbook.save(output)
         workbook.close()
@@ -1312,8 +1539,8 @@ class TmallBatchWorkbookTests(unittest.TestCase):
     def test_music_name_maps_to_tmall_publish_request(self):
         workbook = Workbook()
         worksheet = workbook.active
-        worksheet.append(["视频路径", "标题", "音乐名称", "创作者声明"])
-        worksheet.append([str(self.video), "夏季女鞋穿搭", "默契", "内容无需标注"])
+        worksheet.append(["视频路径", "自定义封面", "封面比例", "标题", "音乐名称", "创作者声明"])
+        worksheet.append([str(self.video), "", "", "夏季女鞋穿搭", "默契", "内容无需标注"])
         output = BytesIO()
         workbook.save(output)
         workbook.close()
@@ -1327,16 +1554,17 @@ class TmallBatchWorkbookTests(unittest.TestCase):
 
         self.assertEqual(rows[0].request.music_name, "默契")
 
-    def test_packaged_template_includes_the_optional_music_column(self):
+    def test_packaged_video_template_includes_conditional_cover_ratio(self):
         from webapp.api.batch_templates import build_batch_template
         workbook = load_workbook(BytesIO(build_batch_template("tmall")))
         try:
             worksheet = workbook.active
             self.assertEqual(
-                [worksheet.cell(1, column).value for column in range(1, 11)],
+                [worksheet.cell(1, column).value for column in range(1, 12)],
                 [
                     "视频路径",
                     "自定义封面",
+                    "封面比例",
                     "标题",
                     "文案",
                     "标签",
@@ -1347,19 +1575,43 @@ class TmallBatchWorkbookTests(unittest.TestCase):
                     "创作者声明",
                 ],
             )
-            self.assertEqual(worksheet["H2"].value, "默契")
+            self.assertEqual(worksheet["C2"].value, "3:4")
+            self.assertEqual(worksheet["I2"].value, "默契")
             self.assertFalse(list(worksheet.merged_cells.ranges))
             validations = worksheet.data_validations.dataValidation
-            self.assertEqual(len(validations), 1)
-            self.assertEqual(str(validations[0].sqref), "J2:J201")
+            self.assertEqual(len(validations), 2)
+            validations_by_range = {str(item.sqref): item for item in validations}
+            self.assertEqual(set(validations_by_range), {"C2:C201", "K2:K201"})
+            ratio_formula = validations_by_range["C2:C201"].formula1
+            self.assertIn('$B2<>""', ratio_formula)
+            self.assertIn("BatchValidationOptions1", ratio_formula)
+            self.assertIn("BatchValidationBlank1", ratio_formula)
+            self.assertEqual(workbook["_validation_options"].sheet_state, "hidden")
+            self.assertIn("BatchValidationOptions1", workbook.defined_names)
+            self.assertIn("BatchValidationBlank1", workbook.defined_names)
+        finally:
+            workbook.close()
+
+    def test_packaged_article_template_includes_cover_ratio_dropdown(self):
+        from webapp.api.batch_templates import build_batch_template
+        workbook = load_workbook(BytesIO(build_batch_template("tmall", "article")))
+        try:
+            worksheet = workbook.active
+            self.assertEqual(worksheet["A1"].value, "图片文件夹路径")
+            self.assertEqual(worksheet["B1"].value, "封面比例")
+            self.assertEqual(worksheet["B2"].value, "3:4")
+            validations = {
+                str(item.sqref): item for item in worksheet.data_validations.dataValidation
+            }
+            self.assertEqual(validations["B2:B201"].formula1, '"原始,3:4,1:1"')
         finally:
             workbook.close()
 
     def test_blank_creator_declaration_is_rejected_when_column_exists(self):
         workbook = Workbook()
         worksheet = workbook.active
-        worksheet.append(["视频路径", "标题", "创作者声明"])
-        worksheet.append([str(self.video), "夏季女鞋穿搭", ""])
+        worksheet.append(["视频路径", "自定义封面", "封面比例", "标题", "创作者声明"])
+        worksheet.append([str(self.video), "", "", "夏季女鞋穿搭", ""])
         output = BytesIO()
         workbook.save(output)
         workbook.close()
@@ -1381,8 +1633,8 @@ class TmallBatchWorkbookTests(unittest.TestCase):
         worksheet.append(["天猫光合批量发布导入模板"])
         worksheet.append(["店铺账号在网页中选择"])
         worksheet.append([])
-        worksheet.append(["视频路径", "标题", "文案", "标签", "商品ID", "活动话题", "定时发布", "创作者声明"])
-        worksheet.append([str(self.video), "夏季女鞋穿搭", "", "", "", "", "", "内容无需标注"])
+        worksheet.append(["视频路径", "自定义封面", "封面比例", "标题", "文案", "标签", "商品ID", "活动话题", "定时发布", "创作者声明"])
+        worksheet.append([str(self.video), "", "", "夏季女鞋穿搭", "", "", "", "", "", "内容无需标注"])
         content = BytesIO()
         workbook.save(content)
         workbook.close()
@@ -1397,7 +1649,7 @@ class TmallBatchWorkbookTests(unittest.TestCase):
         self.assertEqual(rows[0].row_number, 5)
 
     def test_invalid_rows_report_excel_row_without_creating_requests(self):
-        content = self.build_workbook([[str(self.base_dir / "missing.mp4"), "", "", "", "", "", ""]])
+        content = self.build_workbook([[str(self.base_dir / "missing.mp4"), "", "", "", "", "", "", "", ""]])
 
         with self.assertRaises(BatchValidationError) as context:
             parse_tmall_video_batch_workbook(
@@ -1411,7 +1663,7 @@ class TmallBatchWorkbookTests(unittest.TestCase):
         self.assertIn("视频文件不存在", context.exception.errors[0].message)
 
     def test_parent_directory_escape_is_reported_as_a_row_error(self):
-        content = self.build_workbook([["demo.mp4", "夏季女鞋穿搭", "", "", "", "", ""]])
+        content = self.build_workbook([["demo.mp4", "", "", "夏季女鞋穿搭", "", "", "", "", ""]])
 
         with self.assertRaises(BatchValidationError) as context:
             parse_tmall_video_batch_workbook(
@@ -1627,9 +1879,9 @@ class TmallBatchApiTests(unittest.TestCase):
             video.write_bytes(b"video")
             workbook = Workbook()
             worksheet = workbook.active
-            worksheet.append(["视频路径", "标题", "文案", "标签", "商品ID", "活动话题", "定时发布", "创作者声明"])
-            worksheet.append([str(video), "夏季女鞋穿搭", "轻盈舒适", "女鞋,夏季穿搭", "12345", "", "", "内容无需标注"])
-            worksheet.append([str(video), "夏季通勤穿搭", "舒适百搭", "通勤", "", "", "", "内容无需标注"])
+            worksheet.append(["视频路径", "自定义封面", "封面比例", "标题", "文案", "标签", "商品ID", "活动话题", "定时发布", "创作者声明"])
+            worksheet.append([str(video), "", "", "夏季女鞋穿搭", "轻盈舒适", "女鞋,夏季穿搭", "12345", "", "", "内容无需标注"])
+            worksheet.append([str(video), "", "", "夏季通勤穿搭", "舒适百搭", "通勤", "", "", "", "内容无需标注"])
             content = BytesIO()
             workbook.save(content)
             workbook.close()
@@ -1678,9 +1930,9 @@ class TmallBatchApiTests(unittest.TestCase):
             video.write_bytes(b"video")
             workbook = Workbook()
             worksheet = workbook.active
-            worksheet.append(["视频路径", "标题", "创作者声明"])
-            worksheet.append([str(video), "有效标题", "内容无需标注"])
-            worksheet.append([str(root / "missing.mp4"), "无效视频", "内容无需标注"])
+            worksheet.append(["视频路径", "自定义封面", "封面比例", "标题", "创作者声明"])
+            worksheet.append([str(video), "", "", "有效标题", "内容无需标注"])
+            worksheet.append([str(root / "missing.mp4"), "", "", "无效视频", "内容无需标注"])
             content = BytesIO()
             workbook.save(content)
             workbook.close()
@@ -2262,6 +2514,7 @@ class PlatformAdapterTests(unittest.TestCase):
         request = TmallVideoUploadRequest(
             account_name="shop1",
             video_file=Path("/tmp/demo.mp4"),
+            cover_ratio="original",
             title="夏季女鞋测评",
             description="轻便好穿",
             tags=["女鞋"],
@@ -2309,6 +2562,7 @@ class PlatformAdapterTests(unittest.TestCase):
         request = TmallVideoUploadRequest(
             account_name="shop1",
             video_file=Path("/tmp/demo.mp4"),
+            cover_ratio="3:4",
             cover_image_file=Path("/tmp/cover.png"),
             title="夏季女鞋测评",
             description="轻便好穿",

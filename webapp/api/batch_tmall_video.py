@@ -15,10 +15,21 @@ from webapp.api.batch import (
 from webapp.api.batch_template_workbook import build_content_template
 from webapp.api.models import CREATOR_DECLARATIONS, validate_publish_request
 
+TMALL_COVER_RATIO_OPTIONS = ("原始", "3:4", "1:1")
+TMALL_COVER_RATIO_VALUES = dict(zip(TMALL_COVER_RATIO_OPTIONS, ("original", "3:4", "1:1")))
+
+
+def _normalize_tmall_cover_ratio(value: str) -> str:
+    try:
+        return TMALL_COVER_RATIO_VALUES[value.strip()]
+    except KeyError as exc:
+        raise ValueError("天猫封面比例必须为原始、3:4 或 1:1") from exc
+
 
 TMALL_VIDEO_BATCH_COLUMNS = (
     ("video_path", "视频路径", True),
     ("cover_image_path", "自定义封面", False),
+    ("cover_ratio", "封面比例", True),
     ("title", "标题", True),
     ("description", "文案", False),
     ("tags", "标签", False),
@@ -31,6 +42,7 @@ TMALL_VIDEO_BATCH_COLUMNS = (
 TMALL_VIDEO_SAMPLE_ROW = (
     "/Users/your-name/Videos/example.mp4",
     "/Users/your-name/Pictures/cover.png",
+    "3:4",
     "夏季女鞋穿搭",
     "轻盈舒适，适合通勤与日常穿搭。",
     "女鞋,夏季穿搭",
@@ -43,6 +55,7 @@ TMALL_VIDEO_SAMPLE_ROW = (
 TMALL_VIDEO_COLUMN_ALIASES = {
     "video_path": {"视频路径", "视频文件", "videopath", "video"},
     "cover_image_path": {"自定义封面", "封面路径", "封面图片", "coverimagepath", "cover"},
+    "cover_ratio": {"封面比例"},
     "title": {"标题", "title"},
     "description": {"文案", "发布文案", "description"},
     "tags": {"标签", "tags"},
@@ -62,6 +75,9 @@ def build_tmall_video_template() -> bytes:
         sample_row=TMALL_VIDEO_SAMPLE_ROW,
         list_validations=(
             ("creator_declaration", CREATOR_DECLARATIONS, "无效的创作者声明", "请从下拉列表中选择预定义的创作者声明"),
+        ),
+        conditional_list_validations=(
+            ("cover_ratio", "cover_image_path", TMALL_COVER_RATIO_OPTIONS, "无效的封面比例", "有自定义封面时请选择原始、3:4 或 1:1；未上传封面时请留空"),
         ),
     )
 
@@ -91,9 +107,13 @@ def parse_tmall_video_batch_workbook(
             try:
                 video_path = resolve_video_path(row_values["video_path"])
                 cover_image_path = resolve_local_path(row_values["cover_image_path"], "自定义封面路径") if row_values["cover_image_path"] else None
+                raw_cover_ratio = row_values["cover_ratio"]
+                if cover_image_path is None and raw_cover_ratio:
+                    raise ValueError("未上传自定义封面时，封面比例必须留空")
+                cover_ratio = _normalize_tmall_cover_ratio(raw_cover_ratio) if cover_image_path else None
                 request = validate_publish_request(
                     platform="tmall", account=account, content_type="video", video_path=video_path,
-                    cover_image_path=cover_image_path, original_filename=video_path.name,
+                    cover_image_path=cover_image_path, cover_ratio=cover_ratio, original_filename=video_path.name,
                     title=row_values["title"], description=row_values["description"],
                     raw_tags=row_values["tags"].replace("，", ","), goods_id=row_values["goods_id"],
                     activity_topic=row_values["activity_topic"], raw_music_name=row_values["music_name"],

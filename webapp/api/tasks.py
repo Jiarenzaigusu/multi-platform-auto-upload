@@ -830,6 +830,7 @@ class TaskManager:
                 title=payload["title"],
                 description=payload["description"],
                 tags=list(payload["tags"]),
+                cover_ratio=payload["cover_ratio"],
                 goods_id=payload["goods_id"],
                 activity_topic=payload["activity_topic"],
                 music_name=payload.get("music_name", ""),
@@ -854,6 +855,7 @@ class TaskManager:
                     if payload.get("cover_image_path")
                     else None
                 ),
+                cover_ratio=payload["cover_ratio"],
                 title=payload["title"],
                 description=payload["description"],
                 tags=payload["tags"],

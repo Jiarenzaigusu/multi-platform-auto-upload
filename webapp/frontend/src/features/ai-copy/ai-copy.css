@@ -188,6 +188,16 @@
 .ai-copy-catalog-upload button:hover,
 .ai-copy-catalog-status button:hover { border-color: #89994b; color: #344620; }
 .ai-copy-catalog-upload button:disabled { cursor: wait; opacity: .58; }
+.ai-copy-template-link {
+  grid-column: 1 / -1;
+  width: fit-content;
+  color: #687743;
+  font-size: 10px;
+  font-weight: 750;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.ai-copy-template-link:hover { color: #354620; }
 .ai-copy-catalog-status {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;

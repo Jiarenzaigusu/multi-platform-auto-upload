@@ -128,6 +128,7 @@ class AgentTaskManagerTests(unittest.TestCase):
         video.write_bytes(b"video")
         request = validate_publish_request(
             platform="tmall",
+            cover_ratio="original",
             account="shop1",
             video_path=video,
             original_filename=video.name,
@@ -161,6 +162,7 @@ class AgentTaskManagerTests(unittest.TestCase):
         video.write_bytes(b"video")
         request = validate_publish_request(
             platform="tmall",
+            cover_ratio="original",
             account="shop1",
             video_path=video,
             original_filename=video.name,
@@ -203,6 +205,7 @@ class AgentTaskManagerTests(unittest.TestCase):
         fixture.write_bytes(b"video")
         request = validate_publish_request(
             platform="tmall",
+            cover_ratio="original",
             account="shop1",
             video_path=fixture,
             original_filename="demo.mp4",
@@ -561,6 +564,7 @@ class AgentJobRunnerTests(unittest.TestCase):
                     "title": "本地代理发布测试",
                     "description": "正文",
                     "tags": ["测试"],
+                    "cover_ratio": "1:1",
                     "goods_id": "123",
                     "activity_topic": "",
                     "music_name": "",
@@ -579,6 +583,7 @@ class AgentJobRunnerTests(unittest.TestCase):
                 self.assertEqual(request.account_name, "shop1")
                 self.assertEqual(request.video_file, video)
                 self.assertEqual(request.cover_image_file, cover)
+                self.assertEqual(request.cover_ratio, "1:1")
                 self.assertTrue(request.dry_run)
                 self.assertFalse(request.headless)
                 self.assertEqual(upload.await_args.kwargs["session_pool"], session_pool)

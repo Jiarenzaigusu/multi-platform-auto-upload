@@ -19,8 +19,18 @@ from webapp.api.models import (
 )
 
 
+def _normalize_tmall_cover_ratio(value: str) -> str:
+    normalized = value.strip()
+    if normalized == "原始":
+        return "original"
+    if normalized in {"3:4", "1:1"}:
+        return normalized
+    raise ValueError("天猫封面比例必须为原始、3:4 或 1:1")
+
+
 TMALL_ARTICLE_BATCH_COLUMNS = (
     ("image_folder_path", "图片文件夹路径", True),
+    ("cover_ratio", "封面比例", True),
     ("title", "标题", True),
     ("description", "发布文案", False),
     ("tags", "标签", False),
@@ -32,6 +42,7 @@ TMALL_ARTICLE_BATCH_COLUMNS = (
 )
 TMALL_ARTICLE_SAMPLE_ROW = (
     "/Users/your-name/Pictures/summer-shoes",
+    "3:4",
     "夏季女鞋图文",
     "轻盈舒适，适合通勤与日常穿搭。",
     "女鞋,夏季穿搭",
@@ -49,6 +60,7 @@ TMALL_ARTICLE_COLUMN_ALIASES = {
         "imagepaths",
         "images",
     },
+    "cover_ratio": {"封面比例"},
     "title": {"标题", "title"},
     "description": {"发布文案", "文案", "description"},
     "tags": {"标签", "tags"},
@@ -67,6 +79,7 @@ def build_tmall_article_template() -> bytes:
         columns=TMALL_ARTICLE_BATCH_COLUMNS,
         sample_row=TMALL_ARTICLE_SAMPLE_ROW,
         list_validations=(
+            ("cover_ratio", ("原始", "3:4", "1:1"), "无效的封面比例", "请选择原始、3:4 或 1:1"),
             ("creator_declaration", CREATOR_DECLARATIONS, "无效的创作者声明", "请从下拉列表中选择预定义的创作者声明"),
         ),
     )
@@ -118,7 +131,7 @@ def parse_tmall_article_batch_workbook(
                 image_paths = _resolve_image_paths(row_values["image_folder_path"])
                 request = validate_publish_request(
                     platform="tmall", account=account, content_type="article", image_paths=image_paths,
-                    original_filename=image_paths[0].name, title=row_values["title"],
+                    cover_ratio=_normalize_tmall_cover_ratio(row_values["cover_ratio"]), original_filename=image_paths[0].name, title=row_values["title"],
                     description=row_values["description"], raw_tags=row_values["tags"].replace("，", ","),
                     goods_id=row_values["goods_id"], activity_topic=row_values["activity_topic"],
                     raw_music_name=row_values["music_name"],

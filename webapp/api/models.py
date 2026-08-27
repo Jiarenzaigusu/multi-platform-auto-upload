@@ -29,6 +29,7 @@ SUPPORTED_CONTENT_TYPES = {"video", "article"}
 SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm"}
 # 支持的封面图片扩展名
 SUPPORTED_COVER_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+TMALL_COVER_RATIOS = ("original", "3:4", "1:1")
 JD_ARTICLE_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 MAX_JD_ARTICLE_IMAGES = 20
 MAX_SOCIAL_ARTICLE_IMAGES = 35
@@ -89,6 +90,7 @@ class PublishRequest:
     video_path: Path | None     # 视频文件绝对路径（仅视频）
     image_paths: tuple[Path, ...]  # 图片绝对路径（仅图文，顺序即发布顺序）
     cover_image_path: Path | None  # 视频自定义封面图片路径（可为 None）
+    cover_ratio: str              # 天猫视频/图文比例 original/3:4/1:1
     original_filename: str      # 原始文件名（用于日志/结果）
     title: str                  # 标题
     description: str            # 描述/文案（天猫有，京东无）
@@ -215,6 +217,7 @@ def validate_publish_request(
     video_path: Path | None = None,
     image_paths: tuple[Path, ...] = (),
     cover_image_path: Path | None = None,
+    cover_ratio: str | None = None,
     original_filename: str,
     title: str,
     description: str = "",
@@ -319,6 +322,23 @@ def validate_publish_request(
         if cover_image_path.suffix.lower() not in SUPPORTED_COVER_IMAGE_EXTENSIONS:
             raise ValidationError("封面图片仅支持 JPG、PNG 或 WebP 格式")
 
+    if (
+        selected_platform == "tmall"
+        and selected_content_type == "video"
+        and cover_image_path is None
+        and cover_ratio not in (None, "", "original")
+    ):
+        raise ValidationError("未上传自定义封面时，封面比例必须为原始比例")
+
+    if selected_platform == "tmall" and (
+        selected_content_type == "article" or cover_image_path is not None
+    ):
+        normalized_cover_ratio = str(cover_ratio or "").strip().lower()
+        if normalized_cover_ratio not in TMALL_COVER_RATIOS:
+            raise ValidationError("天猫封面比例必须为原始、3:4 或 1:1")
+    else:
+        normalized_cover_ratio = "original"
+
     # 标题校验
     if not normalized_title:
         raise ValidationError("标题不能为空")
@@ -409,6 +429,7 @@ def validate_publish_request(
         video_path=normalized_video_path,
         image_paths=normalized_image_paths,
         cover_image_path=cover_image_path.resolve() if cover_image_path else None,
+        cover_ratio=normalized_cover_ratio,
         original_filename=original_filename,
         title=normalized_title,
         description=normalized_description,

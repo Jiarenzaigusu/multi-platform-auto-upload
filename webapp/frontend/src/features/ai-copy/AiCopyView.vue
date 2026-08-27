@@ -805,6 +805,13 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
           <button :disabled="uploadingSellingPoints" type="button" @click="chooseSellingPointFile">
             {{ uploadingSellingPoints ? '解析中…' : sellingPointCatalog ? '更换表格' : '选择 Excel' }}
           </button>
+          <a
+            class="ai-copy-template-link"
+            :href="`${apiBase}/api/ai-copy/selling-point-template`"
+            download
+          >
+            下载 Excel 模板
+          </a>
         </div>
 
         <article v-if="sellingPointCatalog" class="ai-copy-catalog-status">

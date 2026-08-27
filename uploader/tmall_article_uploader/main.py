@@ -460,6 +460,7 @@ class TmallArticle:
         desc: str | None,
         account_file: str,
         *,
+        cover_ratio: str,
         tags: list[str] | None = None,
         goods_id: str | None = None,
         activity_topic: str | None = None,
@@ -475,6 +476,7 @@ class TmallArticle:
         self.desc = desc or ""
         self.account_file = account_file
         self.tags = tags or []
+        self.cover_ratio = cover_ratio
         self.goods_ids = _normalized_goods_ids(goods_id or "")
         self.goods_id = ",".join(self.goods_ids)
         self.activity_topic = activity_topic or ""
@@ -538,6 +540,8 @@ class TmallArticle:
             self.validate_publish_date(self.schedule)
         if not self.creator_declaration:
             raise ValueError("天猫创作者声明不能为空")
+        if self.cover_ratio not in {"original", "3:4", "1:1"}:
+            raise ValueError("天猫图文图片比例必须为原始、3:4 或 1:1")
     def _build_description(self) -> str:
         """返回纯描述文本。
 
@@ -1485,8 +1489,8 @@ class TmallArticle:
             await asyncio.sleep(2)
         raise RuntimeError("天猫图文图片库确认后未回写图片数量")
 
-    async def _crop_uploaded_images_to_three_four(self, frame) -> None:
-        """将刚上传的全部图文图片逐张裁剪为 3:4 并确认。
+    async def _crop_uploaded_images(self, frame, ratio: str) -> None:
+        """将刚上传的全部图文图片逐张裁剪为指定比例并确认。
 
         发布器需先悬浮缩略图，图片上的“裁剪”操作才会显示。裁剪弹窗虽提示
         支持批量操作，但实测图片缩略图每次只保留单选状态，因此这里逐张选中
@@ -1521,11 +1525,11 @@ class TmallArticle:
                 f"裁剪弹窗未加载全部图片（期望 {expected_images} 张，实际 {actual_thumbnails} 张）"
             )
 
-        # 3:4 同时有卡片外层和文字内层；平台在实际运行时只会稳定响应文字
+        # 比例同时有卡片外层和文字内层；平台在实际运行时只会稳定响应文字
         # 内层的点击。比例的激活样式位于其父卡片上。
-        three_to_four_ratio_text = crop_dialog.locator(
+        ratio_text = crop_dialog.locator(
             'div[class*="picture-upload--ratio_text--"]'
-        ).filter(has_text=re.compile(r"^3:4$"))
+        ).filter(has_text=re.compile(rf"^{re.escape(ratio)}$"))
         for index in range(expected_images):
             thumbnail = thumbnails.nth(index)
             # 图片缩略图由内部 img 接收鼠标事件，比例和确认按钮也会被子 span 覆盖。
@@ -1540,21 +1544,27 @@ class TmallArticle:
             # 缩略图选中后，平台会异步重建左侧裁剪画布；只等激活边框出现还不够。
             # 留出画布切换时间后点击比例文字，让事件冒泡至比例卡片。
             await asyncio.sleep(0.5)
-            await three_to_four_ratio_text.click(force=True)
+            await ratio_text.click(force=True)
             for _ in range(20):
-                is_three_to_four = await three_to_four_ratio_text.evaluate(
+                is_selected = await ratio_text.evaluate(
                     "(text) => text.parentElement.className.includes('ratio_active')"
                 )
-                if is_three_to_four:
+                if is_selected:
                     break
                 await asyncio.sleep(0.2)
             else:
-                raise RuntimeError(f"第 {index + 1} 张图文图片未成功设置为 3:4 裁剪比例")
+                raise RuntimeError(f"第 {index + 1} 张图文图片未成功设置为 {ratio} 裁剪比例")
 
         confirm_button = crop_dialog.get_by_role("button", name="确定", exact=True)
         await confirm_button.click(force=True)
         await crop_dialog.wait_for(state="hidden", timeout=15000)
-        tmall_logger.success(_msg("✂️", f"已将 {expected_images} 张图文图片裁剪为 3:4"))
+        tmall_logger.success(_msg("✂️", f"已将 {expected_images} 张图文图片裁剪为 {ratio}"))
+
+    async def _crop_images_if_requested(self, frame) -> None:
+        """原始比例跳过裁剪，其他比例进入逐张裁剪流程。"""
+        if self.cover_ratio == "original":
+            return
+        await self._crop_uploaded_images(frame, self.cover_ratio)
 
     async def _upload_in_context(self, context: BrowserContext) -> dict:
         """执行完整的天猫图文发布流程。"""
@@ -1571,7 +1581,7 @@ class TmallArticle:
             frame = await self._find_publish_frame(page)
             await asyncio.sleep(3)
             await self._upload_images(frame, page)
-            await self._crop_uploaded_images_to_three_four(frame)
+            await self._crop_images_if_requested(frame)
             await self._fill_title_and_desc(frame, page)
             await self._add_activity_topic(frame, page)
             await self._add_music(frame)

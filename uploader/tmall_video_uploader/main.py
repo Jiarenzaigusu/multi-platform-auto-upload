@@ -58,6 +58,8 @@ TMALL_PUBLISH_STRATEGY_SCHEDULED = "scheduled"
 TMALL_MAX_GOODS_IDS = 6
 # 天猫自定义封面支持的图片格式
 TMALL_COVER_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+# 天猫封面编辑器展示的比例顺序与平台页面一致。
+TMALL_COVER_RATIOS = ("original", "3:4", "1:1")
 # 天猫自定义封面最大字节数（20 MiB）
 TMALL_MAX_COVER_IMAGE_BYTES = 20 * 1024 * 1024
 # 商品搜索结果为空时平台给出的提示文案（用于判定"无结果"而非"还在加载"）
@@ -320,33 +322,40 @@ def _ratio_card_is_selected(
     return False
 
 
-async def _select_three_to_four_cover_ratio_and_continue(page: Page) -> None:
-    """动态选择 3:4 比例并确认裁剪页，任何视觉信号缺失时安全停止。"""
+async def _select_cover_ratio_and_continue(
+    page: Page,
+    ratio: str,
+) -> None:
+    """按平台比例卡片顺序确认比例并继续；原始比例可沿用平台默认值。"""
+    if ratio not in TMALL_COVER_RATIOS:
+        raise ValueError(f"不支持的天猫封面比例: {ratio}")
     screenshot = await page.screenshot(type="png")
-    cards = _find_cover_ratio_cards(screenshot)
-    if cards is None:
-        raise RuntimeError("未识别到天猫封面比例卡片，已停止避免使用固定坐标")
-
-    # 平台展示顺序固定为“原始 / 3:4 / 1:1”，选择动态识别出的中间卡片。
-    three_to_four_card = cards[1]
-    viewport = await page.evaluate("() => ({ width: window.innerWidth, height: window.innerHeight })")
+    viewport = await page.evaluate(
+        "() => ({ width: window.innerWidth, height: window.innerHeight })"
+    )
     try:
         from PIL import Image
     except ImportError as exc:  # pragma: no cover - dependency is declared in pyproject.toml
         raise RuntimeError("缺少 Pillow，无法识别天猫封面比例卡片") from exc
     image_width, image_height = Image.open(BytesIO(screenshot)).size
-    three_to_four_x = (
-        (three_to_four_card[0] + three_to_four_card[2]) / 2
-        * viewport["width"]
-        / image_width
-    )
-    three_to_four_y = three_to_four_card[1] * viewport["height"] / image_height
-    await page.mouse.click(three_to_four_x, three_to_four_y, delay=150)
-    await asyncio.sleep(1)
-
-    selected_screenshot = await page.screenshot(type="png")
-    if not _ratio_card_is_selected(selected_screenshot, three_to_four_card):
-        raise RuntimeError("未确认已选择 3:4 封面比例，已停止避免继续错误裁剪")
+    selected_screenshot = screenshot
+    if ratio != "original":
+        cards = _find_cover_ratio_cards(screenshot)
+        if cards is None:
+            raise RuntimeError("未识别到天猫封面比例卡片，已停止避免使用固定坐标")
+        # 平台展示顺序固定为“原始 / 3:4 / 1:1”。
+        target_card = cards[TMALL_COVER_RATIOS.index(ratio)]
+        target_x = (
+            (target_card[0] + target_card[2]) / 2
+            * viewport["width"]
+            / image_width
+        )
+        target_y = target_card[1] * viewport["height"] / image_height
+        await page.mouse.click(target_x, target_y, delay=150)
+        await asyncio.sleep(1)
+        selected_screenshot = await page.screenshot(type="png")
+        if not _ratio_card_is_selected(selected_screenshot, target_card):
+            raise RuntimeError(f"未确认已选择 {ratio} 封面比例，已停止避免继续错误裁剪")
 
     next_button = _find_cover_next_button(selected_screenshot)
     if next_button is None:
@@ -735,6 +744,7 @@ class TmallVideo(TmallBaseUploader):
         title: str,
         desc: str | None,
         account_file,
+        cover_ratio: str,
         cover_image_path: str | None = None,
         tags: list[str] | None = None,
         goods_id: str | None = None,
@@ -753,6 +763,7 @@ class TmallVideo(TmallBaseUploader):
         :param desc: 视频描述/文案（最多 1000 字，含话题标签）
         :param account_file: 账号 Cookie 文件路径
         :param cover_image_path: 自定义封面图片路径（可选）
+        :param cover_ratio: 封面比例（original、3:4 或 1:1）
         :param tags: 话题标签列表（最多 4 个）
         :param goods_id: 商品 ID 字符串（多个用逗号/空格/换行分隔，最多 6 个）
         :param activity_topic: 活动话题关键词（可选，留空表示不参加）
@@ -766,6 +777,7 @@ class TmallVideo(TmallBaseUploader):
         super().__init__(account_file=account_file, debug=debug)
         self.file_path = file_path
         self.cover_image_path = cover_image_path
+        self.cover_ratio = cover_ratio
         self.title = title
         self.desc = desc or ""
         self.tags = tags or []
@@ -797,6 +809,10 @@ class TmallVideo(TmallBaseUploader):
             if cover_path.stat().st_size > TMALL_MAX_COVER_IMAGE_BYTES:
                 raise ValueError("天猫封面图片不能超过 20 MiB")
             self.cover_image_path = str(cover_path.resolve())
+        if self.cover_ratio not in TMALL_COVER_RATIOS:
+            raise ValueError("天猫封面比例必须为原始、3:4 或 1:1")
+        if not self.cover_image_path and self.cover_ratio != "original":
+            raise ValueError("未上传自定义封面时，封面比例必须为原始比例")
         # 标题校验
         if not self.title:
             raise ValueError("天猫光合视频标题不能为空")
@@ -869,16 +885,13 @@ class TmallVideo(TmallBaseUploader):
         1. 点击"编辑"封面按钮（等待智能封面生成完成）
         2. 在弹窗中点击"本地上传" → 通过跨层图库选择本地文件
         3. 等待上传完成 → 点击"完成" → 选中刚上传的图片
-        4. 点击"确定" → 动态识别并选择 3:4 裁剪比例 → 处理花字确认层
+        4. 点击"确定" → 按所选比例处理裁剪页 → 处理花字确认层
         5. 回到主表单
 
         图片库、裁剪层、花字层以独立 frame 呈现；通过可见控件的语义定位完成
         操作。新增图片和选中状态必须在图库 iframe 内确认，不能依赖素材卡片或
         视口坐标。
         """
-        if not self.cover_image_path:
-            return
-
         cover_path = Path(self.cover_image_path)
         tmall_logger.info(_msg("🖼️", f"准备设置自定义封面: {cover_path.name}"))
         # 等待"编辑"封面按钮可点击
@@ -1030,9 +1043,9 @@ class TmallVideo(TmallBaseUploader):
         )
         await asyncio.sleep(1)
 
-        # “原始”比例是视频比例而不是图片比例。比例卡片属于不可访问的渲染层，
-        # 只能从实时内存页面图像动态识别其位置，绝不能回退为固定坐标。
-        await _select_three_to_four_cover_ratio_and_continue(page)
+        # 原始比例保持平台默认选中态，直接识别并点击下一步；其他比例从实时页面
+        # 截图动态识别卡片位置，绝不能回退为固定坐标。
+        await _select_cover_ratio_and_continue(page, self.cover_ratio)
         await asyncio.sleep(1)
 
         # 进入可选的花字确认层；不选模板也要确认，封面才会写回主表单。
@@ -1896,7 +1909,8 @@ class TmallVideo(TmallBaseUploader):
             await file_input.set_input_files(self.file_path)
             await self._wait_for_upload_ready(frame)
             # 各步骤依次执行
-            await self._set_custom_cover(frame, page)
+            if self.cover_image_path:
+                await self._set_custom_cover(frame, page)
             await self._fill_title_and_desc(frame, page)
             await self._add_activity_topic(frame, page)
             await self._add_music(frame)

@@ -65,6 +65,7 @@ class TmallVideoUploadRequest:
     title: str
     description: str
     tags: list[str]
+    cover_ratio: str
     cover_image_file: Path | None = None
     goods_id: str = ""
     activity_topic: str = ""
@@ -86,6 +87,7 @@ class TmallArticleUploadRequest:
     title: str
     description: str
     tags: list[str]
+    cover_ratio: str
     goods_id: str = ""
     activity_topic: str = ""
     music_name: str = ""
@@ -284,6 +286,7 @@ async def upload_tmall_video(
     uploader = TmallVideo(
         file_path=str(request.video_file),
         cover_image_path=str(request.cover_image_file) if request.cover_image_file else None,
+        cover_ratio=request.cover_ratio,
         title=request.title,
         desc=request.description,
         account_file=str(account_file),
@@ -330,6 +333,7 @@ async def upload_tmall_article(
         desc=request.description,
         account_file=str(account_file),
         tags=request.tags,
+        cover_ratio=request.cover_ratio,
         goods_id=request.goods_id,
         activity_topic=request.activity_topic,
         music_name=request.music_name,

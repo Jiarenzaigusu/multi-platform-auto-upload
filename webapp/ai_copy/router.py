@@ -3,6 +3,7 @@
 
 挂载在 /api/ai-copy 前缀下，提供：
 - GET  /options: 获取风格/场景/节日选项与 LLM 状态
+- GET  /selling-point-template: 下载商品核心卖点 Excel 模板
 - POST /selling-point-catalog: 上传卖点 Excel
 - DELETE /selling-point-catalog/{id}: 删除卖点目录
 - POST /product-references: 读取商品链接资料（预览）
@@ -12,9 +13,11 @@
 from __future__ import annotations
 
 import asyncio
+from copy import copy
 import re
 from collections.abc import Callable
 from io import BytesIO
+from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
@@ -111,6 +114,48 @@ def create_ai_copy_router(
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
         finally:
             await file.close()
+
+    @router.get("/selling-point-template")
+    def download_selling_point_template() -> StreamingResponse:
+        """下载商品核心卖点 Excel 模板。"""
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "商品核心卖点"
+        worksheet.append(["商品ID或货号", "商品核心内容卖点"])
+        worksheet.append(["SKU-001", "轻量透气，适合日常通勤与周末出行"])
+        worksheet.append(["", ""])
+        worksheet.append(["填写说明", "商品ID或货号不可重复；每行填写一条核心卖点"])
+        worksheet.column_dimensions["A"].width = 24
+        worksheet.column_dimensions["B"].width = 60
+        for cell in worksheet[1]:
+            font = copy(cell.font)
+            font.bold = True
+            cell.font = font
+        for row in worksheet.iter_rows(min_row=1, max_row=worksheet.max_row):
+            for cell in row:
+                alignment = copy(cell.alignment)
+                alignment.vertical = "top"
+                alignment.wrap_text = True
+                cell.alignment = alignment
+        worksheet.row_dimensions[1].height = 24
+        worksheet.row_dimensions[4].height = 34
+        worksheet.freeze_panes = "A2"
+
+        output = BytesIO()
+        workbook.save(output)
+        workbook.close()
+        output.seek(0)
+        filename = "商品核心卖点模板.xlsx"
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": (
+                    'attachment; filename="selling-point-template.xlsx"; '
+                    f"filename*=UTF-8''{quote(filename)}"
+                )
+            },
+        )
 
     @router.delete("/selling-point-catalog/{catalog_id}")
     def delete_selling_point_catalog(

@@ -15,9 +15,11 @@ from io import BytesIO
 import json
 import unittest
 from unittest.mock import Mock, patch
+from urllib.parse import unquote
 
 import certifi
 from fastapi import HTTPException
+from fastapi.responses import StreamingResponse
 from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.datavalidation import DataValidation
 from starlette.datastructures import UploadFile
@@ -957,6 +959,47 @@ class ProductSearchToolTests(unittest.TestCase):
 
 
 class AiCopyRouterTests(unittest.TestCase):
+    def test_selling_point_template_download_matches_upload_contract(self):
+        service = AiCopyService(FakeChatProvider(), FakeProductTool())
+        router = create_ai_copy_router(service)
+        endpoint = next(
+            route.endpoint
+            for route in router.routes
+            if route.path == "/api/ai-copy/selling-point-template"
+        )
+
+        response = endpoint()
+
+        self.assertIsInstance(response, StreamingResponse)
+        self.assertEqual(
+            response.media_type,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        disposition = response.headers["content-disposition"]
+        self.assertIn('filename="selling-point-template.xlsx"', disposition)
+        encoded_filename = disposition.split("filename*=UTF-8''", 1)[1]
+        self.assertEqual(unquote(encoded_filename), "商品核心卖点模板.xlsx")
+
+        async def read_response_body() -> bytes:
+            chunks = []
+            async for chunk in response.body_iterator:
+                chunks.append(bytes(chunk))
+            return b"".join(chunks)
+
+        workbook = load_workbook(BytesIO(asyncio.run(read_response_body())))
+        try:
+            self.assertEqual(workbook.sheetnames, ["商品核心卖点"])
+            worksheet = workbook["商品核心卖点"]
+            self.assertEqual(
+                [worksheet["A1"].value, worksheet["B1"].value],
+                ["商品ID或货号", "商品核心内容卖点"],
+            )
+            self.assertEqual(worksheet["A2"].value, "SKU-001")
+            self.assertIn("日常通勤", worksheet["B2"].value)
+            self.assertEqual(worksheet.freeze_panes, "A2")
+        finally:
+            workbook.close()
+
     def test_import_copy_matches_a_multi_id_group_regardless_of_separator_or_order(self):
         workbook = Workbook()
         worksheet = workbook.active

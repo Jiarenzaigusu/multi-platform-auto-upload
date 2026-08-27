@@ -96,6 +96,7 @@ const WORKSPACE_DRAFT_KEYS = [
   'goodsId',
   'activityTopic',
   'musicName',
+  'coverRatio',
   'creatorDeclaration',
   'schedule',
   'original',
@@ -110,6 +111,7 @@ function createEmptyWorkspaceDraft() {
     goodsId: '',
     activityTopic: '',
     musicName: '',
+    coverRatio: '3:4',
     creatorDeclaration: '',
     schedule: '',
     original: false,
@@ -377,6 +379,7 @@ const form = reactive({
   video: null,
   images: [],
   coverImage: null,
+  coverRatio: '3:4',
   title: '',
   description: '',
   tags: '',
@@ -1097,6 +1100,10 @@ async function submitPublish() {
   data.append('platform', form.platform)
   data.append('account', form.account)
   data.append('content_type', form.contentType)
+  const usesTmallRatio = isTmall.value && (
+    (isVideo.value && form.coverImage) || (isArticle.value && form.images.length)
+  )
+  data.append('cover_ratio', usesTmallRatio ? form.coverRatio : 'original')
   data.append('title', form.title)
   data.append('description', isJD.value && isVideo.value ? '' : form.description)
   data.append('tags', isJD.value ? '' : form.tags)
@@ -1439,6 +1446,15 @@ onBeforeUnmount(() => {
             <ol v-if="form.images.length" class="image-file-list"><li v-for="(image, index) in form.images" :key="`${image.name}-${image.lastModified}-${index}`"><b>{{ index + 1 }}</b><span>{{ image.name }}</span><small>{{ (image.size / 1024 / 1024).toFixed(1) }} MB</small><div class="image-file-actions"><button type="button" :disabled="index === 0" @click="moveImage(index, -1)">上移</button><button type="button" :disabled="index === form.images.length - 1" @click="moveImage(index, 1)">下移</button><button type="button" @click="removeImage(index)">移除</button></div></li></ol>
             <button v-if="form.images.length" class="clear-file" type="button" @click="clearImages">清空图文素材</button>
           </div>
+          <div v-if="isTmall && isArticle && form.images.length" class="field cover-ratio-field">
+            <span>图文图片比例 <em>必选</em></span>
+            <div class="platform-choice cover-ratio-choice">
+              <label :class="{ selected: form.coverRatio === 'original' }"><input v-model="form.coverRatio" type="radio" value="original" /><span>原始</span><small>保留图片原始比例，不触发裁剪</small></label>
+              <label :class="{ selected: form.coverRatio === '3:4' }"><input v-model="form.coverRatio" type="radio" value="3:4" /><span>3:4</span><small>逐张进入裁剪并设置 3:4</small></label>
+              <label :class="{ selected: form.coverRatio === '1:1' }"><input v-model="form.coverRatio" type="radio" value="1:1" /><span>1:1</span><small>逐张进入裁剪并设置 1:1</small></label>
+            </div>
+            <small v-if="form.coverRatio === 'original'" class="field-hint">将跳过图片裁剪流程，直接继续填写标题、文案和其他发布设置。</small>
+          </div>
           <div v-if="isVideo" class="field cover-image-field">
             <span>自定义封面图片 <em>可选</em></span>
             <input id="cover-image-file" ref="coverImageInput" class="native-file-input" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" @change="onCoverImageChange" />
@@ -1448,6 +1464,15 @@ onBeforeUnmount(() => {
             </label>
             <small v-if="form.coverImage" class="cover-file-selected">已选择封面 · {{ form.coverImage.name }} · {{ (form.coverImage.size / 1024 / 1024).toFixed(1) }} MB</small>
             <button v-if="form.coverImage" class="clear-file" type="button" @click="clearCoverImage">移除封面</button>
+          </div>
+          <div v-if="isTmall && isVideo && form.coverImage" class="field cover-ratio-field">
+            <span>视频封面比例 <em>必选</em></span>
+            <div class="platform-choice cover-ratio-choice">
+              <label :class="{ selected: form.coverRatio === 'original' }"><input v-model="form.coverRatio" type="radio" value="original" /><span>原始</span><small>上传封面后沿用平台默认原始比例</small></label>
+              <label :class="{ selected: form.coverRatio === '3:4' }"><input v-model="form.coverRatio" type="radio" value="3:4" /><span>3:4</span><small>在裁剪页识别并点击 3:4</small></label>
+              <label :class="{ selected: form.coverRatio === '1:1' }"><input v-model="form.coverRatio" type="radio" value="1:1" /><span>1:1</span><small>在裁剪页识别并点击 1:1</small></label>
+            </div>
+            <small v-if="form.coverRatio === 'original'" class="field-hint">仍会进入自定义封面流程；比例页保持平台默认的原始比例，不再额外点击比例卡片。</small>
           </div>
           <p v-if="draftRestoredAt" class="draft-restored-info" role="status">
             <span class="draft-pill">已保留上次发布配置</span>

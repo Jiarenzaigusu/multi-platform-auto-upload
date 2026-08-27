@@ -44,10 +44,12 @@ from webapp.api.batch_jd_article import (
 from webapp.api.batch_tmall_article import (
     TMALL_ARTICLE_BATCH_COLUMNS,
     TMALL_ARTICLE_COLUMN_ALIASES,
+    _normalize_tmall_cover_ratio as _normalize_tmall_article_cover_ratio,
 )
 from webapp.api.batch_tmall_video import (
     TMALL_VIDEO_BATCH_COLUMNS,
     TMALL_VIDEO_COLUMN_ALIASES,
+    _normalize_tmall_cover_ratio as _normalize_tmall_video_cover_ratio,
 )
 from webapp.api.batch_xiaohongshu_article import (
     XIAOHONGSHU_ARTICLE_BATCH_COLUMNS,
@@ -150,6 +152,14 @@ def _remote_video_request(
         if "cover_image_path" in values and values["cover_image_path"]
         else None
     )
+    raw_cover_ratio = values.get("cover_ratio", "")
+    if platform == "tmall" and cover_path is None and raw_cover_ratio:
+        raise ValueError("未上传自定义封面时，封面比例必须留空")
+    cover_ratio = (
+        _normalize_tmall_video_cover_ratio(raw_cover_ratio)
+        if platform == "tmall" and cover_path
+        else None
+    )
     original = _parse_original(values["original"]) if platform == "jd" else False
     with TemporaryDirectory(prefix="mpau-agent-batch-") as temporary_directory:
         directory = Path(temporary_directory)
@@ -163,6 +173,7 @@ def _remote_video_request(
             content_type="video",
             video_path=fixture_video,
             cover_image_path=fixture_cover,
+            cover_ratio=cover_ratio,
             original_filename=video_path.name,
             title=values["title"],
             description=values.get("description", ""),
@@ -240,6 +251,7 @@ def parse_remote_tmall_article_batch_workbook(
                 account=account,
                 content_type="article",
                 image_paths=(fixture_image,),
+                cover_ratio=_normalize_tmall_article_cover_ratio(values["cover_ratio"]),
                 original_filename=folder_path.name or "article.jpg",
                 title=values["title"],
                 description=values["description"],

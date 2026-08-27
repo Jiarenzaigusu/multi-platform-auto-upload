@@ -12,11 +12,13 @@ from typing import Sequence
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
+from openpyxl.workbook.defined_name import DefinedName
 from openpyxl.worksheet.datavalidation import DataValidation
 
 
 BatchColumn = tuple[str, str, bool]
-ListValidation = tuple[str, Sequence[str], str, str]
+ListValidation = tuple[str, Sequence[str] | str, str, str]
+ConditionalListValidation = tuple[str, str, Sequence[str], str, str]
 MAX_DATA_ROWS = 200
 
 
@@ -38,10 +40,11 @@ def _column_width(field: str) -> int:
     }.get(field, 16)
 
 
-def _list_validation(values: Sequence[str], error_title: str, error_message: str) -> DataValidation:
+def _list_validation(values: Sequence[str] | str, error_title: str, error_message: str) -> DataValidation:
+    formula = values if isinstance(values, str) else '"' + ",".join(values) + '"'
     return DataValidation(
         type="list",
-        formula1='"' + ",".join(values) + '"',
+        formula1=formula,
         allow_blank=True,
         showErrorMessage=True,
         errorTitle=error_title,
@@ -56,6 +59,7 @@ def build_content_template(
     columns: Sequence[BatchColumn],
     sample_row: Sequence[str],
     list_validations: Sequence[ListValidation] = (),
+    conditional_list_validations: Sequence[ConditionalListValidation] = (),
 ) -> bytes:
     """根据单一内容模块的声明生成 Excel 模板字节。"""
     workbook = Workbook()
@@ -98,6 +102,47 @@ def build_content_template(
         letter = get_column_letter(column_index)
         validation.add(f"{letter}2:{letter}{MAX_DATA_ROWS + 1}")
         worksheet.add_data_validation(validation)
+
+    if conditional_list_validations:
+        options_sheet = workbook.create_sheet("_validation_options")
+        options_sheet.sheet_state = "hidden"
+        for index, (field, depends_on_field, values, error_title, error_message) in enumerate(
+            conditional_list_validations, start=1
+        ):
+            column_index = field_positions.get(field)
+            depends_on_index = field_positions.get(depends_on_field)
+            if column_index is None or depends_on_index is None:
+                continue
+            option_letter = get_column_letter(index)
+            for row_index, value in enumerate(values, start=1):
+                options_sheet.cell(row=row_index, column=index, value=value)
+            option_name = f"BatchValidationOptions{index}"
+            blank_name = f"BatchValidationBlank{index}"
+            workbook.defined_names.add(
+                DefinedName(
+                    option_name,
+                    attr_text=(
+                        f"'_validation_options'!${option_letter}$1:"
+                        f"${option_letter}${len(values)}"
+                    ),
+                )
+            )
+            blank_row = len(values) + 1
+            workbook.defined_names.add(
+                DefinedName(
+                    blank_name,
+                    attr_text=f"'_validation_options'!${option_letter}${blank_row}",
+                )
+            )
+            depends_on_letter = get_column_letter(depends_on_index)
+            validation = _list_validation(
+                f'=INDIRECT(IF(${depends_on_letter}2<>"","{option_name}","{blank_name}"))',
+                error_title,
+                error_message,
+            )
+            target_letter = get_column_letter(column_index)
+            validation.add(f"{target_letter}2:{target_letter}{MAX_DATA_ROWS + 1}")
+            worksheet.add_data_validation(validation)
 
     output = BytesIO()
     try:

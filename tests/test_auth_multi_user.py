@@ -793,6 +793,7 @@ class LocalAgentApiTests(unittest.TestCase):
         cover.write_bytes(b"cover")
         request = validate_publish_request(
             platform="tmall",
+            cover_ratio="3:4",
             account="shop1",
             video_path=video,
             cover_image_path=cover,

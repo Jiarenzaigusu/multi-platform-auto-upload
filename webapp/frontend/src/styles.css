@@ -591,6 +591,19 @@ svg {
   line-height: 1.35;
 }
 
+.cover-ratio-choice {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 0;
+}
+
+.cover-ratio-choice label {
+  padding: 12px 14px;
+}
+
+.cover-ratio-field {
+  margin-top: 2px;
+}
+
 .field-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1516,6 +1529,14 @@ svg {
   .platform-choice,
   .content-choice {
     grid-template-columns: 1fr;
+  }
+
+  .cover-ratio-choice {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .cover-ratio-choice label {
+    padding: 10px;
   }
 
   .section-heading-with-action {

@@ -310,6 +310,7 @@ class PooledPlatformAdapterTests(unittest.TestCase):
         request = TmallVideoUploadRequest(
             account_name="shop1",
             video_file=Path("/tmp/demo.mp4"),
+            cover_ratio="original",
             title="夏季女鞋测评",
             description="轻便好穿",
             tags=["女鞋"],
@@ -414,6 +415,7 @@ class TaskManagerBrowserRuntimeIntegrationTests(unittest.TestCase):
             video.write_bytes(b"video")
             request = validate_publish_request(
                 platform="tmall",
+                cover_ratio="original",
                 account="shop1",
                 video_path=video,
                 original_filename=video.name,
