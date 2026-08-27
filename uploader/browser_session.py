@@ -19,7 +19,11 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
+import ctypes
+import ctypes.wintypes
+import math
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
@@ -28,6 +32,72 @@ from patchright.async_api import Browser, BrowserContext, Playwright, async_play
 
 from utils.base_social_media import set_init_script
 from utils.config import LOCAL_EDGE_PATH
+
+
+# The largest platform viewport is 1440x900. Keep enough room for the browser
+# frame so a headed browser has the same logical page area on every machine.
+_BROWSER_WINDOW_SIZE = (1480, 1000)
+
+
+def _windows_primary_work_area() -> tuple[int, int] | None:
+    """Return the physical size of the Windows primary-screen work area."""
+    if sys.platform != "win32":
+        return None
+    try:
+        user32 = ctypes.windll.user32
+        set_dpi_context = getattr(user32, "SetThreadDpiAwarenessContext", None)
+        previous_context = None
+        if set_dpi_context is not None:
+            set_dpi_context.argtypes = [ctypes.c_void_p]
+            set_dpi_context.restype = ctypes.c_void_p
+            # PER_MONITOR_AWARE_V2 makes the returned RECT use physical pixels.
+            previous_context = set_dpi_context(ctypes.c_void_p(-4))
+        try:
+            work_area = ctypes.wintypes.RECT()
+            if user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(work_area), 0):
+                return (
+                    work_area.right - work_area.left,
+                    work_area.bottom - work_area.top,
+                )
+        finally:
+            if set_dpi_context is not None and previous_context:
+                set_dpi_context(previous_context)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    return None
+
+
+def _browser_display_scale(work_area: tuple[int, int] | None) -> float:
+    """Choose a deterministic browser UI scale that fits the primary screen."""
+    if not work_area:
+        return 1.0
+    available_width, available_height = work_area
+    window_width, window_height = _BROWSER_WINDOW_SIZE
+    maximum_scale = min(
+        1.0,
+        available_width / window_width,
+        available_height / window_height,
+    )
+    # Stable 5% steps avoid Chromium rounding the emulated viewport by one CSS
+    # pixel at arbitrary scale factors such as 0.728. Round down so it still fits.
+    return max(0.5, math.floor(maximum_scale * 20) / 20)
+
+
+def _browser_launch_args(*, headless: bool) -> list[str]:
+    """Normalize Chromium DPI and keep its headed window inside the work area."""
+    window_width, window_height = _BROWSER_WINDOW_SIZE
+    # Headless runs have no native window and should keep a 1:1 screenshot scale.
+    scale = (
+        _browser_display_scale(_windows_primary_work_area())
+        if not headless
+        else 1.0
+    )
+    return [
+        "--high-dpi-support=1",
+        f"--force-device-scale-factor={scale:.3f}",
+        f"--window-size={window_width},{window_height}",
+        "--window-position=0,0",
+    ]
 
 
 async def launch_browser(playwright: Playwright, headless: bool) -> Browser:
@@ -40,24 +110,16 @@ async def launch_browser(playwright: Playwright, headless: bool) -> Browser:
     :param headless: 是否无头模式（登录任务必须为 False 让用户可见浏览器）
     :returns: 已启动的 Browser 对象
     """
+    launch_options: dict[str, object] = {
+        "headless": headless,
+        "args": _browser_launch_args(headless=headless),
+    }
     if LOCAL_EDGE_PATH:
         return await playwright.chromium.launch(
-            headless=headless,
+            **launch_options,
             executable_path=LOCAL_EDGE_PATH,
         )
-    return await playwright.chromium.launch(headless=headless, channel="msedge")
-
-
-async def launch_chrome_browser(playwright: Playwright, headless: bool) -> Browser:
-    """启动 Chrome 浏览器实例，供小红书/抖音等社媒平台会话池使用。"""
-    from utils.config import LOCAL_CHROME_PATH
-
-    if LOCAL_CHROME_PATH:
-        return await playwright.chromium.launch(
-            headless=headless,
-            executable_path=LOCAL_CHROME_PATH,
-        )
-    return await playwright.chromium.launch(headless=headless, channel="chrome")
+    return await playwright.chromium.launch(**launch_options, channel="msedge")
 
 
 class BrowserSession:
@@ -154,7 +216,11 @@ class BrowserSession:
 
         await self.close()
         self.browser = await self.launcher(self.playwright, self.headless)
-        context_options: dict[str, object] = {"viewport": self.viewport}
+        context_options: dict[str, object] = {
+            "viewport": dict(self.viewport),
+            "screen": dict(self.viewport),
+            "device_scale_factor": 1,
+        }
         context_options.update(self.context_options())
         if self.account_file.is_file():
             context_options["storage_state"] = str(self.account_file)

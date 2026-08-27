@@ -13,7 +13,7 @@ from patchright.async_api import Page
 
 
 
-from utils.config import DEBUG_MODE, LOCAL_CHROME_HEADLESS
+from utils.config import DEBUG_MODE, LOCAL_EDGE_HEADLESS
 from uploader.base_video import BaseVideoUploader
 from utils.login_qrcode import build_login_qrcode_path
 from utils.login_qrcode import decode_qrcode_from_path
@@ -228,7 +228,7 @@ async def douyin_setup(
     handle=False,
     return_detail=False,
     qrcode_callback=None,
-    headless: bool = LOCAL_CHROME_HEADLESS,
+    headless: bool = LOCAL_EDGE_HEADLESS,
     *,
     session,
     auth_cache_seconds: float = 0,
@@ -345,7 +345,7 @@ async def douyin_cookie_gen(
     qrcode_callback=None,
     poll_interval: int = 3,
     max_checks: int = 100,
-    headless: bool = LOCAL_CHROME_HEADLESS,
+    headless: bool = LOCAL_EDGE_HEADLESS,
     *,
     session,
 ):
@@ -403,7 +403,7 @@ class DouYinBaseUploader(BaseVideoUploader):
         account_file,
         publish_strategy: str = DOUYIN_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
-        headless: bool = LOCAL_CHROME_HEADLESS,
+        headless: bool = LOCAL_EDGE_HEADLESS,
         dry_run: bool = False,
     ):
         self.publish_date = publish_date
@@ -677,7 +677,7 @@ class DouYinVideo(DouYinBaseUploader):
         desc: str | None = None,
         publish_strategy: str = DOUYIN_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
-        headless: bool = LOCAL_CHROME_HEADLESS,
+        headless: bool = LOCAL_EDGE_HEADLESS,
         dry_run: bool = False,
     ):
         super().__init__(
@@ -886,7 +886,7 @@ class DouYinNote(DouYinBaseUploader):
         title: str | None = None,
         publish_strategy: str = DOUYIN_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
-        headless: bool = LOCAL_CHROME_HEADLESS,
+        headless: bool = LOCAL_EDGE_HEADLESS,
         dry_run: bool = False,
     ):
         super().__init__(

@@ -11,6 +11,10 @@ from unittest.mock import AsyncMock, patch
 
 from loguru import logger
 
+from uploader.browser_session import (
+    _browser_display_scale,
+    launch_browser,
+)
 from uploader.douyin_session import DouyinSessionPool
 from uploader.jd_session import JdSessionPool
 from uploader.tmall_session import TmallSessionPool
@@ -89,6 +93,31 @@ class FakePlaywright:
         self.stopped = True
 
 
+class BrowserLaunchTests(unittest.TestCase):
+    def test_large_windows_display_uses_normal_scale(self):
+        self.assertEqual(_browser_display_scale((1920, 1040)), 1.0)
+
+    def test_small_windows_display_scales_window_to_fit(self):
+        self.assertEqual(_browser_display_scale((1366, 728)), 0.7)
+
+    def test_edge_launch_normalizes_dpi_and_window(self):
+        chromium = type("Chromium", (), {"launch": AsyncMock()})()
+        playwright = type("Playwright", (), {"chromium": chromium})()
+
+        async def scenario():
+            with patch(
+                "uploader.browser_session._windows_primary_work_area",
+                return_value=(1366, 728),
+            ):
+                await launch_browser(playwright, False)
+
+        asyncio.run(scenario())
+        options = chromium.launch.await_args.kwargs
+        self.assertFalse(options["headless"])
+        self.assertEqual(options["channel"], "msedge")
+        self.assertIn("--force-device-scale-factor=0.700", options["args"])
+        self.assertIn("--window-size=1480,1000", options["args"])
+
 class TmallSessionPoolTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -122,6 +151,18 @@ class TmallSessionPoolTests(unittest.TestCase):
                 async with pool.lease(self.account_file, headless=False) as first:
                     first_browser = first.browser
                     first_context = first.context
+                    self.assertEqual(
+                        first_browser.context_options[0]["viewport"],
+                        {"width": 1280, "height": 900},
+                    )
+                    self.assertEqual(
+                        first_browser.context_options[0]["screen"],
+                        {"width": 1280, "height": 900},
+                    )
+                    self.assertEqual(
+                        first.browser.context_options[0]["device_scale_factor"],
+                        1,
+                    )
                 async with pool.lease(self.account_file, headless=False) as second:
                     self.assertIs(second, first)
                     self.assertIs(second.browser, first_browser)
@@ -209,6 +250,10 @@ class JdSessionPoolTests(unittest.TestCase):
 
 
 class SocialSessionPoolTests(unittest.TestCase):
+    def test_social_pools_default_to_edge_launcher(self):
+        self.assertIs(DouyinSessionPool()._launcher, launch_browser)
+        self.assertIs(XiaohongshuSessionPool()._launcher, launch_browser)
+
     def test_xiaohongshu_pool_reuses_browser_and_injects_stealth_script(self):
         async def scenario():
             with tempfile.TemporaryDirectory() as temp_dir:

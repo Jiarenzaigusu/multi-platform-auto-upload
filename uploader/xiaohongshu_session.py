@@ -9,7 +9,7 @@ from patchright.async_api import Browser, Playwright
 from uploader.browser_session import (
     BrowserSession,
     BrowserSessionPool,
-    launch_chrome_browser,
+    launch_browser,
 )
 from utils.log import xiaohongshu_logger
 
@@ -32,7 +32,7 @@ class XiaohongshuSessionPool(BrowserSessionPool):
         idle_timeout_seconds: float = 0,
         max_sessions: int = 2,
         playwright_starter: Callable[[], Awaitable[Playwright]] | None = None,
-        launcher: Callable[[Playwright, bool], Awaitable[Browser]] = launch_chrome_browser,
+        launcher: Callable[[Playwright, bool], Awaitable[Browser]] = launch_browser,
     ) -> None:
         super().__init__(
             logger=xiaohongshu_logger,

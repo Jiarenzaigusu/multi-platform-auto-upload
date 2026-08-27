@@ -11,7 +11,7 @@ from pathlib import Path
 from patchright.async_api import BrowserContext
 from patchright.async_api import Page
 
-from utils.config import DEBUG_MODE, LOCAL_CHROME_HEADLESS
+from utils.config import DEBUG_MODE, LOCAL_EDGE_HEADLESS
 from uploader.base_video import BaseVideoUploader
 from utils.login_qrcode import build_login_qrcode_path
 from utils.login_qrcode import decode_qrcode_from_path
@@ -193,7 +193,7 @@ async def xiaohongshu_setup(
     handle=False,
     return_detail=False,
     qrcode_callback=None,
-    headless: bool = LOCAL_CHROME_HEADLESS,
+    headless: bool = LOCAL_EDGE_HEADLESS,
     *,
     session,
     auth_cache_seconds: float = 0,
@@ -224,7 +224,7 @@ async def xiaohongshu_cookie_gen(
     qrcode_callback=None,
     poll_interval: int = 3,
     max_checks: int = 100,
-    headless: bool = LOCAL_CHROME_HEADLESS,
+    headless: bool = LOCAL_EDGE_HEADLESS,
     *,
     session,
 ):
@@ -297,7 +297,7 @@ class XiaoHongShuBaseUploader(BaseVideoUploader):
         account_file,
         publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
-        headless: bool = LOCAL_CHROME_HEADLESS,
+        headless: bool = LOCAL_EDGE_HEADLESS,
         dry_run: bool = False,
     ):
         self.publish_date = publish_date
@@ -455,7 +455,7 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         desc: str | None = None,
         publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
-        headless: bool = LOCAL_CHROME_HEADLESS,
+        headless: bool = LOCAL_EDGE_HEADLESS,
         dry_run: bool = False,
     ):
         super().__init__(
@@ -627,7 +627,7 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
         desc: str | None = None,
         publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
-        headless: bool = LOCAL_CHROME_HEADLESS,
+        headless: bool = LOCAL_EDGE_HEADLESS,
         dry_run: bool = False,
     ):
         super().__init__(
@@ -734,4 +734,3 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
         finally:
             if page and not page.is_closed():
                 xiaohongshu_logger.info(_msg("📌", "小红书图文发布页面已保留供人工复核"))
-

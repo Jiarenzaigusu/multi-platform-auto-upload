@@ -1219,7 +1219,7 @@ async function accountAction(action, platform = form.platform, account = form.ac
   try {
     const query = action === 'login' ? '?headed=true' : ''
     const result = await request(`/api/accounts/${platform}/${encodeURIComponent(account)}/${action}${query}`, { method: 'POST' })
-    showNotice(action === 'login' ? '登录任务已发送到当前电脑，请在本机 Chrome/Edge 完成登录' : '账号校验任务已发送到当前电脑', 'success')
+    showNotice(action === 'login' ? '登录任务已发送到当前电脑，请在本机 Edge 完成登录' : '账号校验任务已发送到当前电脑', 'success')
     await refreshDashboard()
     await loadJob(result.job.id)
   } catch (error) {
@@ -1370,7 +1370,7 @@ onBeforeUnmount(() => {
       <div class="rail-note">
         <span>运行范围</span>
         <strong>天猫 / 京东 / 小红书 / 抖音</strong>
-        <p>浏览器自动化在本机运行。登录、短信和风控验证需要你在本机 Chrome/Edge 中完成。</p>
+        <p>浏览器自动化在本机运行。登录、短信和风控验证需要你在本机 Edge 中完成。</p>
       </div>
     </aside>
 
@@ -1506,7 +1506,7 @@ onBeforeUnmount(() => {
           <label v-if="creatorDeclarationOptions.length" class="field"><span>创作者声明</span><select v-model="form.creatorDeclaration" required><option disabled value="">请选择与实际内容相符的声明</option><option v-for="item in creatorDeclarationOptions" :key="item" :value="item">{{ item }}</option></select></label>
           <div class="toggles">
             <label><input v-model="form.dryRun" type="checkbox" /><span><strong>流程验证</strong><small>填写并上传，但不点击正式发布</small></span></label>
-            <label><input v-model="form.headed" type="checkbox" /><span><strong>显示 Chrome/Edge</strong><small>登录、短信和风控验证需要在可见浏览器中手动完成</small></span></label>
+            <label><input v-model="form.headed" type="checkbox" /><span><strong>显示 Edge</strong><small>登录、短信和风控验证需要在可见浏览器中手动完成</small></span></label>
             <label v-if="isJD"><input v-model="form.original" type="checkbox" /><span><strong>自主原创 <em>可选</em></strong><small>仅账号已开通该能力时可用</small></span></label>
           </div>
           <p v-if="publishError" class="publish-error" role="alert">{{ publishError }}</p>
@@ -1517,7 +1517,7 @@ onBeforeUnmount(() => {
           <p class="eyebrow">TODAY'S PULSE</p>
           <div class="metric"><strong>{{ counts.total }}</strong><span>全部任务</span></div>
           <div class="metrics"><div><strong>{{ counts.running }}</strong><span>执行中</span></div><div><strong>{{ counts.done }}</strong><span>已完成</span></div><div><strong>{{ counts.failed }}</strong><span>需处理</span></div></div>
-          <div class="checklist"><h3>每次发布前</h3><p><b>1</b> 先校验账号 Cookie</p><p><b>2</b> 确认素材、标题和平台字段</p><p><b>3</b> 首次建议使用流程验证</p><p><b>4</b> 任务期间不要关闭 Chrome/Edge</p></div>
+          <div class="checklist"><h3>每次发布前</h3><p><b>1</b> 先校验账号 Cookie</p><p><b>2</b> 确认素材、标题和平台字段</p><p><b>3</b> 首次建议使用流程验证</p><p><b>4</b> 任务期间不要关闭 Edge</p></div>
         </aside>
       </section>
 
@@ -1558,7 +1558,7 @@ onBeforeUnmount(() => {
           <div class="section-heading"><span>03</span><div><h2>执行方式</h2></div></div>
           <div class="toggles">
             <label><input v-model="batchForm.dryRun" type="checkbox" /><span><strong>流程验证</strong><small>填写并上传每一行内容，但不点击正式发布</small></span></label>
-            <label><input v-model="batchForm.headed" type="checkbox" /><span><strong>显示 Chrome/Edge</strong><small>登录、短信和风控验证需要在可见浏览器中手动完成</small></span></label>
+            <label><input v-model="batchForm.headed" type="checkbox" /><span><strong>显示 Edge</strong><small>登录、短信和风控验证需要在可见浏览器中手动完成</small></span></label>
           </div>
           <p v-if="batchSubmitError" class="publish-error" role="alert">{{ batchSubmitError }}</p>
           <button class="primary" :disabled="batchSubmitting" type="submit">{{ batchSubmitting ? '正在校验并创建任务…' : batchForm.dryRun ? `创建${batchPlatformLabel}流程验证任务` : `创建${batchPlatformLabel}正式发布任务` }}</button>
@@ -1567,7 +1567,7 @@ onBeforeUnmount(() => {
         <aside class="summary-panel batch-summary-panel">
           <p class="eyebrow">{{ batchForm.platform.toUpperCase() }} BATCH</p>
           <div class="metric"><strong>200</strong><span>单次最多内容行</span></div>
-          <div class="checklist"><h3>导入前检查</h3><p><b>1</b> 先校验店铺 Cookie</p><p><b>2</b> 视频路径必须在本机存在</p><p><b>3</b> 首次建议整表流程验证</p><p><b>4</b> 任务期间不要关闭 Chrome/Edge</p></div>
+          <div class="checklist"><h3>导入前检查</h3><p><b>1</b> 先校验店铺 Cookie</p><p><b>2</b> 视频路径必须在本机存在</p><p><b>3</b> 首次建议整表流程验证</p><p><b>4</b> 任务期间不要关闭 Edge</p></div>
         </aside>
       </section>
 
