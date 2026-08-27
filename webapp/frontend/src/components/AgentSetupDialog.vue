@@ -115,6 +115,9 @@ function copyWithLegacyClipboard(value) {
       <p v-else-if="online && agentVersion" class="agent-update-hint current">
         Windows 助手在线，版本 v{{ agentVersion }}，已是最新。
       </p>
+      <p v-else-if="!online" class="agent-update-hint offline" role="status">
+        Windows 助手当前离线。请先双击桌面的助手重新连接；如果发布台地址已经变化，请在助手提示中选择重新配对。
+      </p>
       <button class="agent-code-button" :disabled="busy" type="button" @click="generateCode">
         {{ busy ? '正在生成…' : pairingCode ? '重新生成一次性配对码' : '生成一次性配对码' }}
       </button>
@@ -279,5 +282,11 @@ function copyWithLegacyClipboard(value) {
   border-color: #b7cdb0;
   color: #3d5c46;
   background: #f2f8ee;
+}
+
+.agent-update-hint.offline {
+  border-color: #e1b59e;
+  color: #85452f;
+  background: #fff4ed;
 }
 </style>

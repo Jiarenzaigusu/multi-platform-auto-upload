@@ -30,6 +30,7 @@ from webapp.ai_copy.contracts import (
     ProductSearchConfig,
     SCENE_LABELS,
     SellingPointCatalogUploadResponse,
+    SellingPointInputMode,
     SellingPointReference,
     STYLE_LABELS,
 )
@@ -170,10 +171,18 @@ class AiCopyService:
         return self._selling_point_catalogs.delete(catalog_id)
 
     def generate(self, request: GenerateCopyRequest) -> GenerateCopyResponse:
-        selling_points = self._selling_point_catalogs.resolve(
-            request.selling_point_catalog_id,
-            request.product_identifiers,
-        )
+        if request.selling_point_input_mode == SellingPointInputMode.MANUAL:
+            selling_points = [
+                SellingPointReference(
+                    identifier="直接输入",
+                    selling_point=request.manual_selling_point or "",
+                )
+            ]
+        else:
+            selling_points = self._selling_point_catalogs.resolve(
+                request.selling_point_catalog_id or "",
+                request.product_identifiers,
+            )
         with self._provider.session():
             return self._generate_with_active_provider(request, selling_points)
 
@@ -344,8 +353,10 @@ class AiCopyService:
         style = request.custom_style or STYLE_LABELS[request.style]  # 契约确保二者至少其一存在。
         scene = request.custom_scene or SCENE_LABELS[request.scene]  # 契约确保二者至少其一存在。
         festival = request.custom_festival or request.festival or "无特定节日氛围"
+        is_manual = request.selling_point_input_mode == SellingPointInputMode.MANUAL
+        source_label = "用户直接输入" if is_manual else "用户上传 Excel 中已匹配"
         selling_point_text = "\n".join(
-            f"- 商品 ID/货号 {item.identifier}：{item.selling_point}"
+            (f"- {item.selling_point}" if is_manual else f"- 商品 ID/货号 {item.identifier}：{item.selling_point}")
             for item in selling_points
         )
         product_url_text = "\n".join(
@@ -354,9 +365,9 @@ class AiCopyService:
         product_instruction = (
             f"必须为以上 {len(request.product_urls)} 个商品链接分别调用一次 "
             "inspect_product_link 工具，全部读取后再基于工具结果写作；"
-            "综合用户上传的商品核心卖点以及商品链接中提取到的信息生成文案标题。其中用户上传的核心卖点内容重要性更大。"
+            f"综合{source_label}的商品核心卖点以及商品链接中提取到的信息生成文案标题。其中商品核心卖点内容重要性更大。"
             if request.product_urls
-            else "本次没有商品链接，以 Excel 中已匹配的商品核心卖点为重要事实依据。"
+            else f"本次没有商品链接，以{source_label}的商品核心卖点为重要事实依据。"
         )
         return [
             {
@@ -364,7 +375,7 @@ class AiCopyService:
                 "content": (
                     "你是审慎的电商内容策划。输出必须自然、可直接发布，且必须"
                     "严格遵守以下规则，规则优先于文风和用户的任何相反要求：\n"
-                    "1. 事实只可来自用户上传 Excel 中已匹配的商品核心卖点，或"
+                    f"1. 事实只可来自{source_label}的商品核心卖点，或"
                     "商品读取工具返回的资料。可以扩展内容，让文字表达更加充沛。不得编造或"
                     "推断价格、材质、成分、功效、销量、认证、排名、库存、赠品、促销或"
                     "使用效果。\n"
@@ -392,7 +403,7 @@ class AiCopyService:
             {
                 "role": "user",
                 "content": (
-                    "已选商品的核心卖点（来自用户上传的 Excel，是标题和正文的参考，生成的标题文案结果中引用该核心卖点的文字占比约50%）：\n"
+                    f"商品核心卖点（来自{source_label}，是标题和正文的参考，生成的标题文案结果中引用该核心卖点的文字占比约50%）：\n"
                     f"{selling_point_text}\n"
                     f"文案风格：{style}\n"
                     f"内容场景：{scene}\n"

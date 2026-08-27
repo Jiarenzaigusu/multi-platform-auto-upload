@@ -453,6 +453,46 @@ class AiCopyServiceTests(unittest.TestCase):
         self.assertIn("标题和正文的参考，生成的标题文案结果中引用该核心卖点的文字占比约50%", prompt)
         self.assertEqual(len(result.selling_point_references), 2)
 
+    def test_manual_selling_point_is_used_without_excel_catalog(self):
+        provider = FakeChatProvider()
+        service = AiCopyService(provider, FakeProductTool())
+
+        result = service.generate(
+            GenerateCopyRequest(
+                selling_point_input_mode="manual",
+                manual_selling_point="轻盈透气，适合日常通勤",
+                style="atmospheric_seeding",
+                scene="daily_styling",
+            )
+        )
+
+        prompt = provider.calls[0]["messages"][1]["content"]
+        self.assertIn("来自用户直接输入", prompt)
+        self.assertIn("轻盈透气，适合日常通勤", prompt)
+        self.assertNotIn("来自用户上传 Excel", prompt)
+        self.assertEqual(result.selling_point_references[0].identifier, "直接输入")
+
+    def test_selling_point_input_modes_reject_mixed_fields(self):
+        with self.assertRaisesRegex(ValueError, "直接输入模式不能同时提交"):
+            GenerateCopyRequest(
+                selling_point_input_mode="manual",
+                selling_point_catalog_id="a" * 16,
+                product_identifiers=["SKU-001"],
+                manual_selling_point="轻盈透气",
+                style="atmospheric_seeding",
+                scene="daily_styling",
+            )
+
+        with self.assertRaisesRegex(ValueError, "Excel 模式不能同时提交"):
+            GenerateCopyRequest(
+                selling_point_input_mode="excel",
+                selling_point_catalog_id="a" * 16,
+                product_identifiers=["SKU-001"],
+                manual_selling_point="不应生效",
+                style="atmospheric_seeding",
+                scene="daily_styling",
+            )
+
     def test_generated_copy_prompts_for_exact_han_character_targets(self):
         provider = FakeChatProvider(
             draft={"title": "夏鞋", "body": "舒适好搭，日常通勤穿着轻松。"}

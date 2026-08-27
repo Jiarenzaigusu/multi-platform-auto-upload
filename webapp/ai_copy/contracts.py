@@ -40,6 +40,13 @@ class ContentScene(str, Enum):
     SELF_REWARD = "self_reward"              # 自用犒赏
 
 
+class SellingPointInputMode(str, Enum):
+    """商品核心卖点的输入方式。"""
+
+    EXCEL = "excel"
+    MANUAL = "manual"
+
+
 # 风格枚举→中文标签
 STYLE_LABELS: dict[CopyStyle, str] = {
     CopyStyle.OLD_MONEY_LUXURY: "老钱轻奢",
@@ -171,8 +178,10 @@ class GenerateCopyRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    selling_point_catalog_id: str = Field(min_length=16, max_length=64)  # 卖点目录 ID
-    product_identifiers: list[str] = Field(min_length=1, max_length=20)  # 商品 ID/货号列表
+    selling_point_input_mode: SellingPointInputMode = SellingPointInputMode.EXCEL
+    selling_point_catalog_id: str | None = Field(default=None, max_length=64)  # Excel 卖点目录 ID
+    product_identifiers: list[str] = Field(default_factory=list, max_length=20)  # 商品 ID/货号列表
+    manual_selling_point: str | None = Field(default=None, max_length=2000)  # 直接输入的核心卖点
     style: CopyStyle | None = None            # 文案风格；与自定义风格二选一
     scene: ContentScene | None = None          # 内容场景；与自定义场景二选一
     festival: str | None = Field(default=None, max_length=40)  # 可选节日氛围
@@ -208,12 +217,18 @@ class GenerateCopyRequest(BaseModel):
 
     @field_validator("selling_point_catalog_id")
     @classmethod
-    def normalize_catalog_id(cls, value: str) -> str:
-        """校验目录 ID 长度。"""
+    def normalize_catalog_id(cls, value: str | None) -> str | None:
+        """去除目录 ID 首尾空白。"""
+        if value is None:
+            return None
         normalized = value.strip()
-        if len(normalized) < 16:
-            raise ValueError("请先上传商品核心卖点 Excel")
-        return normalized
+        return normalized or None
+
+    @field_validator("manual_selling_point")
+    @classmethod
+    def normalize_manual_selling_point(cls, value: str | None) -> str | None:
+        """去除直接输入卖点的首尾空白。"""
+        return _trimmed(value)
 
     @field_validator("product_identifiers", mode="before")
     @classmethod
@@ -234,8 +249,6 @@ class GenerateCopyRequest(BaseModel):
                 continue
             seen.add(key)
             normalized.append(identifier)
-        if not normalized:
-            raise ValueError("至少需要输入一个商品 ID 或货号")
         if len(normalized) > 20:
             raise ValueError("一次最多支持 20 个商品 ID 或货号")
         return normalized
@@ -261,6 +274,18 @@ class GenerateCopyRequest(BaseModel):
     @model_validator(mode="after")
     def require_product_for_search_config(self) -> "GenerateCopyRequest":
         """校验必填生成条件以及商品搜索服务配置。"""
+        if self.selling_point_input_mode == SellingPointInputMode.EXCEL:
+            if not self.selling_point_catalog_id or len(self.selling_point_catalog_id) < 16:
+                raise ValueError("请先上传商品核心卖点 Excel")
+            if not self.product_identifiers:
+                raise ValueError("至少需要输入一个商品 ID 或货号")
+            if self.manual_selling_point:
+                raise ValueError("Excel 模式不能同时提交直接输入的商品核心卖点")
+        else:
+            if not self.manual_selling_point:
+                raise ValueError("请填写商品核心卖点")
+            if self.selling_point_catalog_id or self.product_identifiers:
+                raise ValueError("直接输入模式不能同时提交卖点 Excel 或商品 ID")
         if not self.style and not self.custom_style:
             raise ValueError("请选择或填写文案风格")
         if not self.scene and not self.custom_scene:

@@ -2,8 +2,7 @@
   AiCopyView.vue：AI 文案工坊主视图。
 
   功能：
-  - 上传商品核心卖点 Excel（获得 catalog_id）
-  - 输入商品 ID/货号（1-20 个，匹配卖点表）
+  - 通过 Excel 匹配商品核心卖点，或直接输入核心卖点（二选一）
   - 可选读取商品链接（最多 20 个，逐个调用商品读取工具）
   - 调用 LLM 生成标题与正文（含风格/场景/节日/目标字数）
   - 复制结果或导入发布工作台
@@ -47,7 +46,9 @@ const titleCountDefault = 1
 const bodyCountDefault = 1
 const hanCharacterPattern = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/g
 const createDefaultForm = () => ({
+  sellingPointInputMode: 'excel',
   productIdentifiers: '',
+  manualSellingPoint: '',
   titleMaxChars: titleLimitDefault,
   bodyMaxChars: bodyLimitDefault,
   titleCount: titleCountDefault,
@@ -94,6 +95,8 @@ const productIdentifiers = computed(() => {
     .filter(Boolean)
   return [...new Map(identifiers.map((value) => [value.toLocaleLowerCase(), value])).values()]
 })
+const manualSellingPoint = computed(() => form.manualSellingPoint.trim())
+const isManualSellingPointMode = computed(() => form.sellingPointInputMode === 'manual')
 const productUrls = computed(() => [...new Set(
   form.productUrls
     .split(/\s+/)
@@ -340,11 +343,13 @@ function saveActiveEdits() {
 }
 
 const canGenerate = computed(() => (
-  Boolean(sellingPointCatalog.value)
-  && productIdentifiers.value.length >= 1
-  && productIdentifiers.value.length <= 20
+  (isManualSellingPointMode.value
+    ? manualSellingPoint.value.length > 0
+    : Boolean(sellingPointCatalog.value)
+      && productIdentifiers.value.length >= 1
+      && productIdentifiers.value.length <= 20
+      && missingProductIdentifiers.value.length === 0)
   && productUrls.value.length <= 20
-  && missingProductIdentifiers.value.length === 0
   && titleLimitValid.value
   && bodyLimitValid.value
   && titleCountValid.value
@@ -360,6 +365,14 @@ function clearFeedback() {
   success.value = ''
   copiedField.value = ''
   window.clearTimeout(successTimer)
+}
+
+function switchSellingPointInputMode(mode) {
+  if (mode === form.sellingPointInputMode || generating.value || uploadingSellingPoints.value) return
+  form.sellingPointInputMode = mode
+  result.value = null
+  resetEditState()
+  clearFeedback()
 }
 
 function showSuccess(message) {
@@ -480,23 +493,30 @@ async function inspectProducts() {
 
 async function generateCopy() {
   clearFeedback()
-  if (!sellingPointCatalog.value) {
-    error.value = '请先上传商品核心卖点 Excel'
-    return
-  }
-  if (!productIdentifiers.value.length) {
-    error.value = '请至少输入一个商品 ID 或货号'
-    return
-  }
-  if (productIdentifiers.value.length > 20) {
-    error.value = '一次最多支持 20 个商品 ID 或货号'
-    return
+  if (isManualSellingPointMode.value) {
+    if (!manualSellingPoint.value) {
+      error.value = '请填写商品核心卖点'
+      return
+    }
+  } else {
+    if (!sellingPointCatalog.value) {
+      error.value = '请先上传商品核心卖点 Excel'
+      return
+    }
+    if (!productIdentifiers.value.length) {
+      error.value = '请至少输入一个商品 ID 或货号'
+      return
+    }
+    if (productIdentifiers.value.length > 20) {
+      error.value = '一次最多支持 20 个商品 ID 或货号'
+      return
+    }
   }
   if (productUrls.value.length > 20) {
     error.value = '一次最多支持 20 个商品链接'
     return
   }
-  if (missingProductIdentifiers.value.length) {
+  if (!isManualSellingPointMode.value && missingProductIdentifiers.value.length) {
     error.value = `Excel 中未找到：${missingProductIdentifiers.value.join('、')}`
     return
   }
@@ -533,8 +553,10 @@ async function generateCopy() {
     : Number(form.bodyCount)
   try {
     const response = await api.generate({
-      selling_point_catalog_id: sellingPointCatalog.value.catalog_id,
-      product_identifiers: productIdentifiers.value,
+      selling_point_input_mode: form.sellingPointInputMode,
+      selling_point_catalog_id: isManualSellingPointMode.value ? null : sellingPointCatalog.value.catalog_id,
+      product_identifiers: isManualSellingPointMode.value ? [] : productIdentifiers.value,
+      manual_selling_point: isManualSellingPointMode.value ? manualSellingPoint.value : null,
       style: hasCustomStyle.value ? null : form.style,
       scene: form.customScene.trim() ? null : form.scene,
       festival: form.customFestival.trim() ? null : (form.festival.trim() || null),
@@ -592,6 +614,10 @@ function chooseBatchExcelFile() {
   if (!saveActiveEdits()) return
   if (!result.value) {
     error.value = '请先生成文案，再导入到批量发布 Excel'
+    return
+  }
+  if (isManualSellingPointMode.value) {
+    error.value = '直接输入卖点模式没有商品 ID，无法按商品 ID 导入批量发布表格'
     return
   }
   if (importingToBatchExcel.value) return
@@ -776,7 +802,23 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
       <p v-if="success" class="ai-copy-success">{{ success }}</p>
 
       <section class="ai-copy-selling-points">
-        <label class="ai-copy-field ai-copy-identifier-field">
+        <div class="ai-copy-selling-point-header">
+          <strong>商品核心卖点</strong>
+          <div class="ai-copy-selling-point-toggle" role="group" aria-label="商品核心卖点输入方式">
+            <button
+              :class="{ active: !isManualSellingPointMode }"
+              type="button"
+              @click="switchSellingPointInputMode('excel')"
+            >Excel 匹配</button>
+            <button
+              :class="{ active: isManualSellingPointMode }"
+              type="button"
+              @click="switchSellingPointInputMode('manual')"
+            >直接输入</button>
+          </div>
+        </div>
+
+        <label v-if="!isManualSellingPointMode" class="ai-copy-field ai-copy-identifier-field">
           <span>
             <strong>商品 ID / 货号</strong>
             <small>已输入 {{ productIdentifiers.length }} / 20</small>
@@ -790,7 +832,21 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
           />
         </label>
 
-        <div class="ai-copy-catalog-upload">
+        <label v-else class="ai-copy-field ai-copy-manual-selling-point-field">
+          <span>
+            <strong>直接输入核心卖点</strong>
+            <small>{{ manualSellingPoint.length }} / 2000</small>
+          </span>
+          <textarea
+            v-model="form.manualSellingPoint"
+            rows="6"
+            maxlength="2000"
+            required
+            placeholder="直接填写希望模型重点表达的商品核心卖点，可分行输入"
+          />
+        </label>
+
+        <div v-if="!isManualSellingPointMode" class="ai-copy-catalog-upload">
           <input
             ref="sellingPointFileInput"
             class="ai-copy-file-input"
@@ -814,7 +870,7 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
           </a>
         </div>
 
-        <article v-if="sellingPointCatalog" class="ai-copy-catalog-status">
+        <article v-if="!isManualSellingPointMode && sellingPointCatalog" class="ai-copy-catalog-status">
           <span>已读取</span>
           <div>
             <strong>{{ sellingPointCatalog.filename }}</strong>
@@ -823,14 +879,14 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
           <button type="button" @click="clearSellingPointCatalog">移除</button>
         </article>
 
-        <p v-if="productIdentifiers.length > 20" class="ai-copy-match-error">
+        <p v-if="!isManualSellingPointMode && productIdentifiers.length > 20" class="ai-copy-match-error">
           一次最多支持 20 个商品 ID 或货号。
         </p>
-        <p v-else-if="sellingPointCatalog && missingProductIdentifiers.length" class="ai-copy-match-error">
+        <p v-else-if="!isManualSellingPointMode && sellingPointCatalog && missingProductIdentifiers.length" class="ai-copy-match-error">
           Excel 中未找到：{{ missingProductIdentifiers.join('、') }}
         </p>
 
-        <div v-if="matchedSellingPoints.length" class="ai-copy-selling-point-preview">
+        <div v-if="!isManualSellingPointMode && matchedSellingPoints.length" class="ai-copy-selling-point-preview">
           <div>
             <strong>已匹配 {{ matchedSellingPoints.length }} 条核心卖点</strong>
             <small>将作为本次标题与正文的重要参考</small>
@@ -1209,13 +1265,13 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
         <button
           class="ai-copy-import-batch"
           type="button"
-          :disabled="!result || importingToBatchExcel"
+          :disabled="!result || importingToBatchExcel || isManualSellingPointMode"
           @click="chooseBatchExcelFile"
         >
           <span>
             <small>IMPORT TO BATCH EXCEL</small>
             <strong>{{ importingToBatchExcel ? '正在处理…' : '导入批量发布表格' }}</strong>
-            <em>{{ downloadBatchExcelCopy ? '下载独立导入结果，不覆盖原文件' : '直接填入原文件；请先关闭 WPS/Excel 中打开的该文件' }}</em>
+            <em>{{ isManualSellingPointMode ? '直接输入模式没有商品 ID，不能导入批量发布表格' : downloadBatchExcelCopy ? '下载独立导入结果，不覆盖原文件' : '直接填入原文件；请先关闭 WPS/Excel 中打开的该文件' }}</em>
           </span>
           <svg aria-hidden="true" viewBox="0 0 24 24">
             <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
@@ -1239,8 +1295,8 @@ watch([form, result, productReferences, selectedTitleIndex, selectedBodyIndex], 
 
       <div v-else class="ai-copy-empty">
         <span>AI</span>
-        <h3>用商品编号，精准调取每一条卖点</h3>
-        <p>上传核心卖点 Excel，输入一个或多个商品 ID / 货号，系统会自动匹配对应内容再生成文案。</p>
+        <h3>匹配商品卖点，或直接交给 AI</h3>
+        <p>可上传核心卖点 Excel 后按商品 ID 精准匹配，也可切换为直接输入核心卖点。</p>
         <ol><li>标题与正文字数可在「目标字数」中预设或自定义</li><li>不虚构商品信息与促销承诺</li></ol>
       </div>
     </aside>

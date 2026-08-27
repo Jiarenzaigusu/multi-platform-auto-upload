@@ -147,6 +147,40 @@
     radial-gradient(circle at 100% 0, rgba(220, 231, 97, .19), transparent 13rem),
     rgba(255, 253, 248, .7);
 }
+.ai-copy-selling-point-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ai-copy-selling-point-header > strong {
+  color: #334b42;
+  font-size: 12px;
+  font-weight: 850;
+}
+.ai-copy-selling-point-toggle {
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid #cfd9d2;
+  border-radius: 999px;
+  background: #edf3eb;
+}
+.ai-copy-selling-point-toggle button {
+  min-height: 28px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 999px;
+  color: #718078;
+  background: transparent;
+  font-size: 10px;
+  font-weight: 800;
+}
+.ai-copy-selling-point-toggle button.active {
+  color: #fff;
+  background: #4e6957;
+  box-shadow: 0 2px 5px rgba(53, 76, 60, .18);
+}
+.ai-copy-manual-selling-point-field textarea { min-height: 148px; }
 .ai-copy-identifier-field textarea {
   min-height: 88px;
   font-family: "SFMono-Regular", Consolas, monospace;

@@ -461,6 +461,7 @@ class AgentTaskManager:
             "online": bool(agents),
             "agents": agents,
             "lease_seconds": self.lease_seconds,
+            "offline_after_seconds": self._offline_after_seconds(),
         }
 
     @staticmethod
@@ -472,13 +473,18 @@ class AgentTaskManager:
         } | {"online": online}
 
     def _drop_offline_agents_locked(self, now: float) -> None:
-        cutoff = now - max(30.0, self.lease_seconds * 1.5)
+        cutoff = now - self._offline_after_seconds()
         for agent_id in [
             key
             for key, item in self._agents.items()
             if item["last_seen_monotonic"] < cutoff
         ]:
             self._agents.pop(agent_id, None)
+
+    def _offline_after_seconds(self) -> float:
+        # Official agents renew presence through a 10-second idle long poll.
+        # Two missed renewals plus scheduling margin indicates an abrupt exit.
+        return 25.0
 
     def _touch_agent_locked(self, agent_id: str) -> None:
         agent = self._agents.get(agent_id)
@@ -488,7 +494,7 @@ class AgentTaskManager:
         agent["last_seen_at"] = datetime.now(timezone.utc).isoformat()
 
     def disconnect_agent(self, agent_id: str) -> None:
-        """Forget a revoked device without changing an already claimed job lease."""
+        """Forget a disconnected device without changing claimed job leases."""
         with self._guard:
             self._agents.pop(agent_id, None)
 

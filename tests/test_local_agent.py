@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -18,7 +19,7 @@ from unittest.mock import AsyncMock, patch
 from local_agent.client import AgentApiError
 from local_agent.client import AgentApiClient
 from local_agent.credentials import AgentConnectionStore
-from local_agent.desktop import _connect_when_available
+from local_agent.desktop import _connect_with_status_window
 from local_agent import autostart
 from local_agent.main import LocalAgentApplication, _server_url
 from local_agent.runner import AgentJobRunner
@@ -156,6 +157,40 @@ class AgentTaskManagerTests(unittest.TestCase):
                 system="Windows 11",
                 version="test",
             )
+
+    def test_disconnect_agent_removes_presence_without_affecting_pairing_state(self):
+        self.connect()
+        self.assertTrue(self.manager.agent_status()["online"])
+        self.manager.disconnect_agent(AGENT_ID)
+        status = self.manager.agent_status()
+        self.assertFalse(status["online"])
+        self.assertEqual(status["agents"], [])
+
+    def test_agent_presence_expires_after_the_offline_window(self):
+        self.connect()
+        offline_after = self.manager.agent_status()["offline_after_seconds"]
+        self.manager._agents[AGENT_ID]["last_seen_monotonic"] = (
+            time.monotonic() - offline_after - 1
+        )
+        self.assertFalse(self.manager.agent_status()["online"])
+
+    def test_disconnect_notifies_once_and_ignores_network_failure(self):
+        class Client:
+            def __init__(self):
+                self.calls = 0
+
+            def disconnect(self, _agent_id):
+                self.calls += 1
+                raise AgentApiError("offline")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            client = Client()
+            application = LocalAgentApplication(
+                client, data_root=Path(temp_dir) / "agent", poll_seconds=1
+            )
+            application.disconnect()
+            application.disconnect()
+        self.assertEqual(client.calls, 1)
 
     def test_batch_publish_is_persisted_with_one_state_write(self):
         video = self.paths.media / "demo.mp4"
@@ -317,6 +352,177 @@ class AgentAutostartTests(unittest.TestCase):
         )
         self.assertEqual(_server_url("https://publish.example.com"), "https://publish.example.com")
 
+    def test_installer_creates_desktop_shortcut_by_default(self):
+        installer = (
+            Path(__file__).resolve().parents[1]
+            / "deploy"
+            / "windows"
+            / "mpau-agent-installer.iss"
+        ).read_text(encoding="utf-8")
+        task_line = next(
+            line for line in installer.splitlines() if line.startswith('Name: "desktopicon"')
+        )
+        self.assertNotIn("unchecked", task_line.casefold())
+
+
+class DesktopConnectionWindowTests(unittest.TestCase):
+    class FakeWidget:
+        def __init__(self, *_args, **_kwargs):
+            self.options = {}
+
+        def pack(self, **_kwargs):
+            return self
+
+        def configure(self, **kwargs):
+            self.options.update(kwargs)
+
+    class FakeStringVar:
+        def __init__(self, value=""):
+            self.value = value
+
+        def set(self, value):
+            self.value = value
+
+    class FakeRoot(FakeWidget):
+        def __init__(self):
+            super().__init__()
+            self.callbacks = []
+            self.destroyed = False
+            self.withdrawn = False
+
+        def title(self, _value):
+            pass
+
+        def resizable(self, *_args):
+            pass
+
+        def protocol(self, *_args):
+            pass
+
+        def after(self, _delay, callback):
+            self.callbacks.append(callback)
+            return callback
+
+        def after_cancel(self, callback):
+            if callback in self.callbacks:
+                self.callbacks.remove(callback)
+
+        def mainloop(self):
+            deadline = time.monotonic() + 2
+            while not self.destroyed and time.monotonic() < deadline:
+                if self.callbacks:
+                    self.callbacks.pop(0)()
+                else:
+                    time.sleep(0.001)
+            if not self.destroyed:
+                raise AssertionError("连接窗口测试超时")
+
+        def destroy(self):
+            self.destroyed = True
+
+        def withdraw(self):
+            self.withdrawn = True
+
+        def deiconify(self):
+            self.withdrawn = False
+
+        def lift(self):
+            pass
+
+        def focus_force(self):
+            pass
+
+        def attributes(self, *_args):
+            pass
+
+    def run_connection(self, connect, *, start_hidden=False, reconnect=False):
+        root = self.FakeRoot()
+        tkinter = SimpleNamespace(
+            Tk=lambda: root,
+            Frame=self.FakeWidget,
+            Label=self.FakeWidget,
+            StringVar=self.FakeStringVar,
+            messagebox=SimpleNamespace(askyesno=lambda *_args, **_kwargs: reconnect),
+        )
+        application = SimpleNamespace(
+            connect=connect,
+            client=SimpleNamespace(server_url="http://10.31.108.221:8788"),
+            stopping=False,
+        )
+        with patch.dict(sys.modules, {"tkinter": tkinter}), patch(
+            "local_agent.desktop.theme.header_band", return_value=self.FakeWidget()
+        ), patch(
+            "local_agent.desktop.theme.primary_button", side_effect=lambda *_args, **_kwargs: self.FakeWidget()
+        ), patch(
+            "local_agent.desktop.theme.secondary_button", side_effect=lambda *_args, **_kwargs: self.FakeWidget()
+        ), patch(
+            "local_agent.desktop.theme.apply_tk_scaling"
+        ), patch(
+            "local_agent.desktop.theme.center_window"
+        ), patch(
+            "local_agent.desktop._start_wake_listener", return_value=lambda: None
+        ):
+            outcome = _connect_with_status_window(
+                application, start_hidden=start_hidden
+            )
+        return outcome, root
+
+    def test_successful_connection_advances_to_status_window(self):
+        outcome, _root = self.run_connection(lambda: None)
+        self.assertEqual(outcome, "connected")
+
+    def test_transient_failure_retries_without_silently_exiting(self):
+        attempts = 0
+
+        def connect():
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise AgentApiError("网络暂不可用")
+
+        outcome, _root = self.run_connection(connect)
+        self.assertEqual(outcome, "connected")
+        self.assertEqual(attempts, 2)
+
+    def test_background_connection_window_starts_hidden(self):
+        outcome, root = self.run_connection(lambda: None, start_hidden=True)
+        self.assertEqual(outcome, "connected")
+        self.assertTrue(root.withdrawn)
+
+    def test_expired_authorization_returns_to_pairing(self):
+        outcome, _root = self.run_connection(
+            lambda: (_ for _ in ()).throw(AgentApiError("授权失效", 401))
+        )
+        self.assertEqual(outcome, "unauthorized")
+
+    def test_three_connection_failures_can_clear_pairing(self):
+        attempts = 0
+
+        def connect():
+            nonlocal attempts
+            attempts += 1
+            raise AgentApiError("发布台地址不可达")
+
+        outcome, root = self.run_connection(connect, reconnect=True)
+
+        self.assertEqual(outcome, "re-pair")
+        self.assertEqual(attempts, 3)
+        self.assertFalse(root.withdrawn)
+
+    def test_declining_repair_keeps_retrying_current_server(self):
+        attempts = 0
+
+        def connect():
+            nonlocal attempts
+            attempts += 1
+            if attempts <= 3:
+                raise AgentApiError("发布台暂时不可达")
+
+        outcome, _root = self.run_connection(connect, reconnect=False)
+
+        self.assertEqual(outcome, "connected")
+        self.assertEqual(attempts, 4)
+
 
 class LocalAgentApplicationTests(unittest.TestCase):
     def test_publish_downloads_video_and_cover_before_running(self):
@@ -407,23 +613,6 @@ class LocalAgentApplicationTests(unittest.TestCase):
 
         self.assertTrue(application.stopping)
         self.assertTrue(application.authorization_failed)
-
-    def test_desktop_connection_waits_for_temporary_network_failure(self):
-        class RetryingApplication:
-            def __init__(self):
-                self.attempts = 0
-
-            def connect(self):
-                self.attempts += 1
-                if self.attempts == 1:
-                    raise AgentApiError("网络尚未就绪")
-
-        application = RetryingApplication()
-        with patch("local_agent.desktop.time.sleep") as sleep:
-            self.assertTrue(_connect_when_available(application))
-
-        self.assertEqual(application.attempts, 2)
-        sleep.assert_called_once_with(5)
 
     def test_transient_heartbeat_failure_does_not_cancel_browser_task(self):
         class Client:
@@ -679,6 +868,37 @@ class UpdaterTests(unittest.TestCase):
 
             self.assertEqual(progress_calls[-1], (6, 6))
             self.assertEqual(destination.read_bytes(), b"abcdef")
+
+    def test_disconnect_posts_authenticated_agent_identity(self) -> None:
+        class FakeResponse:
+            def read(self):
+                return b'{"disconnected_agent_id":"' + b"b" * 32 + b'"}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class FakeOpener:
+            def __init__(self):
+                self.request = None
+                self.timeout = None
+
+            def open(self, request, timeout=None):
+                self.request = request
+                self.timeout = timeout
+                return FakeResponse()
+
+        client = AgentApiClient("https://mpau.example.com", "token")
+        opener = FakeOpener()
+        client.opener = opener
+        client.disconnect("b" * 32)
+        self.assertEqual(opener.request.method, "POST")
+        self.assertEqual(opener.request.full_url, "https://mpau.example.com/api/agent/disconnect")
+        self.assertEqual(opener.request.get_header("Authorization"), "Bearer token")
+        self.assertEqual(json.loads(opener.request.data), {"agent_id": "b" * 32})
+        self.assertEqual(opener.timeout, 3)
 
     def test_launch_update_starts_powershell_outside_the_agent_executable(self) -> None:
         from local_agent import updater

@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import traceback
+from collections.abc import Callable
 
 from local_agent import __version__
 from local_agent.autostart import open_url, set_autostart
@@ -28,6 +29,7 @@ _WAKE_TOKEN = "show"
 
 UPDATE_CHECK_INTERVAL_SECONDS = 6 * 60 * 60
 UPDATE_CHECK_DELAY_SECONDS = 90
+CONNECTION_FAILURES_BEFORE_REPAIR = 3
 
 
 def _show_fatal_error(message: str) -> None:
@@ -110,10 +112,12 @@ def _notify_existing_instance() -> None:
 
 def _start_wake_listener(
     application: LocalAgentApplication, on_wake
-) -> None:
+) -> Callable[[], None]:
     """Listen on localhost so a second double-click can reveal the UI."""
     if os.name != "nt":
-        return
+        return lambda: None
+
+    stop_event = threading.Event()
 
     def worker() -> None:
         try:
@@ -126,7 +130,7 @@ def _start_wake_listener(
             logger.warning("无法启动助手窗口唤醒服务：{}", exc)
             return
         with server:
-            while not application.stopping:
+            while not application.stopping and not stop_event.is_set():
                 try:
                     conn, _address = server.accept()
                 except socket.timeout:
@@ -144,11 +148,23 @@ def _start_wake_listener(
                     except Exception:
                         logger.exception("显示助手状态窗口失败")
 
-    threading.Thread(
+    listener = threading.Thread(
         target=worker,
         name="mpau-agent-window-wake",
         daemon=True,
-    ).start()
+    )
+    listener.start()
+
+    def stop() -> None:
+        stop_event.set()
+        try:
+            with socket.create_connection((_WAKE_HOST, _WAKE_PORT), timeout=0.2):
+                pass
+        except OSError:
+            pass
+        listener.join(timeout=1)
+
+    return stop
 
 
 def _pairing_dialog(
@@ -401,6 +417,7 @@ def _revoke_pairing(application: LocalAgentApplication, store: AgentConnectionSt
         application.client.revoke_device(application.agent_id)
     except AgentApiError:
         pass
+    application.mark_disconnected()
     store.clear()
     set_autostart(False)
 
@@ -436,6 +453,7 @@ def _run_tray(
 
     def quit_agent(icon, _item=None) -> None:
         application.stop()
+        application.disconnect()
         icon.stop()
 
     def disconnect(icon, _item=None) -> None:
@@ -934,6 +952,7 @@ def _run_status_window(
         closing = True
         if stop_on_close or for_install:
             application.stop()
+            application.disconnect()
         root.destroy()
 
     def watch_application() -> None:
@@ -962,16 +981,161 @@ def _run_status_window(
     root.mainloop()
     return None if installer_started else (pending[0] if pending else None)
 
-def _connect_when_available(application: LocalAgentApplication) -> bool:
-    """Keep an autostarted helper alive while the local network is unavailable."""
-    while True:
-        try:
-            application.connect()
-            return True
-        except AgentApiError as exc:
-            if exc.status == 401:
-                return False
-            time.sleep(5)
+def _connect_with_status_window(
+    application: LocalAgentApplication, *, start_hidden: bool = False
+) -> str:
+    """Connect with visible retry feedback, remaining quiet for autostart."""
+    import tkinter as tk
+    from tkinter import messagebox
+
+    root = tk.Tk()
+    root.title("MPAU 本地执行助手")
+    root.resizable(False, False)
+    root.configure(bg=theme.CREAM)
+    theme.apply_tk_scaling(root)
+    theme.center_window(root, 500, 300)
+
+    theme.header_band(
+        root,
+        "MPAU 本地执行助手",
+        "正在连接商家发布台",
+    ).pack(fill="x")
+    body = tk.Frame(root, bg=theme.CREAM)
+    body.pack(fill="both", expand=True, padx=28, pady=24)
+    status = tk.StringVar(value=f"正在连接：{application.client.server_url}")
+    detail = tk.Label(
+        body,
+        textvariable=status,
+        bg=theme.CREAM,
+        fg=theme.TEXT_600,
+        font=theme.font(10),
+        justify="left",
+        anchor="w",
+        wraplength=430,
+    )
+    detail.pack(fill="x")
+    ui_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+    running = True
+    connecting = False
+    outcome = "cancelled"
+    retry_timer = None
+    consecutive_failures = 0
+
+    def close() -> None:
+        nonlocal running
+        running = False
+        root.destroy()
+
+    def attempt() -> None:
+        nonlocal connecting, retry_timer
+        if not running or connecting:
+            return
+        if retry_timer is not None:
+            root.after_cancel(retry_timer)
+            retry_timer = None
+        connecting = True
+        retry_button.configure(state="disabled", text="正在连接…")
+        status.set(f"正在连接：{application.client.server_url}")
+
+        def worker() -> None:
+            try:
+                application.connect()
+            except AgentApiError as exc:
+                if exc.status == 401:
+                    ui_queue.put(("unauthorized", str(exc)))
+                    return
+                ui_queue.put(("retry", str(exc)))
+                return
+            except Exception as exc:
+                ui_queue.put(("fatal", str(exc)))
+                return
+            if not running:
+                application.stop()
+                application.disconnect()
+                return
+            ui_queue.put(("connected", ""))
+
+        threading.Thread(target=worker, name="mpau-connect", daemon=True).start()
+
+    def scheduled_attempt() -> None:
+        nonlocal retry_timer
+        retry_timer = None
+        attempt()
+
+    def show_window() -> None:
+        root.deiconify()
+        root.lift()
+        root.focus_force()
+        root.attributes("-topmost", True)
+        root.after(800, lambda: root.attributes("-topmost", False))
+
+    def drain_queue() -> None:
+        nonlocal connecting, outcome, retry_timer, running, consecutive_failures
+        while True:
+            try:
+                kind, message = ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "show-window":
+                show_window()
+            elif kind == "connected":
+                consecutive_failures = 0
+                outcome = "connected"
+                running = False
+                root.destroy()
+                return
+            elif kind == "unauthorized":
+                outcome = "unauthorized"
+                running = False
+                root.destroy()
+                return
+            elif kind == "retry":
+                connecting = False
+                consecutive_failures += 1
+                retry_button.configure(state="normal", text="立即重试")
+                status.set(
+                    f"连接失败：{message}\n\n将于 5 秒后自动重试，也可以点击“立即重试”。"
+                )
+                if consecutive_failures >= CONNECTION_FAILURES_BEFORE_REPAIR:
+                    show_window()
+                    reconnect = messagebox.askyesno(
+                        "多次连接失败",
+                        "连续 3 次无法连接发布台。是否断开当前配对并重新配对？\n\n"
+                        "如果发布台地址或 IP 已变更，请选择“是”。",
+                        parent=root,
+                    )
+                    consecutive_failures = 0
+                    if reconnect:
+                        outcome = "re-pair"
+                        running = False
+                        root.destroy()
+                        return
+                retry_timer = root.after(5000, scheduled_attempt)
+            elif kind == "fatal":
+                connecting = False
+                retry_button.configure(state="normal", text="立即重试")
+                status.set(f"启动本机服务失败：{message}")
+                show_window()
+        if running:
+            root.after(100, drain_queue)
+
+    retry_button = theme.primary_button(body, "立即重试", attempt)
+    retry_button.pack(fill="x", pady=(22, 0), ipady=5)
+    cancel_button = theme.secondary_button(body, "退出助手", close)
+    cancel_button.pack(fill="x", pady=(10, 0), ipady=4)
+    root.protocol("WM_DELETE_WINDOW", close)
+    if start_hidden:
+        root.withdraw()
+    stop_wake_listener = _start_wake_listener(
+        application, lambda: ui_queue.put(("show-window", ""))
+    )
+    root.after(50, attempt)
+    root.after(100, drain_queue)
+    try:
+        root.mainloop()
+    finally:
+        stop_wake_listener()
+    return outcome
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1013,10 +1177,18 @@ def run() -> None:
     while connection is not None:
         client = AgentApiClient(connection.server_url, connection.agent_token)
         application = LocalAgentApplication(client, data_root=args.data_dir, poll_seconds=2)
-        if not _connect_when_available(application):
+        connect_outcome = _connect_with_status_window(
+            application, start_hidden=args.background
+        )
+        if connect_outcome == "cancelled":
+            return
+        if connect_outcome in {"unauthorized", "re-pair"}:
+            previous_server = connection.server_url
             store.clear()
             connection = _pairing_dialog(
-                store, args.data_dir, initial_server=connection.server_url
+                store,
+                args.data_dir,
+                initial_server="" if connect_outcome == "re-pair" else previous_server,
             )
             continue
 
@@ -1036,6 +1208,7 @@ def run() -> None:
                 application, connection, args.data_dir, store
             )
         application.stop()
+        application.disconnect()
         worker.join(timeout=15)
         if pending_installer is not None:
             updater.launch_update(args.data_dir, pending_installer)

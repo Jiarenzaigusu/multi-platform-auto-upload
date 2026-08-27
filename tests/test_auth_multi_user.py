@@ -732,6 +732,18 @@ class LocalAgentApiTests(unittest.TestCase):
         status = self.client.get("/api/agent/status")
         self.assertTrue(status.json()["online"])
 
+        disconnected = self.agent_post_json(
+            "/api/agent/disconnect", {"agent_id": "b" * 32}
+        )
+        self.assertEqual(disconnected.status_code, 200, disconnected.text)
+        self.assertEqual(
+            disconnected.json()["disconnected_agent_id"], "b" * 32
+        )
+        self.assertFalse(self.client.get("/api/agent/status").json()["online"])
+
+        # Disconnect preserves the device token, so the same pairing can reconnect.
+        self.assertTrue(self.connect_agent()["agent"]["online"])
+
         created = self.client.post(
             "/api/accounts/tmall/shop1/login", headers=self.csrf_headers()
         )

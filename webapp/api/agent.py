@@ -433,7 +433,7 @@ def create_agent_router(
             "agent": agent,
             "lease_seconds": manager.lease_seconds,
             "poll_seconds": 2,
-            "claim_wait_seconds": 25,
+            "claim_wait_seconds": 10,
             "user": {
                 "id": authenticated.user.id,
                 "username": authenticated.user.username,
@@ -442,16 +442,26 @@ def create_agent_router(
             },
         }
 
+    @router.post("/disconnect")
+    def disconnect(payload: AgentIdentity, request: Request) -> dict[str, Any]:
+        """Mark a paired agent offline without revoking its device token."""
+        manager = remote_manager(request)
+        agent_id = bound_agent_id(request, payload.agent_id)
+        manager.disconnect_agent(agent_id)
+        return {"disconnected_agent_id": agent_id}
+
     @router.post("/claim")
     async def claim(
         payload: AgentIdentity,
         request: Request,
-        wait_seconds: float = Query(25, ge=0, le=30),
+        wait_seconds: float = Query(10, ge=0, le=30),
     ) -> dict[str, Any]:
         manager = remote_manager(request)
         agent_id = bound_agent_id(request, payload.agent_id)
         try:
-            job = await manager.wait_for_claimable_job(agent_id, wait_seconds)
+            # Cap legacy clients that still request the former 25-second poll;
+            # this keeps the presence lease bounded without rejecting them.
+            job = await manager.wait_for_claimable_job(agent_id, min(wait_seconds, 10))
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {

@@ -43,6 +43,7 @@ class AgentApiClient:
         method: str = "GET",
         payload: dict[str, Any] | None = None,
         authenticated: bool = True,
+        timeout: float = 45,
     ) -> dict[str, Any]:
         data = json.dumps(payload).encode("utf-8") if payload is not None else None
         headers = {"Accept": "application/json"}
@@ -54,7 +55,7 @@ class AgentApiClient:
             headers["Authorization"] = f"Bearer {self.agent_token}"
         request = Request(self._url(path), data=data, headers=headers, method=method)
         try:
-            with self.opener.open(request, timeout=45) as response:
+            with self.opener.open(request, timeout=timeout) as response:
                 raw = response.read()
             return json.loads(raw.decode("utf-8")) if raw else {}
         except HTTPError as exc:
@@ -214,6 +215,14 @@ class AgentApiClient:
         self.request_json(
             f"/api/agent/self/{quote(agent_id)}",
             method="DELETE",
+        )
+
+    def disconnect(self, agent_id: str) -> None:
+        self.request_json(
+            "/api/agent/disconnect",
+            method="POST",
+            payload={"agent_id": agent_id},
+            timeout=3,
         )
 
     def complete(

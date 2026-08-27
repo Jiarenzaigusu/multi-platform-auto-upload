@@ -8,6 +8,7 @@ import shutil
 import signal
 import socket
 import sys
+import threading
 import time
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -116,6 +117,8 @@ class LocalAgentApplication:
         self.lease_seconds = 45.0
         self.stopping = False
         self.authorization_failed = False
+        self._disconnect_guard = threading.Lock()
+        self._disconnect_notified = False
         self.runner: AgentJobRunner | None = None
         self.local_upload_server: LocalUploadServer | None = None
         self.hello = {
@@ -129,8 +132,27 @@ class LocalAgentApplication:
     def stop(self, *_args) -> None:
         self.stopping = True
 
+    def disconnect(self) -> None:
+        """Best-effort graceful disconnect; the pairing token remains valid."""
+        with self._disconnect_guard:
+            if self._disconnect_notified:
+                return
+            self._disconnect_notified = True
+        try:
+            self.client.disconnect(self.agent_id)
+        except Exception:
+            # A crashed server or broken network falls back to presence expiry.
+            pass
+
+    def mark_disconnected(self) -> None:
+        """Prevent a revoke flow from sending a redundant disconnect request."""
+        with self._disconnect_guard:
+            self._disconnect_notified = True
+
     def connect(self) -> None:
         response = self.client.connect(self.hello)
+        with self._disconnect_guard:
+            self._disconnect_notified = False
         user = response["user"]
         paths = user_paths(self.data_root, user["id"])
         if self.runner is not None and self.runner.user_id != user["id"]:
@@ -179,6 +201,8 @@ class LocalAgentApplication:
                 else:
                     # Keep compatibility with older embedded/test clients.
                     job = self.client.claim(self.agent_id)
+                if self.stopping:
+                    break
                 if job is None:
                     if self.claim_wait_seconds <= 0:
                         time.sleep(self.poll_seconds)
@@ -193,8 +217,12 @@ class LocalAgentApplication:
                         file=sys.stderr,
                     )
                     break
+                if self.stopping:
+                    break
                 print(f"代理连接异常：{exc}，5 秒后重试", file=sys.stderr)
                 time.sleep(5)
+                if self.stopping:
+                    break
                 try:
                     self.client.connect(self.hello)
                 except AgentApiError:
@@ -519,6 +547,9 @@ def run() -> None:
         application.run()
     except AgentApiError as exc:
         raise SystemExit(str(exc)) from exc
+    finally:
+        application.stop()
+        application.disconnect()
 
 
 if __name__ == "__main__":
