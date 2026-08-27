@@ -893,6 +893,20 @@ def _run_status_window(
     )
     update_status_label.pack(fill="x", pady=(12, 0))
 
+    def disconnect_and_exit() -> None:
+        if not messagebox.askyesno(
+            "解除配对",
+            "确定要解除本机与服务器的配对并退出助手吗？\n此操作会清除本地配对信息，且无法撤销。",
+        ):
+            return
+
+        def worker() -> None:
+            _revoke_pairing(application, store)
+            application.stop()
+            enqueue("application-stopped")
+
+        threading.Thread(target=worker, name="mpau-disconnect", daemon=True).start()
+
     account_actions = tk.Frame(body, bg=theme.CREAM)
     account_actions.pack(fill="x", pady=(16, 0))
     theme.danger_button(
@@ -914,19 +928,6 @@ def _run_status_window(
         fg=theme.TEXT_400,
         font=theme.font(9),
     ).pack(pady=(14, 20))
-
-    def disconnect_and_exit() -> None:
-        if not messagebox.askyesno(
-            "解除配对",
-            "确定要解除本机与服务器的配对并退出助手吗？\n此操作会清除本地配对信息，且无法撤销。",
-        ):
-            return
-
-        def worker() -> None:
-            _revoke_pairing(application, store)
-            root.after(0, lambda: (application.stop(), root.destroy()))
-
-        threading.Thread(target=worker, name="mpau-disconnect", daemon=True).start()
 
     def close(*, for_install: bool = False) -> None:
         nonlocal closing
