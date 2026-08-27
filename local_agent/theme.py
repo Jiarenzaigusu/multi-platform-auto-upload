@@ -256,6 +256,32 @@ def secondary_button(parent, text: str, command, **pack_kwargs):
     return button
 
 
+def danger_button(parent, text: str, command, **pack_kwargs):
+    import tkinter as tk
+
+    button = tk.Button(
+        parent,
+        text=text,
+        command=command,
+        bg=STATUS_OFFLINE,
+        fg="white",
+        activebackground="#9c3b2b",
+        activeforeground="white",
+        relief="flat",
+        bd=0,
+        font=font(10, "bold"),
+        cursor="hand2",
+        padx=18,
+        pady=6,
+        highlightbackground=BORDER,
+        highlightthickness=1,
+    )
+    _hover(button, STATUS_OFFLINE, "#9c3b2b")
+    if pack_kwargs:
+        button.pack(**pack_kwargs)
+    return button
+
+
 def field_label(
     parent,
     text: str,

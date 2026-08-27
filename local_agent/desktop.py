@@ -392,6 +392,19 @@ def _tray_image():
     return image
 
 
+def _revoke_pairing(application: LocalAgentApplication, store: AgentConnectionStore) -> None:
+    """撤销本机与服务器的配对：通知服务器、清除本地状态、关闭开机自启。
+
+    网络失败不影响本地清理，与托盘菜单的“解除配对并退出”行为保持一致。
+    """
+    try:
+        application.client.revoke_device(application.agent_id)
+    except AgentApiError:
+        pass
+    store.clear()
+    set_autostart(False)
+
+
 def _run_tray(
     application: LocalAgentApplication,
     connection: StoredConnection,
@@ -401,7 +414,7 @@ def _run_tray(
     try:
         import pystray
     except ImportError:
-        return _run_status_window(application, connection, data_root)
+        return _run_status_window(application, connection, data_root, store)
 
     updater_state = AgentUpdater(application, data_root)
     pending: list[Path | None] = []
@@ -426,12 +439,7 @@ def _run_tray(
         icon.stop()
 
     def disconnect(icon, _item=None) -> None:
-        try:
-            application.client.revoke_device(application.agent_id)
-        except AgentApiError:
-            pass
-        store.clear()
-        set_autostart(False)
+        _revoke_pairing(application, store)
         quit_agent(icon)
 
     def open_status_window(
@@ -451,6 +459,7 @@ def _run_tray(
                     application,
                     connection,
                     data_root,
+                    store,
                     updater_state=updater_state,
                     stop_on_close=False,
                     start_update_checks=False,
@@ -552,6 +561,7 @@ def _run_status_window(
     application: LocalAgentApplication,
     connection: StoredConnection,
     data_root: Path,
+    store: AgentConnectionStore,
     *,
     updater_state: AgentUpdater | None = None,
     stop_on_close: bool = True,
@@ -883,6 +893,15 @@ def _run_status_window(
     )
     update_status_label.pack(fill="x", pady=(12, 0))
 
+    account_actions = tk.Frame(body, bg=theme.CREAM)
+    account_actions.pack(fill="x", pady=(16, 0))
+    theme.danger_button(
+        account_actions,
+        "解除配对并退出",
+        disconnect_and_exit,
+        side="left",
+    )
+
     close_note = (
         "关闭窗口不会退出助手；需要退出请右键托盘图标选择“退出助手”"
         if not stop_on_close
@@ -895,6 +914,19 @@ def _run_status_window(
         fg=theme.TEXT_400,
         font=theme.font(9),
     ).pack(pady=(14, 20))
+
+    def disconnect_and_exit() -> None:
+        if not messagebox.askyesno(
+            "解除配对",
+            "确定要解除本机与服务器的配对并退出助手吗？\n此操作会清除本地配对信息，且无法撤销。",
+        ):
+            return
+
+        def worker() -> None:
+            _revoke_pairing(application, store)
+            root.after(0, lambda: (application.stop(), root.destroy()))
+
+        threading.Thread(target=worker, name="mpau-disconnect", daemon=True).start()
 
     def close(*, for_install: bool = False) -> None:
         nonlocal closing
@@ -1000,7 +1032,7 @@ def run() -> None:
             )
         else:
             pending_installer = _run_status_window(
-                application, connection, args.data_dir
+                application, connection, args.data_dir, store
             )
         application.stop()
         worker.join(timeout=15)
