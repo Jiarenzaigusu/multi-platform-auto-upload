@@ -85,7 +85,7 @@ Write-Host "Dependencies installed." -ForegroundColor Green
 # Fail before packaging if the desktop dependency set cannot import every module
 # required by authenticated Tmall product inspection.
 Write-Host "Validating desktop packaging modules..." -ForegroundColor Yellow
-& $BuildPython -c "import local_agent.desktop; import webapp.ai_copy.contracts; import webapp.ai_copy.errors; import webapp.ai_copy.product_lookup.cache; import webapp.ai_copy.product_lookup.interfaces; import webapp.ai_copy.product_lookup.public_http; import webapp.ai_copy.product_lookup.tmall_client; import webapp.ai_copy.product_lookup.tmall_reader"
+& $BuildPython -c "import local_agent.desktop; import pystray; import pystray._win32; assert pystray.Icon.__module__ == 'pystray._win32'; from PIL import Image, ImageDraw; import webapp.ai_copy.contracts; import webapp.ai_copy.errors; import webapp.ai_copy.product_lookup.cache; import webapp.ai_copy.product_lookup.interfaces; import webapp.ai_copy.product_lookup.public_http; import webapp.ai_copy.product_lookup.tmall_client; import webapp.ai_copy.product_lookup.tmall_reader"
 if ($LASTEXITCODE -ne 0) {
     throw "A desktop module import failed; installer generation has stopped."
 }
@@ -119,6 +119,10 @@ if ($LASTEXITCODE -ne 0) {
     throw "Unable to inspect the PyInstaller archive."
 }
 $RequiredFrozenModules = @(
+    "pystray",
+    "pystray._win32",
+    "PIL.Image",
+    "PIL.ImageDraw",
     "webapp.ai_copy.contracts",
     "webapp.ai_copy.errors",
     "webapp.ai_copy.product_lookup.cache",

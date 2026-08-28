@@ -420,17 +420,34 @@ def _run_tray(
     data_root: Path,
     *,
     show_status_on_start: bool = False,
+    on_ready: Callable[[], None] | None = None,
 ) -> str:
     try:
+        previous_backend = os.environ.get("PYSTRAY_BACKEND")
+        os.environ["PYSTRAY_BACKEND"] = "win32"
         import pystray
+        if pystray.Icon.__module__ != "pystray._win32":
+            raise RuntimeError(
+                f"加载了错误的托盘后端：{pystray.Icon.__module__ or 'unknown'}"
+            )
     except Exception as exc:
-        logger.exception("托盘组件加载失败，切换到状态窗口：{}", exc)
-        return _run_status_window(application, connection, data_root, store)
+        message = "Windows 托盘组件加载失败，助手不会继续后台运行。请重新安装完整版本。"
+        logger.exception("{}：{}", message, exc)
+        _show_fatal_error(message)
+        application.stop()
+        application.disconnect()
+        return "tray-failed"
+    finally:
+        if previous_backend is None:
+            os.environ.pop("PYSTRAY_BACKEND", None)
+        else:
+            os.environ["PYSTRAY_BACKEND"] = previous_backend
 
     updater_state = AgentUpdater(application, data_root)
     status_window_lock = threading.Lock()
     status_window_open = False
     tray_outcome = "quit"
+    tray_failure: list[str] = []
 
     def open_console(_icon=None, _item=None) -> None:
         open_url(connection.server_url)
@@ -476,7 +493,6 @@ def _run_tray(
                     data_root,
                     store,
                     updater_state=updater_state,
-                    stop_on_close=False,
                     start_update_checks=False,
                     auto_install_on_open=auto_install,
                 )
@@ -526,49 +542,86 @@ def _run_tray(
         open_status_window(icon, auto_install=True)
 
     user_label = connection.user.get("display_name") or connection.user.get("username")
-    menu = pystray.Menu(
-        pystray.MenuItem("打开助手窗口", open_status_window, default=True),
-        pystray.MenuItem("打开商家发布台", open_console),
-        pystray.MenuItem(f"已连接：{user_label}", None, enabled=False),
-        pystray.Menu.SEPARATOR,
-        pystray.MenuItem("检查更新", check_update),
-        pystray.MenuItem(
-            lambda item: (
-                f"安装新版本 v{updater_state.release['version']}"
-                if updater_state.release
-                else "检查并安装新版本"
-            ),
-            install_update,
-        ),
-        pystray.Menu.SEPARATOR,
-        pystray.MenuItem("解除配对", disconnect),
-        pystray.MenuItem("退出助手", quit_agent),
-    )
-    icon = pystray.Icon(
-        "MPAU-Agent",
-        _tray_image(),
-        f"MPAU 本地执行助手：已连接（v{__version__}）",
-        menu,
-    )
+    icon = None
+    stop_wake_listener = lambda: None
 
     def watch_application() -> None:
         while not application.stopping:
             time.sleep(0.5)
-        if application.authorization_failed:
+        if application.authorization_failed and icon is not None:
             icon.stop()
 
-    threading.Thread(
-        target=watch_application,
-        name="mpau-agent-tray-monitor",
-        daemon=True,
-    ).start()
-    _start_wake_listener(application, open_status_window)
-    _start_background_update_checks(updater_state, notify=notify)
     def setup(_icon) -> None:
+        # pystray only makes the icon visible automatically when no custom
+        # setup callback is supplied.
+        try:
+            _icon.visible = True
+            if not _icon.visible:
+                raise RuntimeError("托盘后端没有确认图标可见")
+            logger.info("Windows 托盘图标已创建并显示")
+            if on_ready is not None:
+                on_ready()
+            _start_background_update_checks(updater_state, notify=notify)
+        except Exception as exc:
+            message = f"Windows 托盘图标显示失败，助手无法继续运行：{exc}"
+            tray_failure.append(message)
+            logger.exception("{}", message)
+            application.stop()
+            _icon.stop()
+            return
         if show_status_on_start:
             open_status_window()
 
-    icon.run(setup=setup)
+    try:
+        menu = pystray.Menu(
+            pystray.MenuItem("打开助手窗口", open_status_window, default=True),
+            pystray.MenuItem("打开商家发布台", open_console),
+            pystray.MenuItem(f"已连接：{user_label}", None, enabled=False),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("检查更新", check_update),
+            pystray.MenuItem(
+                lambda item: (
+                    f"安装新版本 v{updater_state.release['version']}"
+                    if updater_state.release
+                    else "检查并安装新版本"
+                ),
+                install_update,
+            ),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("解除配对", disconnect),
+            pystray.MenuItem("退出助手", quit_agent),
+        )
+        icon = pystray.Icon(
+            "MPAU-Agent",
+            _tray_image(),
+            f"MPAU 本地执行助手：已连接（v{__version__}）",
+            menu,
+        )
+        threading.Thread(
+            target=watch_application,
+            name="mpau-agent-tray-monitor",
+            daemon=True,
+        ).start()
+        stop_wake_listener = _start_wake_listener(application, open_status_window)
+        icon.run(setup=setup)
+        if tray_failure:
+            raise RuntimeError(tray_failure[0])
+        if not application.stopping:
+            raise RuntimeError("Windows 托盘循环意外结束")
+    except Exception as exc:
+        message = f"Windows 托盘初始化失败，助手无法继续运行：{exc}"
+        logger.exception("{}", message)
+        _show_fatal_error(message)
+        if icon is not None:
+            try:
+                icon.stop()
+            except Exception:
+                pass
+        application.stop()
+        application.disconnect()
+        return "tray-failed"
+    finally:
+        stop_wake_listener()
     return tray_outcome
 
 
@@ -579,7 +632,6 @@ def _run_status_window(
     store: AgentConnectionStore,
     *,
     updater_state: AgentUpdater | None = None,
-    stop_on_close: bool = True,
     start_update_checks: bool = True,
     auto_install_on_open: bool = False,
 ) -> str:
@@ -946,14 +998,9 @@ def _run_status_window(
         quit_from_window,
     ).pack(side="left", padx=(10, 0))
 
-    close_note = (
-        "关闭窗口不会退出助手；需要退出请点击“退出助手”或右键托盘图标"
-        if not stop_on_close
-        else "关闭窗口将退出本地执行助手"
-    )
     tk.Label(
         body,
-        text=close_note,
+        text="关闭窗口不会退出助手；需要退出请点击“退出助手”或右键托盘图标",
         bg=theme.CREAM,
         fg=theme.TEXT_400,
         font=theme.font(9),
@@ -962,7 +1009,7 @@ def _run_status_window(
     def close(*, for_install: bool = False) -> None:
         nonlocal closing
         closing = True
-        if stop_on_close or for_install:
+        if for_install:
             application.stop()
             application.disconnect()
         root.destroy()
@@ -976,8 +1023,6 @@ def _run_status_window(
     root.protocol("WM_DELETE_WINDOW", close)
     root.after(100, drain_queue)
     root.after(500, watch_application)
-    if stop_on_close:
-        _start_wake_listener(application, lambda: enqueue("show-window"))
     if start_update_checks:
         _start_background_update_checks(updater_state)
     if auto_install_on_open:
@@ -1201,20 +1246,29 @@ def run() -> None:
             name="mpau-agent-worker",
             daemon=True,
         )
-        worker.start()
+        worker_started = threading.Event()
+
+        def start_worker_after_tray_ready() -> None:
+            worker.start()
+            worker_started.set()
+
         tray_outcome = _run_tray(
             application,
             connection,
             store,
             args.data_dir,
             show_status_on_start=not args.background,
+            on_ready=start_worker_after_tray_ready,
         )
         application.stop()
         application.disconnect()
-        worker.join(timeout=15)
+        if worker_started.is_set():
+            worker.join(timeout=15)
         if tray_outcome == "re-pair":
             connection = _pairing_dialog(store, args.data_dir)
             continue
+        if tray_outcome == "tray-failed":
+            return
         if not application.authorization_failed:
             return
 

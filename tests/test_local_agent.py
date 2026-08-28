@@ -434,6 +434,146 @@ class AgentAutostartTests(unittest.TestCase):
 
         self.assertTrue(run_tray.call_args.kwargs["show_status_on_start"])
 
+    def test_tray_setup_explicitly_makes_icon_visible(self):
+        application = SimpleNamespace(
+            client=object(),
+            stopping=False,
+            authorization_failed=False,
+        )
+        connection = SimpleNamespace(
+            server_url="http://10.31.108.221:8788",
+            user={"display_name": "测试账号"},
+        )
+
+        class FakeIcon:
+            last_instance = None
+
+            def __init__(self, *_args, **_kwargs):
+                self.visible = False
+                self.stopped = False
+                FakeIcon.last_instance = self
+
+            def run(self, setup=None):
+                setup(self)
+                application.stopping = True
+
+            def stop(self):
+                self.stopped = True
+
+        FakeIcon.__module__ = "pystray._win32"
+
+        fake_pystray = SimpleNamespace(
+            Icon=FakeIcon,
+            Menu=lambda *_items: object(),
+            MenuItem=lambda *_args, **_kwargs: object(),
+        )
+        fake_pystray.Menu.SEPARATOR = object()
+        ready_visibility = []
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            sys.modules, {"pystray": fake_pystray}
+        ), patch.object(
+            desktop, "_tray_image", return_value=object()
+        ), patch.object(
+            desktop, "_start_wake_listener", return_value=lambda: None
+        ), patch.object(
+            desktop, "_start_background_update_checks"
+        ):
+            outcome = desktop._run_tray(
+                application,
+                connection,
+                SimpleNamespace(),
+                Path(temp_dir),
+                on_ready=lambda: ready_visibility.append(FakeIcon.last_instance.visible),
+            )
+
+        self.assertEqual(outcome, "quit")
+        self.assertTrue(FakeIcon.last_instance.visible)
+        self.assertEqual(ready_visibility, [True])
+
+    def test_missing_tray_backend_stops_with_error_instead_of_fallback(self):
+        application = SimpleNamespace(
+            stop=lambda: None,
+            disconnect=lambda: None,
+        )
+        connection = SimpleNamespace()
+        store = SimpleNamespace()
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            sys.modules, {"pystray": None}
+        ), patch.object(
+            desktop, "_show_fatal_error"
+        ) as fatal:
+            outcome = desktop._run_tray(
+                application,
+                connection,
+                store,
+                Path(temp_dir),
+            )
+
+        self.assertEqual(outcome, "tray-failed")
+        fatal.assert_called_once()
+
+    def test_invisible_tray_backend_stops_agent(self):
+        stopped = []
+        application = SimpleNamespace(
+            client=object(),
+            stopping=False,
+            authorization_failed=False,
+            stop=lambda: (stopped.append(True), setattr(application, "stopping", True)),
+            disconnect=lambda: None,
+        )
+        connection = SimpleNamespace(
+            server_url="http://10.31.108.221:8788",
+            user={"display_name": "测试账号"},
+        )
+
+        class InvisibleIcon:
+            def __init__(self, *_args, **_kwargs):
+                self._visible = False
+
+            @property
+            def visible(self):
+                return False
+
+            @visible.setter
+            def visible(self, _value):
+                self._visible = False
+
+            def run(self, setup=None):
+                setup(self)
+
+            def stop(self):
+                pass
+
+        fake_pystray = SimpleNamespace(
+            Icon=InvisibleIcon,
+            Menu=lambda *_items: object(),
+            MenuItem=lambda *_args, **_kwargs: object(),
+        )
+        fake_pystray.Menu.SEPARATOR = object()
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            sys.modules, {"pystray": fake_pystray}
+        ), patch.object(
+            desktop, "_tray_image", return_value=object()
+        ), patch.object(
+            desktop, "_show_fatal_error"
+        ) as fatal, patch.object(
+            desktop, "_start_wake_listener", return_value=lambda: None
+        ), patch.object(
+            desktop, "_start_background_update_checks"
+        ):
+            outcome = desktop._run_tray(
+                application,
+                connection,
+                SimpleNamespace(),
+                Path(temp_dir),
+            )
+
+        self.assertEqual(outcome, "tray-failed")
+        self.assertTrue(stopped)
+        fatal.assert_called_once()
+
 
 class DesktopConnectionWindowTests(unittest.TestCase):
     class FakeWidget:
