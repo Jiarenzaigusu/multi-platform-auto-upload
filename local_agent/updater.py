@@ -3,7 +3,7 @@
 The agent checks the control plane for a newer installer, downloads it with
 SHA-256 verification, and then starts a detached PowerShell updater. The
 external script waits for the old agent process to exit, runs the Inno Setup
-installer silently into the existing directory, and relaunches the agent.
+installer with its normal progress window, and relaunches the agent.
 """
 
 from __future__ import annotations

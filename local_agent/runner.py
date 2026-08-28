@@ -337,11 +337,7 @@ class AgentJobRunner:
             request = XiaohongshuVideoUploadRequest(
                 account_name=account,
                 video_file=video_path,
-                cover_image_file=(
-                    Path(payload["cover_image_path"])
-                    if payload.get("cover_image_path")
-                    else None
-                ),
+                cover_image_file=cover_image_path,
                 title=payload["title"],
                 description=payload["description"],
                 tags=list(payload["tags"]),
@@ -374,11 +370,7 @@ class AgentJobRunner:
             request = DouyinVideoUploadRequest(
                 account_name=account,
                 video_file=video_path,
-                cover_image_file=(
-                    Path(payload["cover_image_path"])
-                    if payload.get("cover_image_path")
-                    else None
-                ),
+                cover_image_file=cover_image_path,
                 title=payload["title"],
                 description=payload["description"],
                 tags=list(payload["tags"]),

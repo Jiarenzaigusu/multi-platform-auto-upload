@@ -28,6 +28,7 @@ from local_agent.paths import (
 from local_agent.runner import AgentJobRunner
 from uploader.errors import PublishResultUncertainError
 from utils.files import validate_cover_image_filename, validate_media_filename
+from utils.log import logger
 from webapp.api.models import JD_ARTICLE_IMAGE_EXTENSIONS, MAX_SOCIAL_ARTICLE_IMAGES, SUPPORTED_COVER_IMAGE_EXTENSIONS
 
 _LOCAL_ASSET_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
@@ -58,6 +59,18 @@ class AgentJobCancelledError(RuntimeError):
 
 class AgentLeaseLostError(RuntimeError):
     pass
+
+
+def _agent_log(message: str, *, error: bool = False) -> None:
+    """Write agent progress safely from a console or a windowed executable."""
+    stream = sys.stderr if error else sys.stdout
+    if stream is not None and callable(getattr(stream, "write", None)):
+        print(message, file=stream)
+        return
+    if error:
+        logger.warning(message)
+    else:
+        logger.info(message)
 
 
 def _article_images_from_folder(
@@ -183,24 +196,20 @@ class LocalAgentApplication:
             0.0, min(30.0, float(response.get("claim_wait_seconds", 0)))
         )
         self.lease_seconds = max(30.0, float(response.get("lease_seconds", 45)))
-        print(
+        _agent_log(
             f"本地代理已连接：{user['display_name']} ({user['username']})，"
             f"设备 {self.hello['device_name']}"
         )
-        print("发布任务将在这台电脑上启动 Microsoft Edge。按 Ctrl+C 停止代理。")
+        _agent_log("发布任务将在这台电脑上启动 Microsoft Edge。按 Ctrl+C 停止代理。")
 
     def run(self, *, already_connected: bool = False) -> None:
         if not already_connected:
             self.connect()
         while not self.stopping:
             try:
-                if self.claim_wait_seconds > 0:
-                    job = self.client.claim(
-                        self.agent_id, wait_seconds=self.claim_wait_seconds
-                    )
-                else:
-                    # Keep compatibility with older embedded/test clients.
-                    job = self.client.claim(self.agent_id)
+                job = self.client.claim(
+                    self.agent_id, wait_seconds=self.claim_wait_seconds
+                )
                 if self.stopping:
                     break
                 if job is None:
@@ -212,14 +221,22 @@ class LocalAgentApplication:
                 if exc.status == 401:
                     self.authorization_failed = True
                     self.stopping = True
-                    print(
-                        "设备授权已失效，需要重新配对本地执行助手",
-                        file=sys.stderr,
-                    )
+                    _agent_log("设备授权已失效，需要重新配对本地执行助手", error=True)
                     break
                 if self.stopping:
                     break
-                print(f"代理连接异常：{exc}，5 秒后重试", file=sys.stderr)
+                _agent_log(f"代理连接异常：{exc}，5 秒后重试", error=True)
+                time.sleep(5)
+                if self.stopping:
+                    break
+                try:
+                    self.client.connect(self.hello)
+                except AgentApiError:
+                    continue
+            except Exception as exc:
+                if self.stopping:
+                    break
+                _agent_log(f"本地助手运行异常：{exc}，5 秒后重试", error=True)
                 time.sleep(5)
                 if self.stopping:
                     break
@@ -239,7 +256,7 @@ class LocalAgentApplication:
         assert self.runner is not None
         job_id = job["id"]
         label = {"tmall": "天猫", "jd": "京东"}.get(job["platform"], job["platform"])
-        print(f"领取任务：{label} / {job['account']} / {job['kind']} / {job_id}")
+        _agent_log(f"领取任务：{label} / {job['account']} / {job['kind']} / {job_id}")
         video_path: Path | None = None
         cover_image_path: Path | None = None
         image_paths: tuple[Path, ...] = ()
@@ -261,9 +278,9 @@ class LocalAgentApplication:
                 terminal_error = exc.status in {401, 403, 404, 409}
                 if terminal_error or elapsed >= self.lease_seconds - 5:
                     raise AgentLeaseLostError(f"云端心跳租约失效：{exc}") from exc
-                print(
+                _agent_log(
                     f"云端心跳暂时失败：{exc}，将在租约有效期内继续重试",
-                    file=sys.stderr,
+                    error=True,
                 )
                 return None
             heartbeat_state["last_success"] = time.monotonic()
@@ -312,7 +329,7 @@ class LocalAgentApplication:
                         for index, raw_name in enumerate(payload.get("image_filenames") or []):
                             image_name = validate_cover_image_filename(raw_name)
                             image_path = download_dir / image_name
-                            print(f"正在下载图文图片：{image_name}")
+                            _agent_log(f"正在下载图文图片：{image_name}")
                             self.client.download_article_image(
                                 job_id,
                                 self.agent_id,
@@ -333,7 +350,7 @@ class LocalAgentApplication:
                             payload.get("original_filename") or "video.mp4"
                         )
                         video_path = download_dir / original_name
-                        print(f"正在下载任务视频：{original_name}")
+                        _agent_log(f"正在下载任务视频：{original_name}")
                         self.client.download_video(
                             job_id,
                             self.agent_id,
@@ -347,7 +364,7 @@ class LocalAgentApplication:
                         if raw_cover_name:
                             cover_name = validate_cover_image_filename(raw_cover_name)
                             cover_image_path = download_dir / cover_name
-                            print(f"正在下载自定义封面：{cover_name}")
+                            _agent_log(f"正在下载自定义封面：{cover_name}")
                             self.client.download_cover_image(
                                 job_id,
                                 self.agent_id,
@@ -400,13 +417,13 @@ class LocalAgentApplication:
                         heartbeat_with_grace()
                     except AgentJobCancelledError as exc:
                         cancellation_reason = str(exc)
-                        print("收到中断请求，正在停止本地浏览器任务")
+                        _agent_log("收到中断请求，正在停止本地浏览器任务")
                         self.runner.cancel(job_id)
                     except AgentLeaseLostError as exc:
                         cancellation_reason = str(exc)
-                        print(
+                        _agent_log(
                             f"{cancellation_reason}，正在停止本地浏览器任务",
-                            file=sys.stderr,
+                            error=True,
                         )
                         self.runner.cancel(job_id)
             if future.done() and not result:
@@ -469,16 +486,16 @@ class LocalAgentApplication:
                     result=result,
                     logs=logs,
                 )
-                print(f"任务结束：{status} - {message}")
+                _agent_log(f"任务结束：{status} - {message}")
                 break
             except AgentApiError as exc:
                 retryable = exc.status == 0 or exc.status >= 500
                 if retryable and attempt < 2:
                     time.sleep(2 * (attempt + 1))
                     continue
-                print(
+                _agent_log(
                     f"任务已在本机结束，但结果无法回传：{exc}。请勿直接重试发布，先在平台后台核对。",
-                    file=sys.stderr,
+                    error=True,
                 )
                 break
 

@@ -19,9 +19,10 @@ from unittest.mock import AsyncMock, patch
 from local_agent.client import AgentApiError
 from local_agent.client import AgentApiClient
 from local_agent.credentials import AgentConnectionStore
+from local_agent import desktop
 from local_agent.desktop import _connect_with_status_window
 from local_agent import autostart
-from local_agent.main import LocalAgentApplication, _server_url
+from local_agent.main import LocalAgentApplication, _agent_log, _server_url
 from local_agent.runner import AgentJobRunner
 from uploader.errors import PublishResultUncertainError
 from webapp.ai_copy.contracts import ProductReference
@@ -364,6 +365,63 @@ class AgentAutostartTests(unittest.TestCase):
         )
         self.assertNotIn("unchecked", task_line.casefold())
 
+    def test_double_click_start_keeps_tray_and_opens_status_window(self):
+        connection = SimpleNamespace(
+            server_url="http://10.31.108.221:8788",
+            agent_token="token",
+        )
+        store = SimpleNamespace(load=lambda: connection, clear=lambda: None)
+        application = SimpleNamespace(
+            authorization_failed=False,
+            stop=lambda: None,
+            disconnect=lambda: None,
+            run=lambda **_kwargs: None,
+        )
+
+        class FakeThread:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def start(self):
+                pass
+
+            def join(self, timeout=None):
+                pass
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            desktop.os, "name", "nt"
+        ), patch.object(
+            desktop,
+            "build_parser",
+            return_value=SimpleNamespace(
+                parse_args=lambda: SimpleNamespace(
+                    background=False,
+                    data_dir=Path(temp_dir),
+                )
+            ),
+        ), patch.object(
+            desktop, "_acquire_single_instance", return_value=True
+        ), patch.object(
+            desktop, "AgentConnectionStore", return_value=store
+        ), patch.object(
+            desktop.updater, "consume_update_failure", return_value=None
+        ), patch.object(
+            desktop, "AgentApiClient", return_value=object()
+        ), patch.object(
+            desktop, "LocalAgentApplication", return_value=application
+        ), patch.object(
+            desktop, "_connect_with_status_window", return_value="connected"
+        ), patch.object(
+            desktop, "_run_tray", return_value=None
+        ) as run_tray, patch.object(
+            desktop.threading, "Thread", FakeThread
+        ), patch.object(
+            desktop.theme, "enable_dpi_awareness"
+        ):
+            desktop.run()
+
+        self.assertTrue(run_tray.call_args.kwargs["show_status_on_start"])
+
 
 class DesktopConnectionWindowTests(unittest.TestCase):
     class FakeWidget:
@@ -525,6 +583,16 @@ class DesktopConnectionWindowTests(unittest.TestCase):
 
 
 class LocalAgentApplicationTests(unittest.TestCase):
+    def test_agent_log_uses_file_logger_when_windowed_stdio_is_missing(self):
+        with patch.object(sys, "stdout", None), patch.object(
+            sys, "stderr", None
+        ), patch("local_agent.main.logger") as log:
+            _agent_log("普通进度")
+            _agent_log("错误进度", error=True)
+
+        log.info.assert_called_once_with("普通进度")
+        log.warning.assert_called_once_with("错误进度")
+
     def test_publish_downloads_video_and_cover_before_running(self):
         class Client:
             def __init__(self):
@@ -600,7 +668,7 @@ class LocalAgentApplicationTests(unittest.TestCase):
 
     def test_unauthorized_device_stops_and_requests_pairing(self):
         class UnauthorizedClient:
-            def claim(self, _agent_id):
+            def claim(self, _agent_id, *, wait_seconds=0):
                 raise AgentApiError("设备授权已失效", 401)
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -779,6 +847,46 @@ class AgentJobRunnerTests(unittest.TestCase):
                 self.assertIn("用户电脑", result["message"])
             finally:
                 runner.shutdown()
+
+    def test_social_video_publish_uses_resolved_cover_path(self):
+        for platform, upload_name, session_name in (
+            ("xiaohongshu", "upload_xiaohongshu_video", "xiaohongshu_sessions"),
+            ("douyin", "upload_douyin_video", "douyin_sessions"),
+        ):
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as temp_dir:
+                paths = AppDataPaths.create(Path(temp_dir) / "agent-data").for_user(USER_ID)
+                video = paths.uploads / "demo.mp4"
+                video.write_bytes(b"video")
+                cover = paths.uploads / "cover.png"
+                cover.write_bytes(b"cover")
+                runner = AgentJobRunner(USER_ID, paths)
+                session_pool = object()
+                setattr(runner.runtime, session_name, lambda pool=session_pool: pool)
+                job = {
+                    "id": "f" * 32,
+                    "kind": "publish",
+                    "platform": platform,
+                    "account": "shop1",
+                    "payload": {
+                        "headed": True,
+                        "schedule": None,
+                        "title": "本地代理发布测试",
+                        "description": "正文",
+                        "tags": ["测试"],
+                        "dry_run": True,
+                    },
+                }
+                try:
+                    with patch(
+                        f"local_agent.runner.{upload_name}",
+                        new=AsyncMock(return_value={"mode": "dry_run"}),
+                    ) as upload:
+                        asyncio.run(runner._run_job(job, video, cover))
+                    request = upload.await_args.args[0]
+                    self.assertEqual(request.cover_image_file, cover)
+                    self.assertEqual(upload.await_args.kwargs["session_pool"], session_pool)
+                finally:
+                    runner.shutdown()
 
 
 class UpdaterTests(unittest.TestCase):

@@ -81,6 +81,18 @@ def _log_and_show_unhandled_exception(exc_type, exc, tb) -> None:
     )
 
 
+def _log_background_thread_exception(args) -> None:
+    if issubclass(args.exc_type, KeyboardInterrupt):
+        return
+    logger.error(
+        "桌面助手后台线程 {} 发生异常\n{}",
+        args.thread.name if args.thread else "unknown",
+        "".join(
+            traceback.format_exception(
+                args.exc_type, args.exc_value, args.exc_traceback
+            )
+        ),
+    )
 
 
 def _acquire_single_instance() -> bool:
@@ -427,10 +439,13 @@ def _run_tray(
     connection: StoredConnection,
     store: AgentConnectionStore,
     data_root: Path,
+    *,
+    show_status_on_start: bool = False,
 ) -> Path | None:
     try:
         import pystray
-    except ImportError:
+    except Exception as exc:
+        logger.warning("托盘组件加载失败，切换到状态窗口：{}", exc)
         return _run_status_window(application, connection, data_root, store)
 
     updater_state = AgentUpdater(application, data_root)
@@ -571,7 +586,11 @@ def _run_tray(
     ).start()
     _start_wake_listener(application, open_status_window)
     _start_background_update_checks(updater_state, notify=notify)
-    icon.run()
+    def setup(_icon) -> None:
+        if show_status_on_start:
+            open_status_window()
+
+    icon.run(setup=setup)
     return pending[0] if pending else updater_state.pending_installer
 
 
@@ -602,7 +621,7 @@ def _run_status_window(
     root.resizable(False, False)
     root.configure(bg=theme.CREAM)
     theme.apply_tk_scaling(root)
-    theme.center_window(root, 500, 690)
+    theme.center_window(root, 520, 760)
 
     user_label = (
         connection.user.get("display_name") or connection.user.get("username")
@@ -993,7 +1012,7 @@ def _connect_with_status_window(
     root.resizable(False, False)
     root.configure(bg=theme.CREAM)
     theme.apply_tk_scaling(root)
-    theme.center_window(root, 500, 300)
+    theme.center_window(root, 540, 420)
 
     theme.header_band(
         root,
@@ -1001,7 +1020,7 @@ def _connect_with_status_window(
         "正在连接商家发布台",
     ).pack(fill="x")
     body = tk.Frame(root, bg=theme.CREAM)
-    body.pack(fill="both", expand=True, padx=28, pady=24)
+    body.pack(fill="both", expand=True, padx=32, pady=(28, 24))
     status = tk.StringVar(value=f"正在连接：{application.client.server_url}")
     detail = tk.Label(
         body,
@@ -1011,7 +1030,7 @@ def _connect_with_status_window(
         font=theme.font(10),
         justify="left",
         anchor="w",
-        wraplength=430,
+        wraplength=460,
     )
     detail.pack(fill="x")
     ui_queue: queue.Queue[tuple[str, str]] = queue.Queue()
@@ -1120,9 +1139,9 @@ def _connect_with_status_window(
             root.after(100, drain_queue)
 
     retry_button = theme.primary_button(body, "立即重试", attempt)
-    retry_button.pack(fill="x", pady=(22, 0), ipady=5)
+    retry_button.pack(fill="x", pady=(28, 0), ipady=6)
     cancel_button = theme.secondary_button(body, "退出助手", close)
-    cancel_button.pack(fill="x", pady=(10, 0), ipady=4)
+    cancel_button.pack(fill="x", pady=(12, 0), ipady=5)
     root.protocol("WM_DELETE_WINDOW", close)
     if start_hidden:
         root.withdraw()
@@ -1149,9 +1168,7 @@ def run() -> None:
     if os.name != "nt":
         raise SystemExit("MPAU 本地执行助手仅支持 Windows")
     sys.excepthook = _log_and_show_unhandled_exception
-    threading.excepthook = lambda args: _log_and_show_unhandled_exception(
-        args.exc_type, args.exc_value, args.exc_traceback
-    )
+    threading.excepthook = _log_background_thread_exception
     theme.enable_dpi_awareness()
     args = build_parser().parse_args()
     if not _acquire_single_instance():
@@ -1199,14 +1216,13 @@ def run() -> None:
             daemon=True,
         )
         worker.start()
-        if args.background:
-            pending_installer = _run_tray(
-                application, connection, store, args.data_dir
-            )
-        else:
-            pending_installer = _run_status_window(
-                application, connection, args.data_dir, store
-            )
+        pending_installer = _run_tray(
+            application,
+            connection,
+            store,
+            args.data_dir,
+            show_status_on_start=not args.background,
+        )
         application.stop()
         application.disconnect()
         worker.join(timeout=15)

@@ -18,7 +18,7 @@ DefaultDirName={localappdata}\Programs\MPAU-Agent
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
-; Unattended self-updates run with /VERYSILENT and must not stop the wizard.
+; Self-updates launch the normal installer window after the agent exits.
 CloseApplications=no
 RestartApplications=no
 OutputDir=output
