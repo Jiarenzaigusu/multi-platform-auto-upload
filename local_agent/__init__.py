@@ -1,3 +1,3 @@
 """Local browser execution agent for the MPAU control plane."""
 
-__version__ = "0.1.9"
+__version__ = "1.1.0"
