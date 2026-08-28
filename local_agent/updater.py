@@ -129,7 +129,7 @@ def launch_update(data_root: Path, installer_path: Path) -> subprocess.Popen:
                 str(installer),
                 "/NORESTART",
                 "/CLOSEAPPLICATIONS",
-                f'/LOG="{update_directory / INSTALLER_LOG_NAME}"',
+                f"/LOG={update_directory / INSTALLER_LOG_NAME}",
             ],
             close_fds=True,
             stdin=subprocess.DEVNULL,

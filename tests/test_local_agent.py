@@ -1080,20 +1080,29 @@ class UpdaterTests(unittest.TestCase):
             def poll(self):
                 return None
 
-        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
-            updater.sys, "frozen", True, create=True
-        ), patch.object(
-            updater.subprocess, "Popen", return_value=FakeProcess()
-        ) as popen, patch.object(updater.time, "sleep"):
-            installer = Path(temp_dir) / "update" / "MPAU-Agent-Setup-0.4.0.exe"
-            installer.parent.mkdir()
-            installer.write_bytes(b"installer")
-            updater.launch_update(Path(temp_dir), installer)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_root = Path(temp_dir) / "directory with spaces"
+            with patch.object(
+                updater.sys, "frozen", True, create=True
+            ), patch.object(
+                updater.subprocess, "Popen", return_value=FakeProcess()
+            ) as popen, patch.object(updater.time, "sleep"):
+                installer = (
+                    data_root / "update" / "MPAU-Agent-Setup-0.4.0.exe"
+                )
+                installer.parent.mkdir(parents=True)
+                installer.write_bytes(b"installer")
+                updater.launch_update(data_root, installer)
 
         command = popen.call_args.args[0]
         self.assertEqual(command[0], str(installer.resolve()))
         self.assertIn("/CLOSEAPPLICATIONS", command)
-        self.assertTrue(any(argument.startswith("/LOG=") for argument in command))
+        log_arguments = [argument for argument in command if argument.startswith("/LOG=")]
+        self.assertEqual(
+            log_arguments,
+            [f"/LOG={installer.parent.resolve() / updater.INSTALLER_LOG_NAME}"],
+        )
+        self.assertNotIn('"', log_arguments[0])
         self.assertNotIn("powershell.exe", command)
         self.assertNotIn("/VERYSILENT", command)
         self.assertNotIn("/SUPPRESSMSGBOXES", command)
