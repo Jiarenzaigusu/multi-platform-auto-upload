@@ -50,24 +50,6 @@ def _show_fatal_error(message: str) -> None:
         return
 
 
-def _show_update_failure(message: str) -> None:
-    try:
-        import tkinter as tk
-        from tkinter import messagebox
-    except Exception:
-        print(message, file=sys.stderr)
-        return
-
-    try:
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showwarning("MPAU 本地执行助手更新失败", message)
-        root.destroy()
-    except Exception:
-        print(message, file=sys.stderr)
-        return
-
-
 def _log_and_show_unhandled_exception(exc_type, exc, tb) -> None:
     if issubclass(exc_type, KeyboardInterrupt):
         return sys.__excepthook__(exc_type, exc, tb)
@@ -421,10 +403,7 @@ def _tray_image():
 
 
 def _revoke_pairing(application: LocalAgentApplication, store: AgentConnectionStore) -> None:
-    """撤销本机与服务器的配对：通知服务器、清除本地状态、关闭开机自启。
-
-    网络失败不影响本地清理，与托盘菜单的“解除配对并退出”行为保持一致。
-    """
+    """撤销本机与服务器的配对并清除本地连接状态。"""
     try:
         application.client.revoke_device(application.agent_id)
     except AgentApiError:
@@ -441,17 +420,17 @@ def _run_tray(
     data_root: Path,
     *,
     show_status_on_start: bool = False,
-) -> Path | None:
+) -> str:
     try:
         import pystray
     except Exception as exc:
-        logger.warning("托盘组件加载失败，切换到状态窗口：{}", exc)
+        logger.exception("托盘组件加载失败，切换到状态窗口：{}", exc)
         return _run_status_window(application, connection, data_root, store)
 
     updater_state = AgentUpdater(application, data_root)
-    pending: list[Path | None] = []
     status_window_lock = threading.Lock()
     status_window_open = False
+    tray_outcome = "quit"
 
     def open_console(_icon=None, _item=None) -> None:
         open_url(connection.server_url)
@@ -472,8 +451,11 @@ def _run_tray(
         icon.stop()
 
     def disconnect(icon, _item=None) -> None:
+        nonlocal tray_outcome
         _revoke_pairing(application, store)
-        quit_agent(icon)
+        tray_outcome = "re-pair"
+        application.stop()
+        icon.stop()
 
     def open_status_window(
         _icon=None, _item=None, *, auto_install: bool = False
@@ -486,9 +468,9 @@ def _run_tray(
             status_window_open = True
 
         def worker() -> None:
-            nonlocal status_window_open
+            nonlocal status_window_open, tray_outcome
             try:
-                installer = _run_status_window(
+                window_outcome = _run_status_window(
                     application,
                     connection,
                     data_root,
@@ -497,14 +479,10 @@ def _run_tray(
                     stop_on_close=False,
                     start_update_checks=False,
                     auto_install_on_open=auto_install,
-                    on_install_started=lambda: (
-                        application.stop(),
-                        icon.stop(),
-                    ),
                 )
-                if installer is not None:
-                    pending.append(installer)
-                    application.stop()
+                if window_outcome == "re-pair":
+                    tray_outcome = "re-pair"
+                if application.stopping:
                     icon.stop()
             finally:
                 with status_window_lock:
@@ -563,7 +541,7 @@ def _run_tray(
             install_update,
         ),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("解除配对并退出", disconnect),
+        pystray.MenuItem("解除配对", disconnect),
         pystray.MenuItem("退出助手", quit_agent),
     )
     icon = pystray.Icon(
@@ -591,7 +569,7 @@ def _run_tray(
             open_status_window()
 
     icon.run(setup=setup)
-    return pending[0] if pending else updater_state.pending_installer
+    return tray_outcome
 
 
 def _run_status_window(
@@ -604,15 +582,14 @@ def _run_status_window(
     stop_on_close: bool = True,
     start_update_checks: bool = True,
     auto_install_on_open: bool = False,
-    on_install_started=None,
-) -> Path | None:
+) -> str:
     import tkinter as tk
     from tkinter import messagebox, ttk
 
     updater_state = updater_state or AgentUpdater(application, data_root)
-    pending: list[Path | None] = []
     ui_queue: queue.Queue[tuple[str, object]] = queue.Queue()
     closing = False
+    outcome = "closed"
     checking = False
     progress_indeterminate = False
 
@@ -717,7 +694,6 @@ def _run_status_window(
     update_banner_visible = False
     update_status = tk.StringVar(value="有新版本时会在这里提示，也可手动检查")
     progress_label = tk.StringVar(value="")
-    installer_started = False
 
     progress_bar = ttk.Progressbar(
         update_inner,
@@ -820,7 +796,7 @@ def _run_status_window(
                 progress_bar.configure(mode="determinate", value=100)
                 progress_label.set("下载进度 100% · 安装包已校验")
                 update_status.set("更新已下载完成，准备打开安装窗口")
-                confirm_and_restart()
+                confirm_and_install()
             elif kind == "show-window":
                 try:
                     root.deiconify()
@@ -831,6 +807,10 @@ def _run_status_window(
                 except Exception:
                     pass
             elif kind == "application-stopped":
+                closing = True
+                root.destroy()
+                return
+            elif kind == "re-pair":
                 closing = True
                 root.destroy()
                 return
@@ -854,15 +834,14 @@ def _run_status_window(
 
         threading.Thread(target=worker, name="mpau-update-check", daemon=True).start()
 
-    def confirm_and_restart() -> None:
-        nonlocal installer_started
+    def confirm_and_install() -> None:
         installer = updater_state.pending_installer
         if installer is None:
             update_status.set("安装包状态异常，请重新检查更新")
             return
         if not messagebox.askyesno(
             "更新已就绪",
-            "新版本已下载完成。是否立即重启助手并打开安装窗口？",
+            "新版本已下载完成。是否立即打开安装向导并退出旧助手？",
         ):
             update_status.set("已下载，可稍后点击“安装新版本”打开安装窗口")
             return
@@ -870,15 +849,11 @@ def _run_status_window(
         try:
             updater.launch_update(data_root, installer)
         except Exception as exc:
-            update_status.set(f"启动安装失败：{exc}")
+            message = f"启动安装失败：{exc}"
+            update_status.set(message)
+            messagebox.showerror("无法打开更新安装程序", message)
             return
         updater_state.pending_installer = None
-        installer_started = True
-        if on_install_started is not None:
-            try:
-                on_install_started()
-            except Exception:
-                logger.exception("停止助手托盘以安装更新失败")
         close(for_install=True)
 
     def install_updates() -> None:
@@ -889,7 +864,7 @@ def _run_status_window(
             update_status.set("有发布任务正在执行，请等待任务完成后再更新")
             return
         if updater_state.pending_installer is not None:
-            confirm_and_restart()
+            confirm_and_install()
             return
         if updater_state.release is None:
             check_updates(auto_install=True)
@@ -930,31 +905,49 @@ def _run_status_window(
     )
     update_status_label.pack(fill="x", pady=(12, 0))
 
-    def disconnect_and_exit() -> None:
+    def disconnect_and_reconfigure() -> None:
+        nonlocal outcome
         if not messagebox.askyesno(
             "解除配对",
-            "确定要解除本机与服务器的配对并退出助手吗？\n此操作会清除本地配对信息，且无法撤销。",
+            "确定要解除本机与服务器的配对并重新配置吗？\n助手将返回最开始的配置界面，后台进程不会退出。",
         ):
             return
 
         def worker() -> None:
+            nonlocal outcome
             _revoke_pairing(application, store)
+            outcome = "re-pair"
             application.stop()
-            enqueue("application-stopped")
+            enqueue("re-pair")
 
-        threading.Thread(target=worker, name="mpau-disconnect", daemon=True).start()
+        threading.Thread(target=worker, name="mpau-reconfigure", daemon=True).start()
+
+    def quit_from_window() -> None:
+        if not messagebox.askyesno(
+            "退出助手",
+            "确定要退出本地执行助手吗？\n退出后任务栏托盘也会同步关闭。",
+        ):
+            return
+        application.stop()
+        application.disconnect()
+        enqueue("application-stopped")
 
     account_actions = tk.Frame(body, bg=theme.CREAM)
     account_actions.pack(fill="x", pady=(16, 0))
     theme.danger_button(
         account_actions,
-        "解除配对并退出",
-        disconnect_and_exit,
+        "解除配对",
+        disconnect_and_reconfigure,
         side="left",
     )
+    theme.secondary_button(
+        account_actions,
+        "退出助手",
+        quit_from_window,
+    ).pack(side="left", padx=(10, 0))
 
     close_note = (
-        "关闭窗口不会退出助手；需要退出请右键托盘图标选择“退出助手”"
+        "关闭窗口不会退出助手；需要退出请点击“退出助手”或右键托盘图标"
         if not stop_on_close
         else "关闭窗口将退出本地执行助手"
     )
@@ -998,7 +991,7 @@ def _run_status_window(
     except Exception:
         pass
     root.mainloop()
-    return None if installer_started else (pending[0] if pending else None)
+    return outcome
 
 def _connect_with_status_window(
     application: LocalAgentApplication, *, start_hidden: bool = False
@@ -1174,13 +1167,6 @@ def run() -> None:
     if not _acquire_single_instance():
         return
     store = AgentConnectionStore(args.data_dir)
-    update_failure = updater.consume_update_failure(args.data_dir)
-    if update_failure:
-        _show_update_failure(
-            f"{update_failure}\n\n"
-            f"请手动下载安装最新版，或查看更新日志："
-            f"{args.data_dir / updater.UPDATE_DIRECTORY_NAME / 'update.log'}"
-        )
     try:
         connection = store.load()
     except ValueError:
@@ -1216,7 +1202,7 @@ def run() -> None:
             daemon=True,
         )
         worker.start()
-        pending_installer = _run_tray(
+        tray_outcome = _run_tray(
             application,
             connection,
             store,
@@ -1226,9 +1212,9 @@ def run() -> None:
         application.stop()
         application.disconnect()
         worker.join(timeout=15)
-        if pending_installer is not None:
-            updater.launch_update(args.data_dir, pending_installer)
-            return
+        if tray_outcome == "re-pair":
+            connection = _pairing_dialog(store, args.data_dir)
+            continue
         if not application.authorization_failed:
             return
 

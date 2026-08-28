@@ -11,8 +11,10 @@ hiddenimports = (
     + collect_submodules("uploader")
     + collect_submodules("utils")
     + collect_submodules("patchright")
-    + collect_submodules("pystray._win32")
     + [
+        # pystray selects its Windows backend dynamically, so PyInstaller
+        # cannot discover this module from normal static imports.
+        "pystray._win32",
         "webapp.ai_copy.contracts",
         "webapp.ai_copy.errors",
         "webapp.ai_copy.product_lookup.cache",

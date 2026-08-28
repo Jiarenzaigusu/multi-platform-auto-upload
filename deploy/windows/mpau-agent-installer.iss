@@ -18,8 +18,8 @@ DefaultDirName={localappdata}\Programs\MPAU-Agent
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
-; Self-updates launch the normal installer window after the agent exits.
-CloseApplications=no
+; The normal wizard closes the old helper before replacing its program files.
+CloseApplications=yes
 RestartApplications=no
 OutputDir=output
 OutputBaseFilename=MPAU-Agent-Setup

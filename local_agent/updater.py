@@ -1,37 +1,24 @@
 """Self-update support for the frozen Windows desktop agent.
 
 The agent checks the control plane for a newer installer, downloads it with
-SHA-256 verification, and then starts a detached PowerShell updater. The
-external script waits for the old agent process to exit, runs the Inno Setup
-installer with its normal progress window, and relaunches the agent.
+SHA-256 verification, and opens the normal Inno Setup wizard.
 """
 
 from __future__ import annotations
 
-import hashlib
-import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
 from local_agent.client import AgentApiClient, AgentApiError
 
 UPDATE_DIRECTORY_NAME = "update"
-UPDATE_FAILURE_MARKER = "update.failed.txt"
-PROCESS_NAME = "MPAU-Agent.exe"
+INSTALLER_LOG_NAME = "installer.log"
 _VERSION_PATTERN = re.compile(r"^\d+(\.\d+)*$")
-_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-_DETACHED_FLAGS = (
-    (
-        getattr(subprocess, "DETACHED_PROCESS", 0)
-        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        | _CREATE_NO_WINDOW
-    )
-    if os.name == "nt"
-    else 0
-)
+INSTALLER_STARTUP_CHECK_SECONDS = 0.8
 
 
 def parse_version(value: str) -> tuple[int, ...] | None:
@@ -92,14 +79,6 @@ def fetch_latest_release(
     return release
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def download_release(
     client: AgentApiClient,
     release: dict[str, Any],
@@ -135,181 +114,37 @@ def cleanup_stale_installers(data_root: Path, keep: Path | None = None) -> None:
             pass
 
 
-def consume_update_failure(data_root: Path) -> str | None:
-    """Return and remove the most recent failed-update marker, if any."""
-    marker = data_root / UPDATE_DIRECTORY_NAME / UPDATE_FAILURE_MARKER
-    try:
-        message = marker.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return None
-    except OSError:
-        return None
-    try:
-        marker.unlink()
-    except OSError:
-        pass
-    return message or None
-
-
-def _update_script() -> str:
-    """Return the external updater script used after the agent exits.
-
-    The script intentionally runs under PowerShell rather than under
-    ``MPAU-Agent.exe``. Windows keeps an executing EXE locked, so a helper
-    launched from that EXE cannot reliably replace the installed program.
-    """
-    return r'''param(
-    [Parameter(Mandatory = $true)][string]$InstallerPath,
-    [Parameter(Mandatory = $true)][string]$InstallDir,
-    [Parameter(Mandatory = $true)][string]$AgentExe,
-    [Parameter(Mandatory = $true)][int]$ParentPid
-)
-
-$ErrorActionPreference = "Stop"
-$LogPath = Join-Path $PSScriptRoot "update.log"
-$FailurePath = Join-Path $PSScriptRoot "update.failed.txt"
-$AgentProcessName = [System.IO.Path]::GetFileNameWithoutExtension($AgentExe)
-
-function Write-UpdateLog([string]$Message) {
-    Add-Content -LiteralPath $LogPath -Value ("{0:u} {1}" -f (Get-Date), $Message)
-}
-
-function Write-UpdateFailure([string]$Message) {
-    try {
-        Set-Content -LiteralPath $FailurePath -Value $Message -Encoding UTF8
-    }
-    catch {
-        # Best-effort only; the log still records the failure details.
-    }
-}
-
-function Get-ProcessDirectory($Process) {
-    try {
-        $processPath = $Process.Path
-        if ([string]::IsNullOrWhiteSpace($processPath)) {
-            return $null
-        }
-        return [System.IO.Path]::GetDirectoryName($processPath)
-    }
-    catch {
-        return $null
-    }
-}
-
-function Get-RunningAgentProcesses() {
-    @(Get-Process -Name $AgentProcessName -ErrorAction SilentlyContinue | Where-Object {
-        if ($_.Id -eq $PID -or $_.Id -eq $ParentPid) {
-            $false
-        }
-        else {
-            $processDir = Get-ProcessDirectory $_
-            [string]::IsNullOrWhiteSpace($processDir) -or $processDir -ieq $InstallDir
-        }
-    })
-}
-
-try {
-    Write-UpdateLog "Waiting for agent process $ParentPid to exit."
-    $deadline = (Get-Date).AddMinutes(3)
-    while ((Get-Date) -lt $deadline -and (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue)) {
-        Start-Sleep -Seconds 1
-    }
-    if (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) {
-        throw "The previous agent process did not exit in time."
-    }
-
-    $runningAgents = Get-RunningAgentProcesses
-    if ($runningAgents.Count -gt 0) {
-        Write-UpdateLog ("Waiting for installed agent processes to exit: " + (($runningAgents | ForEach-Object { "{0}:{1}" -f $_.Id, (Get-ProcessDirectory $_) }) -join ", "))
-    }
-    $deadline = (Get-Date).AddMinutes(3)
-    while ($runningAgents.Count -gt 0 -and (Get-Date) -lt $deadline) {
-        Start-Sleep -Seconds 1
-        $runningAgents = Get-RunningAgentProcesses
-    }
-    if ($runningAgents.Count -gt 0) {
-        throw ("The installed agent process is still running: " + (($runningAgents | ForEach-Object { "{0}:{1}" -f $_.Id, (Get-ProcessDirectory $_) }) -join ", "))
-    }
-
-    if (-not (Test-Path -LiteralPath $InstallerPath -PathType Leaf)) {
-        throw "The downloaded installer is missing."
-    }
-    Write-UpdateLog "Installing update from $InstallerPath into $InstallDir."
-    $arguments = @(
-        "/NORESTART"
-        "/SP-"
-        ('/LOG="{0}"' -f (Join-Path $PSScriptRoot "installer.log"))
-        ('/DIR="{0}"' -f $InstallDir)
-    )
-    $installer = Start-Process -FilePath $InstallerPath -ArgumentList $arguments -Wait -PassThru
-    if ($installer.ExitCode -ne 0) {
-        throw "Installer exited with code $($installer.ExitCode)."
-    }
-    if (-not (Test-Path -LiteralPath $AgentExe -PathType Leaf)) {
-        throw "Updated agent executable was not found."
-    }
-    Write-UpdateLog "Starting updated agent."
-    Start-Process -FilePath $AgentExe -ArgumentList "--background" -WorkingDirectory $InstallDir
-    Write-UpdateLog "Update completed."
-}
-catch {
-    $failure = "更新失败：$($_.Exception.Message)"
-    Write-UpdateLog ("Update failed: " + $_.Exception.Message)
-    Write-UpdateFailure $failure
-    exit 1
-}
-'''
-
-
-def _write_update_script(data_root: Path) -> Path:
-    """Create the external updater script in the private agent data directory."""
-    directory = data_root / UPDATE_DIRECTORY_NAME
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    script_path = directory / "apply-update.ps1"
-    temporary_path = script_path.with_suffix(".tmp")
-    temporary_path.write_text(_update_script(), encoding="utf-8", newline="\r\n")
-    temporary_path.replace(script_path)
-    try:
-        script_path.chmod(0o600)
-    except OSError:
-        pass
-    return script_path
-
-
-def launch_update(data_root: Path, installer_path: Path) -> None:
-    """Start an external updater, then let the installed agent exit.
-
-    PowerShell waits for this process by PID before invoking Inno Setup. It is
-    not loaded from the install directory and therefore does not lock the EXE
-    being replaced.
-    """
+def launch_update(data_root: Path, installer_path: Path) -> subprocess.Popen:
+    """Open the visible installer and verify that its process stays running."""
     if not getattr(sys, "frozen", False):
         raise RuntimeError("自动更新仅支持已安装的 Windows 助手")
-    install_dir = Path(sys.executable).resolve().parent
-    script_path = _write_update_script(data_root)
-    subprocess.Popen(
-        [
-            "powershell.exe",
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(script_path),
-            "-InstallerPath",
-            str(installer_path),
-            "-InstallDir",
-            str(install_dir),
-            "-AgentExe",
-            str(install_dir / PROCESS_NAME),
-            "-ParentPid",
-            str(os.getpid()),
-        ],
-        creationflags=_DETACHED_FLAGS,
-        close_fds=True,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        cwd=str(data_root),
-    )
+    installer = installer_path.resolve()
+    update_directory = (data_root / UPDATE_DIRECTORY_NAME).resolve()
+    if installer.parent != update_directory or not installer.is_file():
+        raise RuntimeError("更新安装包不存在或位置无效，请重新下载")
+
+    try:
+        process = subprocess.Popen(
+            [
+                str(installer),
+                "/NORESTART",
+                "/CLOSEAPPLICATIONS",
+                f'/LOG="{update_directory / INSTALLER_LOG_NAME}"',
+            ],
+            close_fds=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd=str(update_directory),
+        )
+    except OSError as exc:
+        raise RuntimeError(f"无法打开更新安装程序：{exc}") from exc
+
+    # Do not terminate the helper until Windows has accepted and kept the
+    # visible installer process alive. Immediate startup failures stay visible
+    # in the helper window instead of leaving the user with no application.
+    time.sleep(INSTALLER_STARTUP_CHECK_SECONDS)
+    exit_code = process.poll()
+    if exit_code is not None:
+        raise RuntimeError(f"更新安装程序启动后立即退出（错误代码 {exit_code}）")
+    return process

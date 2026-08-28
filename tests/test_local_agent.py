@@ -365,6 +365,20 @@ class AgentAutostartTests(unittest.TestCase):
         )
         self.assertNotIn("unchecked", task_line.casefold())
 
+    def test_installer_closes_old_helper_and_offers_restart(self):
+        installer = (
+            Path(__file__).resolve().parents[1]
+            / "deploy"
+            / "windows"
+            / "mpau-agent-installer.iss"
+        ).read_text(encoding="utf-8")
+        self.assertIn("CloseApplications=yes", installer)
+        run_line = next(
+            line for line in installer.splitlines() if line.startswith("Filename: \"{app}")
+        )
+        self.assertIn("postinstall", run_line)
+        self.assertNotIn("runhidden", run_line)
+
     def test_double_click_start_keeps_tray_and_opens_status_window(self):
         connection = SimpleNamespace(
             server_url="http://10.31.108.221:8788",
@@ -403,8 +417,6 @@ class AgentAutostartTests(unittest.TestCase):
             desktop, "_acquire_single_instance", return_value=True
         ), patch.object(
             desktop, "AgentConnectionStore", return_value=store
-        ), patch.object(
-            desktop.updater, "consume_update_failure", return_value=None
         ), patch.object(
             desktop, "AgentApiClient", return_value=object()
         ), patch.object(
@@ -921,22 +933,30 @@ class UpdaterTests(unittest.TestCase):
         self.assertIsNone(normalize_release({**valid, "version": "latest"}))
         self.assertIsNone(normalize_release({**valid, "sha256": "xyz"}))
 
-    def test_external_update_script_waits_then_installs_and_restarts(self) -> None:
-        from local_agent.updater import _update_script
+    def test_update_installer_is_started_visible(self) -> None:
+        from local_agent import updater
 
-        script = _update_script()
-        self.assertIn("Get-Process -Id $ParentPid", script)
-        self.assertIn("function Get-RunningAgentProcesses()", script)
-        self.assertIn("Get-Process -Name $AgentProcessName", script)
-        self.assertIn("installed agent processes to exit", script)
-        self.assertIn("$processDir -ieq $InstallDir", script)
-        self.assertNotIn('"/VERYSILENT"', script)
-        self.assertNotIn('"/SUPPRESSMSGBOXES"', script)
-        self.assertIn('"/NORESTART"', script)
-        self.assertIn("Start-Process -FilePath $InstallerPath", script)
-        self.assertIn("-Wait -PassThru", script)
-        self.assertIn("update.failed.txt", script)
-        self.assertIn("Start-Process -FilePath $AgentExe", script)
+        class FakeProcess:
+            def poll(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            updater.sys, "frozen", True, create=True
+        ), patch.object(
+            updater.subprocess, "Popen", return_value=FakeProcess()
+        ) as popen, patch.object(updater.time, "sleep"):
+            installer = Path(temp_dir) / "update" / "MPAU-Agent-Setup-0.4.0.exe"
+            installer.parent.mkdir()
+            installer.write_bytes(b"installer")
+            updater.launch_update(Path(temp_dir), installer)
+
+        command = popen.call_args.args[0]
+        self.assertEqual(command[0], str(installer.resolve()))
+        self.assertIn("/CLOSEAPPLICATIONS", command)
+        self.assertTrue(any(argument.startswith("/LOG=") for argument in command))
+        self.assertNotIn("powershell.exe", command)
+        self.assertNotIn("/VERYSILENT", command)
+        self.assertNotIn("/SUPPRESSMSGBOXES", command)
 
     def test_download_installer_reports_total_size_to_progress_callback(self) -> None:
         class FakeResponse:
@@ -1008,24 +1028,23 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(json.loads(opener.request.data), {"agent_id": "b" * 32})
         self.assertEqual(opener.timeout, 3)
 
-    def test_launch_update_starts_powershell_outside_the_agent_executable(self) -> None:
+    def test_update_keeps_helper_open_when_installer_exits_immediately(self) -> None:
         from local_agent import updater
+
+        class FailedProcess:
+            def poll(self):
+                return 5
 
         with tempfile.TemporaryDirectory() as temp_dir, patch.object(
             updater.sys, "frozen", True, create=True
         ), patch.object(
-            updater.sys, "executable", str(Path(temp_dir) / "MPAU-Agent.exe")
-        ), patch.object(updater.subprocess, "Popen") as popen:
+            updater.subprocess, "Popen", return_value=FailedProcess()
+        ), patch.object(updater.time, "sleep"):
             installer = Path(temp_dir) / "update" / "MPAU-Agent-Setup-0.4.0.exe"
             installer.parent.mkdir()
             installer.write_bytes(b"installer")
-            updater.launch_update(Path(temp_dir), installer)
-
-        command = popen.call_args.args[0]
-        self.assertEqual(command[0], "powershell.exe")
-        self.assertIn("-File", command)
-        self.assertIn("-ParentPid", command)
-        self.assertNotIn("--apply-update", command)
+            with self.assertRaisesRegex(RuntimeError, "错误代码 5"):
+                updater.launch_update(Path(temp_dir), installer)
 
     def test_cleanup_stale_installers_keeps_current(self) -> None:
         from local_agent import updater
@@ -1042,20 +1061,6 @@ class UpdaterTests(unittest.TestCase):
             self.assertFalse(old.exists())
             self.assertFalse(extra.exists())
             self.assertTrue(keep.exists())
-
-    def test_update_failure_marker_is_consumed_and_cleared(self) -> None:
-        from local_agent import updater
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            marker = Path(temp_dir) / updater.UPDATE_DIRECTORY_NAME
-            marker.mkdir()
-            failure = marker / updater.UPDATE_FAILURE_MARKER
-            failure.write_text("更新失败：安装程序退出", encoding="utf-8")
-
-            message = updater.consume_update_failure(Path(temp_dir))
-
-            self.assertEqual(message, "更新失败：安装程序退出")
-            self.assertFalse(failure.exists())
 
 
 class InstallerManifestTests(unittest.TestCase):
