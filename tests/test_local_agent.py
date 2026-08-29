@@ -359,6 +359,10 @@ class AgentTaskManagerTests(unittest.TestCase):
 
 
 class AgentConnectionStoreTests(unittest.TestCase):
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "Windows 文件权限位语义与 POSIX 不同（chmod 只保留只读位），此断言仅在 macOS/Linux 上有效",
+    )
     def test_paired_connection_round_trip_and_clear(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = AgentConnectionStore(Path(temp_dir) / "agent")
@@ -763,11 +767,20 @@ class DesktopConnectionWindowTests(unittest.TestCase):
         self.assertEqual(outcome, "connected")
         self.assertTrue(root.withdrawn)
 
-    def test_expired_authorization_returns_to_pairing(self):
-        outcome, _root = self.run_connection(
-            lambda: (_ for _ in ()).throw(AgentApiError("授权失效", 401))
-        )
-        self.assertEqual(outcome, "unauthorized")
+    def test_expired_authorization_retries_with_stored_token(self):
+        # 401 不再直接踢回配对：网关重启/令牌刷新时会短暂拒绝本机令牌，
+        # 必须像其他瞬时失败一样用已保存的配对重试，第二次成功即连上。
+        attempts = 0
+
+        def connect():
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise AgentApiError("授权失效", 401)
+
+        outcome, _root = self.run_connection(connect)
+        self.assertEqual(outcome, "connected")
+        self.assertEqual(attempts, 2)
 
     def test_three_connection_failures_can_clear_pairing(self):
         attempts = 0
@@ -882,10 +895,19 @@ class LocalAgentApplicationTests(unittest.TestCase):
         self.assertEqual(runner.received, (b"video", b"cover"))
         self.assertEqual(client.completed["status"], "succeeded")
 
-    def test_unauthorized_device_stops_and_requests_pairing(self):
+    def test_unauthorized_claim_keeps_agent_running(self):
+        # 执行途中 claim 收到 401（云端租约被回收、网关重启等）不再让代理
+        # 退出，也不清配对；代理继续用已保存的令牌轮询，直到用户手动停止。
         class UnauthorizedClient:
+            def __init__(self):
+                self.claims = 0
+
             def claim(self, _agent_id, *, wait_seconds=0):
+                self.claims += 1
                 raise AgentApiError("设备授权已失效", 401)
+
+            def connect(self, _hello):
+                raise AgentApiError("重新连接失败（HTTP 502）", 502)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             application = LocalAgentApplication(
@@ -893,10 +915,21 @@ class LocalAgentApplicationTests(unittest.TestCase):
                 data_root=Path(temp_dir) / "agent",
                 poll_seconds=1,
             )
-            application.run(already_connected=True)
-
-        self.assertTrue(application.stopping)
-        self.assertTrue(application.authorization_failed)
+            application._sleep_or_stop = lambda seconds: None  # keep the test fast
+            thread = threading.Thread(
+                target=application.run, kwargs={"already_connected": True}
+            )
+            thread.start()
+            try:
+                time.sleep(1.0)
+                self.assertFalse(application.stopping)
+                self.assertFalse(application.authorization_failed)
+                self.assertTrue(thread.is_alive())
+                self.assertGreaterEqual(application.client.claims, 2)
+            finally:
+                application.stop()
+                thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
 
     def test_transient_heartbeat_failure_does_not_cancel_browser_task(self):
         class Client:

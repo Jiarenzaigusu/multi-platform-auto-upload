@@ -459,9 +459,7 @@ def create_agent_router(
         manager = remote_manager(request)
         agent_id = bound_agent_id(request, payload.agent_id)
         try:
-            # Cap legacy clients that still request the former 25-second poll;
-            # this keeps the presence lease bounded without rejecting them.
-            job = await manager.wait_for_claimable_job(agent_id, min(wait_seconds, 10))
+            job = await manager.wait_for_claimable_job(agent_id, wait_seconds)
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {

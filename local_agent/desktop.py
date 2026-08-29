@@ -108,6 +108,44 @@ def _notify_existing_instance() -> None:
         pass
 
 
+def _relaunch_after_pairing(args) -> bool:
+    """Restart the agent so a freshly paired connection is consumed by a
+    cold-start process.
+
+    A pairing just revoked every older device token on the server, cleared the
+    online agent table, and the current process may still carry leftover local
+    state (upload port, runner, browser sessions) from the previous session.
+    A relaunched instance loads the stored connection from disk instead — the
+    exact same code path as a normal second launch, which is the healthy one.
+    """
+    logger.info("配对完成，正在重启助手，以已保存的配对自动连接")
+    global _WINDOWS_MUTEX
+    if _WINDOWS_MUTEX is not None:
+        try:
+            import ctypes
+
+            ctypes.windll.kernel32.CloseHandle(_WINDOWS_MUTEX)
+        except Exception:
+            pass
+        _WINDOWS_MUTEX = None
+    command = [sys.executable]
+    if not getattr(sys, "frozen", False):
+        # 开发模式（源码直接运行）下需要入口模块，否则裸 python.exe 不会启动助手
+        command += ["-m", "local_agent.desktop"]
+    data_dir = getattr(args, "data_dir", None)
+    if data_dir is not None:
+        command += ["--data-dir", str(data_dir)]
+    cwd = str(Path(sys.executable).parent) if getattr(sys, "frozen", False) else None
+    try:
+        import subprocess
+
+        subprocess.Popen(command, close_fds=True, cwd=cwd)
+    except OSError as exc:
+        logger.error("重启助手失败，将继续在当前进程连接：{}", exc)
+        return False
+    return True
+
+
 def _start_wake_listener(
     application: LocalAgentApplication, on_wake
 ) -> Callable[[], None]:
@@ -589,9 +627,11 @@ def _run_tray(
     stop_wake_listener = lambda: None
 
     def watch_application() -> None:
+        # 托盘循环只在用户主动退出（application.stop()）时结束。授权、心跳、
+        # 网络等异常不再自动关掉托盘图标，避免助手在任务执行中“自己消失”。
         while not application.stopping:
             time.sleep(0.5)
-        if application.authorization_failed and icon is not None:
+        if icon is not None:
             icon.stop()
 
     def setup(_icon) -> None:
@@ -1137,9 +1177,9 @@ def _connect_with_status_window(
             try:
                 application.connect()
             except AgentApiError as exc:
-                if exc.status == 401:
-                    ui_queue.put(("unauthorized", str(exc)))
-                    return
+                # 401 也走统一重试：网关重启、令牌刷新或租约被临时回收时都会
+                # 短暂拒绝本机令牌，重试就能恢复。只有在连续失败达到阈值后，
+                # 才由用户自己决定是否解除配对，不再自动清掉配对。
                 ui_queue.put(("retry", str(exc)))
                 return
             except Exception as exc:
@@ -1257,10 +1297,17 @@ def run() -> None:
     except ValueError:
         store.clear()
         connection = None
+    freshly_paired = False
     if connection is None:
         connection = _pairing_dialog(store, args.data_dir)
+        freshly_paired = connection is not None
     if connection is None:
         logger.info("助手退出：未完成配对")
+        return
+    # 刚完成配对就重启进程：让新实例以“已保存配对”冷启动，与用户第二次
+    # 双击打开完全一致，从根上规避“配对后立即连接”的云端/本地残留竞态。
+    # 已保存连接（双击启动）不触发，避免无限重启循环。
+    if freshly_paired and _relaunch_after_pairing(args):
         return
 
     while connection is not None:
@@ -1285,6 +1332,10 @@ def run() -> None:
                 args.data_dir,
                 initial_server="" if connect_outcome == "re-pair" else previous_server,
             )
+            # 重新配对成功同样走冷启动重启，与第二次双击连接保持一致，
+            # 避免在同一进程内带着旧会话状态重新连接。
+            if connection is not None and _relaunch_after_pairing(args):
+                return
             continue
 
         worker = threading.Thread(
@@ -1306,34 +1357,29 @@ def run() -> None:
             show_status_on_start=not args.background,
         )
 
-        application.stop()
-        application.disconnect()
-        if worker.is_alive():
-            worker.join(timeout=15)
-
         if tray_outcome == "tray-failed":
-            # 托盘起不来也不能终止进程：worker 仍在领取并执行任务，
-            # 此时退出会让正在执行的任务被服务端当作失联回收。
+            # 托盘起不来绝不能终止进程：worker 仍在领取并执行任务，此时停止
+            # 代理会让在跑的任务被服务端当作失联回收。这里不调用 stop()，
+            # 让代理以无界面方式一直后台运行。
             logger.error("Windows 托盘组件失败，代理保持后台运行以保证任务不中断")
             if worker.is_alive():
                 worker.join()
             return
+
+        # 只有走到这里才允许停止代理：托盘菜单或助手窗口里的“退出助手”，
+        # 以及用户主动“解除配对”。其余任何异常都不再让助手自动退出。
+        application.stop()
+        application.disconnect()
+        if worker.is_alive():
+            worker.join(timeout=15)
 
         if tray_outcome == "re-pair":
             logger.info("助手退出：解除配对，重新进入配置")
             connection = _pairing_dialog(store, args.data_dir)
             continue
 
-        if not application.authorization_failed:
-            logger.info("助手退出：用户主动退出")
-            return
-
-        logger.warning("助手退出：设备授权失效，重新进入配对")
-        previous_server = connection.server_url
-        store.clear()
-        connection = _pairing_dialog(
-            store, args.data_dir, initial_server=previous_server
-        )
+        logger.info("助手退出：用户主动退出")
+        return
 
 
 if __name__ == "__main__":

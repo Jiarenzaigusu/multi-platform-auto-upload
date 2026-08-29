@@ -217,6 +217,31 @@ class LocalAgentApplication:
         )
         _agent_log("发布任务将在这台电脑上启动 Microsoft Edge。按 Ctrl+C 停止代理。")
 
+    def _sleep_or_stop(self, seconds: float) -> None:
+        """Sleep in small slices so a manual quit still exits promptly."""
+        deadline = time.monotonic() + max(0.0, seconds)
+        while not self.stopping and time.monotonic() < deadline:
+            time.sleep(min(0.5, deadline - time.monotonic()))
+
+    def _reconnect_or_wait(self) -> None:
+        """Re-handshake with the locally stored pairing, backing off on failure.
+
+        This helper must never raise and must never set ``stopping``. The agent
+        process is only allowed to exit when the user asks for it from the tray
+        menu or the status window, so every transient failure has to be
+        recoverable in place instead of tearing the process down.
+        """
+        try:
+            self.client.connect(self.hello)
+        except AgentApiError as exc:
+            _agent_log(f"重新连接失败：{exc}，5 秒后重试", error=True)
+        except Exception as exc:
+            _agent_log(f"重新连接异常：{exc}，5 秒后重试", error=True)
+        else:
+            _agent_log("已重新连接商家发布台")
+            return
+        self._sleep_or_stop(5)
+
     def run(self, *, already_connected: bool = False) -> None:
         if not already_connected:
             self.connect()
@@ -229,38 +254,30 @@ class LocalAgentApplication:
                     break
                 if job is None:
                     if self.claim_wait_seconds <= 0:
-                        time.sleep(self.poll_seconds)
+                        self._sleep_or_stop(self.poll_seconds)
                     continue
                 self.execute(job)
             except AgentApiError as exc:
+                if self.stopping:
+                    break
                 if exc.status == 401:
-                    self.authorization_failed = True
-                    self.stopping = True
-                    _agent_log("设备授权已失效，需要重新配对本地执行助手", error=True)
-                    break
-                if self.stopping:
-                    break
-                _agent_log(f"代理连接异常：{exc}，5 秒后重试", error=True)
-                time.sleep(5)
-                if self.stopping:
-                    break
-                try:
-                    self.client.connect(self.hello)
-                except AgentApiError:
-                    continue
+                    # 发布台会因为租约被回收、网关重启或令牌刷新而临时拒绝本机
+                    # 令牌，用本地已保存的配对重新握手即可恢复。这里绝不能让代理
+                    # 退出：只有用户手动点击“退出助手”时才允许停止。
+                    _agent_log(
+                        "发布台暂时拒绝了本机令牌，正在用已保存的配对重新连接",
+                        error=True,
+                    )
+                else:
+                    _agent_log(f"代理连接异常：{exc}，5 秒后重试", error=True)
+                self._reconnect_or_wait()
+            except KeyboardInterrupt:
+                self.stopping = True
             except Exception as exc:
                 if self.stopping:
                     break
                 _agent_log(f"本地助手运行异常：{exc}，5 秒后重试", error=True)
-                time.sleep(5)
-                if self.stopping:
-                    break
-                try:
-                    self.client.connect(self.hello)
-                except AgentApiError:
-                    continue
-            except KeyboardInterrupt:
-                self.stopping = True
+                self._reconnect_or_wait()
         if self.runner is not None:
             self.runner.shutdown()
         if self.local_upload_server is not None:
@@ -289,12 +306,16 @@ class LocalAgentApplication:
             try:
                 heartbeat = self.client.heartbeat(job_id, self.agent_id)
             except AgentApiError as exc:
-                elapsed = time.monotonic() - heartbeat_state["last_success"]
+                # 只有任务在云端已经不存在（401/403/404/409）才放弃本地执行。
+                # 5xx、超时、断网这类抖动一律继续重试：不能因为网络卡了几秒
+                # 就把正在上传的浏览器任务杀掉，那样只会把任务变成失败。
                 terminal_error = exc.status in {401, 403, 404, 409}
-                if terminal_error or elapsed >= self.lease_seconds - 5:
+                if terminal_error:
                     raise AgentLeaseLostError(f"云端心跳租约失效：{exc}") from exc
+                elapsed = time.monotonic() - heartbeat_state["last_success"]
                 _agent_log(
-                    f"云端心跳暂时失败：{exc}，将在租约有效期内继续重试",
+                    f"云端心跳暂时失败：{exc}（已持续 {elapsed:.0f} 秒），"
+                    f"本地任务继续执行，稍后重试",
                     error=True,
                 )
                 return None
