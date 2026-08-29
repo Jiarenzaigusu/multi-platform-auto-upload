@@ -30,6 +30,10 @@ _WAKE_TOKEN = "show"
 UPDATE_CHECK_INTERVAL_SECONDS = 6 * 60 * 60
 UPDATE_CHECK_DELAY_SECONDS = 90
 CONNECTION_FAILURES_BEFORE_REPAIR = 3
+# 通知区域（Explorer 托盘）在刚安装完、刚开机或 Explorer 重启后可能还没就绪，
+# 此时 Shell_NotifyIcon 会静默失败。给图标显示留出重试窗口，避免首跑丢图标。
+TRAY_ICON_ATTEMPTS = 5
+TRAY_ICON_RETRY_DELAY_SECONDS = 2.0
 
 
 def _show_fatal_error(message: str) -> None:
@@ -384,6 +388,44 @@ def _start_background_update_checks(
     threading.Thread(target=worker, name="mpau-agent-update-check", daemon=True).start()
 
 
+def _show_icon_with_retry(icon) -> None:
+    """Add the notification icon, retrying while the taskbar is still coming up.
+
+    Shell_NotifyIcon reports failure only through its return value, which
+    pystray discards, so a taskbar that is not ready yet makes the icon vanish
+    without any exception. pystray re-adds it on WM_TASKBARCREATED, but that
+    message never arrives when Explorer is already up and simply rejected us,
+    which is the common case right after a fresh install.
+
+    Toggling ``visible`` off first defeats pystray's same-value short circuit
+    so every attempt really re-issues NIM_ADD.
+    """
+    last_error: Exception | None = None
+    for attempt in range(1, TRAY_ICON_ATTEMPTS + 1):
+        try:
+            if icon.visible:
+                icon.visible = False
+            icon.visible = True
+        except Exception as exc:
+            last_error = exc
+        else:
+            if icon.visible:
+                logger.info("Windows 托盘图标已显示（第 {} 次尝试）", attempt)
+                return
+            last_error = RuntimeError("托盘后端没有确认图标可见")
+        logger.warning(
+            "托盘图标第 {}/{} 次显示失败，{} 秒后重试",
+            attempt,
+            TRAY_ICON_ATTEMPTS,
+            TRAY_ICON_RETRY_DELAY_SECONDS,
+        )
+        if attempt < TRAY_ICON_ATTEMPTS:
+            time.sleep(TRAY_ICON_RETRY_DELAY_SECONDS)
+    raise RuntimeError(
+        f"托盘图标连续 {TRAY_ICON_ATTEMPTS} 次未能显示"
+    ) from last_error
+
+
 def _tray_image():
     from PIL import Image, ImageDraw
 
@@ -420,7 +462,6 @@ def _run_tray(
     data_root: Path,
     *,
     show_status_on_start: bool = False,
-    on_ready: Callable[[], None] | None = None,
 ) -> str:
     try:
         previous_backend = os.environ.get("PYSTRAY_BACKEND")
@@ -431,11 +472,13 @@ def _run_tray(
                 f"加载了错误的托盘后端：{pystray.Icon.__module__ or 'unknown'}"
             )
     except Exception as exc:
-        message = "Windows 托盘组件加载失败，助手不会继续后台运行。请重新安装完整版本。"
+        # 托盘组件加载失败只影响界面，代理线程仍在运行，此时不该停止代理。
+        message = (
+            "Windows 托盘组件加载失败，助手界面不可用，但后台任务仍会继续执行。"
+            "请重新安装完整版本以恢复托盘图标。"
+        )
         logger.exception("{}：{}", message, exc)
         _show_fatal_error(message)
-        application.stop()
-        application.disconnect()
         return "tray-failed"
     finally:
         if previous_backend is None:
@@ -555,18 +598,14 @@ def _run_tray(
         # pystray only makes the icon visible automatically when no custom
         # setup callback is supplied.
         try:
-            _icon.visible = True
-            if not _icon.visible:
-                raise RuntimeError("托盘后端没有确认图标可见")
-            logger.info("Windows 托盘图标已创建并显示")
-            if on_ready is not None:
-                on_ready()
+            _show_icon_with_retry(_icon)
             _start_background_update_checks(updater_state, notify=notify)
         except Exception as exc:
-            message = f"Windows 托盘图标显示失败，助手无法继续运行：{exc}"
+            # 托盘图标起不来只影响界面。代理线程在连接成功后就已独立启动，
+            # 这里绝不能停止代理，否则正在执行的任务会被服务端按租约回收。
+            message = f"Windows 托盘图标显示失败：{exc}"
             tray_failure.append(message)
             logger.exception("{}", message)
-            application.stop()
             _icon.stop()
             return
         if show_status_on_start:
@@ -1254,11 +1293,10 @@ def run() -> None:
             name="mpau-agent-worker",
             daemon=True,
         )
-        worker_started = threading.Event()
-
-        def start_worker_after_tray_ready() -> None:
-            worker.start()
-            worker_started.set()
+        # 代理线程必须独立于托盘启动。托盘只是界面，任何托盘或窗口环节的
+        # 异常都不应打断任务领取与心跳续约，否则服务端会按租约超时回收任务，
+        # 表现为"点执行任务后助手退出、前端报心跳租约失效"。
+        worker.start()
 
         tray_outcome = _run_tray(
             application,
@@ -1266,22 +1304,20 @@ def run() -> None:
             store,
             args.data_dir,
             show_status_on_start=not args.background,
-            on_ready=start_worker_after_tray_ready,
         )
-
-        if tray_outcome == "tray-failed":
-            logger.error("助手退出：Windows 托盘组件失败")
-            if worker_started.is_set():
-                # 托盘意外结束不应中断代理：保持主线程存活，让 worker 继续
-                # 领取/执行任务并续心跳，直到授权失效(401)或进程被手动结束。
-                logger.error("代理 worker 将继续后台运行（无托盘界面）")
-                worker.join()
-            return
 
         application.stop()
         application.disconnect()
-        if worker_started.is_set():
+        if worker.is_alive():
             worker.join(timeout=15)
+
+        if tray_outcome == "tray-failed":
+            # 托盘起不来也不能终止进程：worker 仍在领取并执行任务，
+            # 此时退出会让正在执行的任务被服务端当作失联回收。
+            logger.error("Windows 托盘组件失败，代理保持后台运行以保证任务不中断")
+            if worker.is_alive():
+                worker.join()
+            return
 
         if tray_outcome == "re-pair":
             logger.info("助手退出：解除配对，重新进入配置")

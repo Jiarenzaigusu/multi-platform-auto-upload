@@ -9,6 +9,11 @@ from urllib.parse import quote, urlencode
 from urllib.request import Request, build_opener
 
 
+# 心跳必须与业务请求分开限超时。默认 45 秒与云端租约同为 45 秒，
+# 一次慢心跳就能吃光整段租约，让服务端把健康任务判成失联。
+HEARTBEAT_TIMEOUT_SECONDS = 8.0
+
+
 class AgentApiError(RuntimeError):
     def __init__(self, message: str, status: int = 0) -> None:
         super().__init__(message)
@@ -99,6 +104,7 @@ class AgentApiClient:
             f"/api/agent/jobs/{quote(job_id)}/heartbeat",
             method="POST",
             payload={"agent_id": agent_id},
+            timeout=HEARTBEAT_TIMEOUT_SECONDS,
         )
 
     def authorize_local_upload(

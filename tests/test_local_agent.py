@@ -109,6 +109,47 @@ class AgentTaskManagerTests(unittest.TestCase):
             self.manager.job_log_path(job["id"]).read_text(encoding="utf-8"),
         )
 
+    def _drop_agent_as_offline(self) -> None:
+        """Push the agent past the offline threshold and run the reaper."""
+        self.manager._agents[AGENT_ID]["last_seen_monotonic"] = (
+            time.monotonic() - self.manager._offline_after_seconds() - 1
+        )
+        self.manager._drop_offline_agents_locked(time.monotonic())
+        self.assertNotIn(AGENT_ID, self.manager._agents, "代理应已被判定离线")
+
+    def test_dropped_agent_is_revived_on_heartbeat_instead_of_failing(self):
+        # 续约晚了（例如被长任务阻塞）会被判离线。此时带着有效设备令牌发来的
+        # 心跳应恢复在线，而不是报错让客户端取消任务。
+        job = self.manager.submit_account_task(
+            kind="login", platform="tmall", account="shop1", headed=True
+        )
+        self.connect()
+        self.assertEqual(self.manager.claim_next_job(AGENT_ID)["id"], job["id"])
+
+        self._drop_agent_as_offline()
+        heartbeat = self.manager.heartbeat(job["id"], AGENT_ID)
+
+        self.assertFalse(heartbeat["cancel_requested"])
+        self.assertIn(AGENT_ID, self.manager._agents)
+        self.assertEqual(
+            self.manager._agents[AGENT_ID]["device_name"],
+            "Operator-PC",
+            "恢复在线时应保留原设备信息",
+        )
+
+    def test_dropped_agent_is_revived_on_claim(self):
+        job = self.manager.submit_account_task(
+            kind="check", platform="tmall", account="shop1", headed=False
+        )
+        self.connect()
+        self._drop_agent_as_offline()
+
+        claimed = self.manager.claim_next_job(AGENT_ID)
+
+        self.assertIsNotNone(claimed)
+        self.assertEqual(claimed["id"], job["id"])
+        self.assertIn(AGENT_ID, self.manager._agents)
+
     def test_agent_claim_wait_is_woken_when_a_job_is_created(self):
         self.connect()
 
@@ -406,6 +447,9 @@ class AgentAutostartTests(unittest.TestCase):
             def join(self, timeout=None):
                 pass
 
+            def is_alive(self):
+                return True
+
         with tempfile.TemporaryDirectory() as temp_dir, patch.object(
             desktop.os, "name", "nt"
         ), patch.object(
@@ -472,7 +516,6 @@ class AgentAutostartTests(unittest.TestCase):
             MenuItem=lambda *_args, **_kwargs: object(),
         )
         fake_pystray.Menu.SEPARATOR = object()
-        ready_visibility = []
 
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
             sys.modules, {"pystray": fake_pystray}
@@ -488,16 +531,17 @@ class AgentAutostartTests(unittest.TestCase):
                 connection,
                 SimpleNamespace(),
                 Path(temp_dir),
-                on_ready=lambda: ready_visibility.append(FakeIcon.last_instance.visible),
             )
 
         self.assertEqual(outcome, "quit")
         self.assertTrue(FakeIcon.last_instance.visible)
-        self.assertEqual(ready_visibility, [True])
 
     def test_missing_tray_backend_stops_with_error_instead_of_fallback(self):
+        # 托盘后端都加载不了时同样只影响界面：仍然报错提示，但绝不停止代理，
+        # 否则已领取的任务会被服务端按租约超时回收。
+        stopped = []
         application = SimpleNamespace(
-            stop=lambda: None,
+            stop=lambda: stopped.append(True),
             disconnect=lambda: None,
         )
         connection = SimpleNamespace()
@@ -515,9 +559,12 @@ class AgentAutostartTests(unittest.TestCase):
             )
 
         self.assertEqual(outcome, "tray-failed")
+        self.assertEqual(stopped, [], "托盘后端缺失时不应停止代理")
         fatal.assert_called_once()
 
-    def test_invisible_tray_backend_stops_agent(self):
+    def test_invisible_tray_backend_keeps_agent_running(self):
+        # 托盘图标起不来只影响界面。代理线程在连接成功后已独立启动，
+        # 绝不能因此停止代理，否则正在执行的任务会被服务端按租约回收。
         stopped = []
         application = SimpleNamespace(
             client=object(),
@@ -532,8 +579,12 @@ class AgentAutostartTests(unittest.TestCase):
         )
 
         class InvisibleIcon:
+            last_instance = None
+
             def __init__(self, *_args, **_kwargs):
                 self._visible = False
+                self.set_attempts = 0
+                InvisibleIcon.last_instance = self
 
             @property
             def visible(self):
@@ -542,6 +593,7 @@ class AgentAutostartTests(unittest.TestCase):
             @visible.setter
             def visible(self, _value):
                 self._visible = False
+                self.set_attempts += 1
 
             def run(self, setup=None):
                 setup(self)
@@ -549,6 +601,7 @@ class AgentAutostartTests(unittest.TestCase):
             def stop(self):
                 pass
 
+        InvisibleIcon.__module__ = "pystray._win32"
         fake_pystray = SimpleNamespace(
             Icon=InvisibleIcon,
             Menu=lambda *_items: object(),
@@ -566,6 +619,8 @@ class AgentAutostartTests(unittest.TestCase):
             desktop, "_start_wake_listener", return_value=lambda: None
         ), patch.object(
             desktop, "_start_background_update_checks"
+        ), patch.object(
+            desktop, "TRAY_ICON_RETRY_DELAY_SECONDS", 0.0
         ):
             outcome = desktop._run_tray(
                 application,
@@ -575,7 +630,12 @@ class AgentAutostartTests(unittest.TestCase):
             )
 
         self.assertEqual(outcome, "tray-failed")
-        self.assertTrue(stopped)
+        self.assertEqual(stopped, [], "托盘不可见时不应停止代理")
+        self.assertEqual(
+            InvisibleIcon.last_instance.set_attempts,
+            desktop.TRAY_ICON_ATTEMPTS,
+            "托盘图标显示应重试而不是一次失败就放弃",
+        )
         fatal.assert_called_once()
 
 

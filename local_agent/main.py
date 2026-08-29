@@ -423,19 +423,26 @@ class LocalAgentApplication:
                 if image_paths
                 else self.runner.submit(job, video_path, cover_image_path)
             )
+            cancel_notified = False
             while not future.done():
                 try:
                     result = future.result(timeout=10)
                     break
                 except FutureTimeoutError:
+                    # 取消只需要下达一次。重复 cancel 会不断刷日志，也会让
+                    # 上传器反复收到取消信号。
+                    if cancel_notified:
+                        continue
                     try:
                         heartbeat_with_grace()
                     except AgentJobCancelledError as exc:
                         cancellation_reason = str(exc)
+                        cancel_notified = True
                         _agent_log("收到中断请求，正在停止本地浏览器任务")
                         self.runner.cancel(job_id)
                     except AgentLeaseLostError as exc:
                         cancellation_reason = str(exc)
+                        cancel_notified = True
                         _agent_log(
                             f"{cancellation_reason}，正在停止本地浏览器任务",
                             error=True,

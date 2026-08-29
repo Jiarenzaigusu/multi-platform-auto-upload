@@ -52,6 +52,10 @@ class AgentTaskManager:
         self._guard = threading.RLock()
         self._job_waiters: set[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = set()
         self._agents: dict[str, dict[str, Any]] = {}
+        # 被判离线的代理先暂存而不是直接丢弃。请求本身携带有效设备令牌就足以
+        # 证明它还活着（续约晚了往往只是被长任务阻塞），此时可以直接恢复在线，
+        # 避免把健康任务误判成失联。
+        self._dropped_agents: dict[str, dict[str, Any]] = {}
         self._local_upload_tickets: dict[str, dict[str, Any]] = {}
         self._local_assets: dict[str, dict[str, Any]] = {}
         self._maintenance_errors: list[str] = []
@@ -479,7 +483,32 @@ class AgentTaskManager:
             for key, item in self._agents.items()
             if item["last_seen_monotonic"] < cutoff
         ]:
-            self._agents.pop(agent_id, None)
+            self._dropped_agents[agent_id] = self._agents.pop(agent_id)
+        # 只保留最近若干个，避免长期运行下无界增长。
+        while len(self._dropped_agents) > 8:
+            self._dropped_agents.pop(next(iter(self._dropped_agents)), None)
+
+    def _revive_agent_locked(self, agent_id: str) -> None:
+        """Restore a dropped agent that just proved it is still alive.
+
+        Callers must hold the guard. Reaching this point already means the
+        device token validated, so the agent is authenticated even though its
+        presence entry was reaped for a late renewal.
+        """
+        if agent_id in self._agents:
+            return
+        previous = self._dropped_agents.pop(agent_id, None) or {}
+        now_iso = datetime.now(timezone.utc).isoformat()
+        self._agents[agent_id] = {
+            "agent_id": agent_id,
+            "device_name": previous.get("device_name") or "本地代理",
+            "system": previous.get("system") or "",
+            "version": previous.get("version") or "",
+            "capabilities": list(previous.get("capabilities") or ()),
+            "connected_at": previous.get("connected_at") or now_iso,
+            "last_seen_at": now_iso,
+            "last_seen_monotonic": 0.0,
+        }
 
     def _offline_after_seconds(self) -> float:
         # Official agents renew presence through a 10-second idle long poll.
@@ -507,6 +536,7 @@ class AgentTaskManager:
         self.reap_expired_jobs()
         with self._guard:
             self._drop_offline_agents_locked(time.monotonic())
+            self._revive_agent_locked(agent_id)
             self._touch_agent_locked(agent_id)
             active_jobs = self.store.list_active_jobs()
             if any(job.get("agent_id") == agent_id for job in active_jobs):
@@ -544,6 +574,7 @@ class AgentTaskManager:
     def heartbeat(self, job_id: str, agent_id: str) -> dict[str, Any]:
         with self._guard:
             self._drop_offline_agents_locked(time.monotonic())
+            self._revive_agent_locked(agent_id)
             self._touch_agent_locked(agent_id)
             self._owned_active_job(job_id, agent_id)
             now = datetime.now(timezone.utc)
