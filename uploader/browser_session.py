@@ -97,6 +97,11 @@ def _browser_launch_args(*, headless: bool) -> list[str]:
         f"--force-device-scale-factor={scale:.3f}",
         f"--window-size={window_width},{window_height}",
         "--window-position=0,0",
+        # 抑制 Edge 冷启动时的首次运行引导/默认浏览器检查，避免首次任务时
+        # 引导 UI 干扰 headed 窗口并引发异常。
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-features=msEdgeFirstRunExperience",
     ]
 
 

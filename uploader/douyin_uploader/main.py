@@ -6,6 +6,7 @@ import contextlib
 import inspect
 import json
 import os
+import sys
 from pathlib import Path
 
 from patchright.async_api import BrowserContext
@@ -67,7 +68,8 @@ async def _handle_sms_verify(page: Page, account_file: str) -> bool:
         await asyncio.sleep(1)
 
     # stdout 打印机器可读行，Agent 实时读到后立刻问用户要验证码
-    print(f"[VERIFY_REQUIRED] phone={phone_hint} account={Path(account_file).stem}", flush=True)
+    if sys.stdout is not None:
+        print(f"[VERIFY_REQUIRED] phone={phone_hint} account={Path(account_file).stem}", flush=True)
     douyin_logger.info(_msg("⏳", "等待 Agent 传入验证码..."))
 
     # 轮询等待 code 文件出现，最多等 5 分钟

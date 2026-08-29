@@ -1085,7 +1085,7 @@ class JDVideo(JDBaseUploader):
 
         jd_logger.warning(_msg("🔐", "检测到安全验证码，上传已暂停"))
 
-        is_tty = sys.stdin.isatty()
+        is_tty = sys.stdin is not None and sys.stdin.isatty()
 
         if is_tty:
             # 交互终端模式：等用户按回车再确认
@@ -1113,10 +1113,11 @@ class JDVideo(JDBaseUploader):
                     jd_logger.warning(_msg("⚠️", "验证码仍未消失，请重新完成验证后再按回车"))
         else:
             # 后台进程模式：打印提示，轮询等弹窗消失（最长 10 分钟）
-            print("\n" + "=" * 50, flush=True)
-            print("⚠️  触发验证码，请在浏览器中完成验证（旋转图片到正确角度）", flush=True)
-            print("   程序将等待验证完成，最长等待 10 分钟...", flush=True)
-            print("=" * 50, flush=True)
+            if sys.stdout is not None:
+                print("\n" + "=" * 50, flush=True)
+                print("⚠️  触发验证码，请在浏览器中完成验证（旋转图片到正确角度）", flush=True)
+                print("   程序将等待验证完成，最长等待 10 分钟...", flush=True)
+                print("=" * 50, flush=True)
             jd_logger.warning(_msg("⏳", "后台模式：等待验证码完成（最长 10 分钟）"))
 
             for i in range(600):  # 最多 600 秒 = 10 分钟

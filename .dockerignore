@@ -1,0 +1,12 @@
+.git
+.venv
+.venv.invalid-from-other-machine
+__pycache__
+*.py[cod]
+.pytest_cache
+data
+runtime
+logs
+webapp/frontend/node_modules
+webapp/frontend/dist
+deploy/windows/output

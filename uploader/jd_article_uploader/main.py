@@ -437,7 +437,7 @@ class JDArticle:
             return
 
         jd_logger.warning("🔐 检测到京东图文安全验证码，发布已暂停")
-        if sys.stdin.isatty():
+        if sys.stdin is not None and sys.stdin.isatty():
             while True:
                 print("\n请在京东发布页完成验证码，完成后按回车继续...", flush=True)
                 await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)

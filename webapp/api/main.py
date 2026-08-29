@@ -4,12 +4,13 @@ import asyncio
 import json
 import os
 import uuid
+from threading import Lock
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import AsyncIterator
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from fastapi import (
     BackgroundTasks,
@@ -50,6 +51,7 @@ from webapp.api.batch_tmall_article import parse_tmall_article_batch_workbook
 from webapp.api.batch_tmall_video import parse_tmall_video_batch_workbook
 from webapp.api.batch_xiaohongshu_article import parse_xiaohongshu_article_batch_workbook
 from webapp.api.batch_xiaohongshu_video import parse_xiaohongshu_video_batch_workbook
+from webapp.api.dam import DamApiError, DamOpenApiClient, DamSettings, stream_download
 from webapp.api.media import (
     MediaQuotaExceededError,
     UploadTooLargeError,
@@ -75,7 +77,7 @@ from webapp.api.platforms import delete_account_cookie
 from webapp.api.store import TERMINAL_STATUSES
 from webapp.api.tasks import TaskManager
 from webapp.auth import AuthService, AuthStore, create_auth_router
-from webapp.auth.dependencies import require_operator, require_user
+from webapp.auth.dependencies import require_operator, require_session, require_user
 from webapp.auth.middleware import AuthenticationMiddleware
 from webapp.llm_adapter import create_llm_adapter_router
 from webapp.workspaces import AppDataPaths, UserWorkspace, UserWorkspaceRegistry
@@ -291,6 +293,8 @@ def create_app(
     app.state.data_paths = data_paths
     app.state.workspace_registry = workspace_registry
     app.state.auth_service = auth_service
+    dam_sessions: dict[str, DamSettings] = {}
+    dam_sessions_lock = Lock()
     trusted_browser_origins = set(settings.allowed_origins)
     app.add_middleware(
         TrustedHostMiddleware,
@@ -349,6 +353,12 @@ def create_app(
     def operator_workspace(request: Request) -> UserWorkspace:
         user = require_operator(request)
         return workspace_registry.get(user.id)
+
+    def dam_client(request: Request) -> DamOpenApiClient:
+        session = require_session(request)
+        with dam_sessions_lock:
+            session_settings = dam_sessions.get(session.session_id)
+        return DamOpenApiClient(session_settings or DamSettings())
 
     def delete_account_and_cookie(
         workspace: UserWorkspace, platform: str, account: str
@@ -439,6 +449,110 @@ def create_app(
             "execution_mode": "local_agent",
             "platforms": ["tmall", "jd", "xiaohongshu", "douyin"],
         }
+
+    @app.get("/api/dam/status")
+    async def dam_status(request: Request, _: UserWorkspace = Depends(current_workspace)) -> dict:
+        """Return the current user's in-memory DAM session status."""
+        client = dam_client(request)
+        if not client.settings.configured:
+            return {"configured": False, "bindings": [], "binding": None}
+        try:
+            bindings = await client.bindings()
+            binding = next((item for item in bindings if (
+                item.get("tenantCode") == client.settings.tenant
+                and item.get("catalogCode") == client.settings.catalog
+            )), None)
+            return {"configured": True, "bindings": bindings, "binding": binding}
+        except DamApiError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    @app.post("/api/dam/session")
+    async def configure_dam_session(
+        request: Request,
+        _: UserWorkspace = Depends(current_workspace),
+    ) -> dict:
+        payload = await request.json()
+        candidate = DamSettings(
+            host=str(payload.get("host", "")).strip(),
+            key=str(payload.get("key", "")).strip(),
+            secret=str(payload.get("secret", "")).strip(),
+            tenant=str(payload.get("tenant", "")).strip(),
+            catalog=str(payload.get("catalog", "")).strip(),
+        )
+        if not candidate.configured:
+            raise HTTPException(status_code=422, detail="Host、Key ID、Secret、Tenant、Catalog 均为必填")
+        try:
+            client = DamOpenApiClient(candidate)
+            bindings = await client.bindings()
+        except DamApiError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        matched = [item for item in bindings if (
+            item.get("tenantCode") == candidate.tenant
+            and item.get("catalogCode") == candidate.catalog
+        )]
+        if len(matched) != 1:
+            raise HTTPException(status_code=403, detail="Tenant/Catalog 不在该 DAM Key 的授权绑定中")
+        with dam_sessions_lock:
+            dam_sessions[require_session(request).session_id] = candidate
+        return {"configured": True, "bindings": bindings, "binding": matched[0]}
+
+    @app.delete("/api/dam/session", status_code=204)
+    def clear_dam_session(
+        request: Request,
+        _: UserWorkspace = Depends(current_workspace),
+    ) -> None:
+        with dam_sessions_lock:
+            dam_sessions.pop(require_session(request).session_id, None)
+
+    @app.get("/api/dam/folders")
+    async def dam_folders(
+        request: Request,
+        parent_id: int | None = Query(default=None),
+        _: UserWorkspace = Depends(current_workspace),
+    ) -> dict:
+        try:
+            return {"folders": await dam_client(request).folders(parent_id)}
+        except DamApiError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    @app.get("/api/dam/assets")
+    async def dam_assets(
+        request: Request,
+        folder_id: int = Query(..., ge=1),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=40, ge=1, le=100),
+        keyword: str = Query(default="", max_length=120),
+        _: UserWorkspace = Depends(current_workspace),
+    ) -> dict:
+        try:
+            return {"assets": await dam_client(request).assets(folder_id, page=page, page_size=page_size, keyword=keyword)}
+        except DamApiError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    @app.get("/api/dam/assets/{asset_id}")
+    async def dam_asset(request: Request, asset_id: int, _: UserWorkspace = Depends(current_workspace)) -> dict:
+        try:
+            return {"asset": await dam_client(request).asset(asset_id)}
+        except DamApiError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    @app.get("/api/dam/assets/{asset_id}/download")
+    async def dam_asset_download(request: Request, asset_id: int, _: UserWorkspace = Depends(current_workspace)):
+        try:
+            asset = await dam_client(request).asset(asset_id)
+            if int(asset.get("fileSize") or 0) > settings.max_upload_bytes:
+                raise HTTPException(status_code=413, detail="DAM 素材超过发布台允许的最大文件大小")
+            url = asset.get("downloadUrl") or asset.get("previewUrl") or asset.get("quickPreviewUrl")
+            if not url:
+                raise HTTPException(status_code=404, detail="该 DAM 素材没有可用下载地址")
+            response, iterator = await stream_download(url, max_bytes=settings.max_upload_bytes)
+            media_type = asset.get("mimeType") or response.headers.get("content-type", "application/octet-stream")
+            filename = str(asset.get("originalFilename") or asset.get("name") or f"dam-{asset_id}")
+            return StreamingResponse(iterator, media_type=media_type, headers={
+                "Content-Disposition": f"attachment; filename=dam-{asset_id}; filename*=UTF-8''{quote(filename)}",
+            })
+        except DamApiError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     @app.get("/api/readiness")
     def readiness() -> JSONResponse:

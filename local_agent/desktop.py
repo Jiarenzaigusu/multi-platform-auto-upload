@@ -609,7 +609,7 @@ def _run_tray(
         if not application.stopping:
             raise RuntimeError("Windows 托盘循环意外结束")
     except Exception as exc:
-        message = f"Windows 托盘初始化失败，助手无法继续运行：{exc}"
+        message = f"Windows 托盘初始化失败：{exc}"
         logger.exception("{}", message)
         _show_fatal_error(message)
         if icon is not None:
@@ -617,8 +617,8 @@ def _run_tray(
                 icon.stop()
             except Exception:
                 pass
-        application.stop()
-        application.disconnect()
+        # 不在这里停止代理 worker：托盘意外结束不应中断正在执行的任务。
+        # run() 会根据 worker 是否已启动决定保活（无界面继续运行）还是退出。
         return "tray-failed"
     finally:
         stop_wake_listener()
@@ -1210,6 +1210,7 @@ def run() -> None:
     theme.enable_dpi_awareness()
     args = build_parser().parse_args()
     if not _acquire_single_instance():
+        logger.info("助手退出：已有实例在运行，已通知其显示窗口")
         return
     store = AgentConnectionStore(args.data_dir)
     try:
@@ -1220,15 +1221,22 @@ def run() -> None:
     if connection is None:
         connection = _pairing_dialog(store, args.data_dir)
     if connection is None:
+        logger.info("助手退出：未完成配对")
         return
 
     while connection is not None:
         client = AgentApiClient(connection.server_url, connection.agent_token)
-        application = LocalAgentApplication(client, data_root=args.data_dir, poll_seconds=2)
+        application = LocalAgentApplication(
+            client,
+            data_root=args.data_dir,
+            poll_seconds=2,
+            paired_user_id=(getattr(connection, "user", None) or {}).get("id"),
+        )
         connect_outcome = _connect_with_status_window(
             application, start_hidden=args.background
         )
         if connect_outcome == "cancelled":
+            logger.info("助手退出：连接已取消")
             return
         if connect_outcome in {"unauthorized", "re-pair"}:
             previous_server = connection.server_url
@@ -1260,18 +1268,31 @@ def run() -> None:
             show_status_on_start=not args.background,
             on_ready=start_worker_after_tray_ready,
         )
+
+        if tray_outcome == "tray-failed":
+            logger.error("助手退出：Windows 托盘组件失败")
+            if worker_started.is_set():
+                # 托盘意外结束不应中断代理：保持主线程存活，让 worker 继续
+                # 领取/执行任务并续心跳，直到授权失效(401)或进程被手动结束。
+                logger.error("代理 worker 将继续后台运行（无托盘界面）")
+                worker.join()
+            return
+
         application.stop()
         application.disconnect()
         if worker_started.is_set():
             worker.join(timeout=15)
+
         if tray_outcome == "re-pair":
+            logger.info("助手退出：解除配对，重新进入配置")
             connection = _pairing_dialog(store, args.data_dir)
             continue
-        if tray_outcome == "tray-failed":
-            return
+
         if not application.authorization_failed:
+            logger.info("助手退出：用户主动退出")
             return
 
+        logger.warning("助手退出：设备授权失效，重新进入配对")
         previous_server = connection.server_url
         store.clear()
         connection = _pairing_dialog(

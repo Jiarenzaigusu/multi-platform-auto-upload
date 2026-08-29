@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { apiRequest as request, apiUrl, configureApiClient } from './api-client.js'
 import AgentSetupDialog from './components/AgentSetupDialog.vue'
 import AuthGate from './components/AuthGate.vue'
+import DamAssetPicker from './components/DamAssetPicker.vue'
 import AiCopyView from './features/ai-copy/AiCopyView.vue'
 import LlmAdapterView from './features/llm-adapter/LlmAdapterView.vue'
 import UserManagementView from './features/users/UserManagementView.vue'
@@ -921,6 +922,33 @@ async function onFileChange(event) {
   draftRestoredVideoName.value = ''
 }
 
+async function onDamVideoSelected(file) {
+  form.video = file
+  snapshotWorkspaceMedia()
+  publishError.value = ''
+  draftRestoredVideoName.value = ''
+  if (file.size <= DRAFT_VIDEO_MAX_BYTES) {
+    await persistDraftVideo(file)
+  } else {
+    await deleteDraftVideo()
+    showNotice('DAM 视频超过 100 MiB，仅保留文字配置，不复制到浏览器草稿库', 'info')
+  }
+}
+
+function onDamImagesSelected(files) {
+  form.images = files
+  snapshotWorkspaceMedia()
+  publishError.value = ''
+  if (imageInput.value) imageInput.value.value = ''
+  if (imageFolderInput.value) imageFolderInput.value.value = ''
+}
+
+function onDamCoverSelected(file) {
+  form.coverImage = file
+  snapshotWorkspaceMedia()
+  publishError.value = ''
+}
+
 function onCoverImageChange(event) {
   const file = event.target.files?.[0] || null
   // Selecting "Cancel" must not discard the previously selected cover.
@@ -1154,17 +1182,24 @@ async function uploadFileToAgent(file, kind) {
     body: JSON.stringify({ filename: file.name, size: file.size, kind }),
   })
   const separator = ticket.upload_url.includes('?') ? '&' : '?'
+  const uploadUrl = `${ticket.upload_url}${separator}ticket=${encodeURIComponent(ticket.ticket)}`
   let response
-  try {
-    response = await fetch(`${ticket.upload_url}${separator}ticket=${encodeURIComponent(ticket.ticket)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
-      body: file,
-      mode: 'cors',
-      cache: 'no-store',
-    })
-  } catch (error) {
-    throw new Error('无法连接 Windows 助手本机上传服务，请更新并重启助手后重试')
+  for (let attempt = 0; ; attempt++) {
+    try {
+      response = await fetch(uploadUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+        body: file,
+        mode: 'cors',
+        cache: 'no-store',
+      })
+      break
+    } catch (error) {
+      if (attempt >= 2) {
+        throw new Error('无法连接 Windows 助手本机上传服务，请更新并重启助手后重试')
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)))
+    }
   }
   const body = await response.json().catch(() => ({}))
   if (!response.ok || !body.asset) {
@@ -1431,6 +1466,7 @@ onBeforeUnmount(() => {
             <button type="button" class="quiet danger section-heading-action" @click="clearPublishDraft">一键清空发布配置与素材</button>
           </div>
           <template v-if="isVideo">
+            <div class="asset-source-row"><span>素材来源</span><DamAssetPicker mode="video" :limit="1" @selected="onDamVideoSelected" /></div>
             <div class="dropzone">
               <input id="video-file" ref="videoInput" type="file" accept="video/mp4,video/quicktime,video/x-matroska,video/x-m4v,video/x-msvideo,video/webm,.m4v,.avi" @change="onFileChange" />
               <label for="video-file"><strong>{{ form.video ? form.video.name : '选择视频文件' }}</strong><small>{{ form.video ? `${(form.video.size / 1024 / 1024).toFixed(1)} MB` : '支持 MP4、MOV、MKV、M4V、AVI、WebM' }}</small></label>
@@ -1439,6 +1475,7 @@ onBeforeUnmount(() => {
           </template>
           <div v-else class="field image-upload-field">
             <span>图文图片</span>
+            <DamAssetPicker mode="image" :limit="articleImageLimit" @selected="onDamImagesSelected" />
             <input id="article-image-files" ref="imageInput" class="native-file-input" type="file" multiple :accept="articleImageAccept" @change="onImagesChange" />
             <label class="cover-file-picker" :class="{ selected: form.images.length }" for="article-image-files"><span class="cover-file-action">{{ form.images.length ? '重新选择图片' : '选择图片文件' }}</span><span class="cover-file-name">{{ form.images.length ? `已选择 ${form.images.length} 张图片` : `按选择顺序上传，最多 ${articleImageLimit} 张` }}</span></label>
             <input id="article-image-folder" ref="imageFolderInput" class="native-file-input" type="file" multiple webkitdirectory directory @change="onImageFolderChange" />
@@ -1457,6 +1494,7 @@ onBeforeUnmount(() => {
           </div>
           <div v-if="isVideo" class="field cover-image-field">
             <span>自定义封面图片 <em>可选</em></span>
+            <DamAssetPicker mode="cover" :limit="1" @selected="onDamCoverSelected" />
             <input id="cover-image-file" ref="coverImageInput" class="native-file-input" type="file" accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp" @change="onCoverImageChange" />
             <label class="cover-file-picker" :class="{ selected: form.coverImage }" for="cover-image-file">
               <span class="cover-file-action">{{ form.coverImage ? '更换封面' : '选择封面图片' }}</span>

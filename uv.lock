@@ -352,6 +352,7 @@ dependencies = [
     { name = "certifi" },
     { name = "loguru" },
     { name = "patchright" },
+    { name = "pillow" },
     { name = "pydantic" },
 ]
 
@@ -360,7 +361,6 @@ build = [
     { name = "pyinstaller" },
 ]
 desktop = [
-    { name = "pillow" },
     { name = "pystray" },
 ]
 test = [
@@ -369,6 +369,7 @@ test = [
 ]
 web = [
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "openpyxl" },
     { name = "python-multipart" },
     { name = "uvicorn", extra = ["standard"] },
@@ -380,10 +381,11 @@ requires-dist = [
     { name = "certifi", specifier = ">=2024.8.30,<2027" },
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.115,<1" },
     { name = "httpx", marker = "extra == 'test'", specifier = ">=0.27,<1" },
+    { name = "httpx", marker = "extra == 'web'", specifier = ">=0.27,<1" },
     { name = "loguru", specifier = "==0.7.3" },
     { name = "openpyxl", marker = "extra == 'web'", specifier = ">=3.1,<4" },
     { name = "patchright", specifier = "==1.58.2" },
-    { name = "pillow", marker = "extra == 'desktop'", specifier = ">=10,<13" },
+    { name = "pillow", specifier = ">=10,<13" },
     { name = "pydantic", specifier = ">=2.9,<3" },
     { name = "pyinstaller", marker = "extra == 'build'", specifier = ">=6.10,<7" },
     { name = "pystray", marker = "extra == 'desktop'", specifier = "==0.19.5" },

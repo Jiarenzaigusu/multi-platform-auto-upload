@@ -109,6 +109,28 @@ Vite 会把 `/api` 代理到本机 `8788`，认证 Cookie 仍保持同源。
 
 ## 公司云服务器直接部署方案
 
+### Docker 一键部署（Linux）
+
+Docker 部署会自动构建 Vue 前端和 Python 服务，并将数据保存到 Docker 命名卷。首次部署：
+
+```bash
+cp deploy/docker/docker.env.example deploy/docker/docker.env
+# 示例已按服务器 175.27.255.46:8788 配置；如域名或地址变化请同步修改
+docker compose -f deploy/docker/docker-compose.yml up --build -d
+```
+
+部署完成后访问 `http://服务器IP:8788`。查看日志或停止服务：
+
+```bash
+docker compose -f deploy/docker/docker-compose.yml logs -f mpau-web
+docker compose -f deploy/docker/docker-compose.yml down
+```
+
+Windows 助手安装包通过 `deploy/windows/output/` 只读挂载到容器；发布新版助手时替换该目录中的安装包和 `agent-installer.json`，不需要重建镜像。业务数据保存在 `mpau-data` 命名卷，执行 `down` 不会删除；只有显式增加 `--volumes` 才会删除数据卷。
+
+首次远程初始化管理员时，将 `MPAU_ALLOW_REMOTE_BOOTSTRAP=true` 写入
+`deploy/docker/docker.env`，初始化完成后改回 `false` 并重新创建容器。
+
 云端不执行浏览器自动化，可部署在 Windows Server 或 Linux。FastAPI 可以作为普通后台服务运行，不需要交互式桌面或 RDP 常驻会话。
 
 ```text
@@ -133,6 +155,8 @@ Vite 会把 `/api` 代理到本机 `8788`，认证 Cookie 仍保持同源。
 
 - `deploy/linux/mpau-web.service`：Linux systemd 服务；
 - `deploy/linux/mpau.env.example`：Linux 生产环境变量示例；
+- `deploy/docker/Dockerfile`、`deploy/docker/docker-compose.yml`：Linux Docker 一键部署；
+- `deploy/docker/docker.env.example`：Docker 环境变量示例；
 - `deploy/windows/start-mpau.ps1`：Windows Server 启动云端 FastAPI；
 - `deploy/windows/build-mpau-agent.ps1`：构建自包含 Windows 安装包；
 - `deploy/windows/start-mpau-agent.ps1`：开发环境启动桌面助手；

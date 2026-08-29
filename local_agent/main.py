@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import platform
 import re
 import shutil
@@ -121,6 +122,7 @@ class LocalAgentApplication:
         *,
         data_root: Path,
         poll_seconds: float,
+        paired_user_id: str | None = None,
     ) -> None:
         self.client = client
         self.data_root = secure_directory(data_root)
@@ -132,6 +134,7 @@ class LocalAgentApplication:
         self.authorization_failed = False
         self._disconnect_guard = threading.Lock()
         self._disconnect_notified = False
+        self._paired_user_id = paired_user_id
         self.runner: AgentJobRunner | None = None
         self.local_upload_server: LocalUploadServer | None = None
         self.hello = {
@@ -162,42 +165,54 @@ class LocalAgentApplication:
         with self._disconnect_guard:
             self._disconnect_notified = True
 
+    def _ensure_runtime(self, user_id: str) -> None:
+        """Idempotently (re)create the job runner and the local upload service.
+
+        The local upload service must be listening before we report online, so
+        the server never advertises "online" while 127.0.0.1:48765 is still
+        binding. Reusing the paired user id lets us bind before reporting.
+        """
+        if self.runner is not None and self.runner.user_id == user_id:
+            return
+        if self.runner is not None:
+            self.runner.shutdown()
+            self.runner = None
+        if self.local_upload_server is not None:
+            self.local_upload_server.stop()
+            self.local_upload_server = None
+        paths = user_paths(self.data_root, user_id)
+        self.runner = AgentJobRunner(user_id, paths)
+        local_upload_server = LocalUploadServer(
+            self.client, self.runner.paths.runtime / "assets"
+        )
+        try:
+            local_upload_server.start()
+        except OSError as exc:
+            if self.runner is not None:
+                self.runner.shutdown()
+                self.runner = None
+            self.local_upload_server = None
+            raise RuntimeError(
+                "本机上传服务启动失败，端口 48765 可能已被占用"
+            ) from exc
+        self.local_upload_server = local_upload_server
+
     def connect(self) -> None:
+        # Bind 127.0.0.1:48765 before reporting online so the server never shows
+        # "在线" while the local upload port is still coming up.
+        if self._paired_user_id:
+            self._ensure_runtime(self._paired_user_id)
         response = self.client.connect(self.hello)
         with self._disconnect_guard:
             self._disconnect_notified = False
-        user = response["user"]
-        paths = user_paths(self.data_root, user["id"])
-        if self.runner is not None and self.runner.user_id != user["id"]:
-            self.runner.shutdown()
-            self.runner = None
-            if self.local_upload_server is not None:
-                self.local_upload_server.stop()
-                self.local_upload_server = None
-        if self.runner is None:
-            self.runner = AgentJobRunner(user["id"], paths)
-        if self.local_upload_server is None:
-            local_upload_server = LocalUploadServer(
-                self.client, self.runner.paths.runtime / "assets"
-            )
-            try:
-                local_upload_server.start()
-            except OSError as exc:
-                if self.runner is not None:
-                    self.runner.shutdown()
-                    self.runner = None
-                self.local_upload_server = None
-                raise RuntimeError(
-                    "本机上传服务启动失败，端口 48765 可能已被占用"
-                ) from exc
-            self.local_upload_server = local_upload_server
+        self._ensure_runtime(response["user"]["id"])
         self.poll_seconds = max(1.0, float(response.get("poll_seconds", self.poll_seconds)))
         self.claim_wait_seconds = max(
             0.0, min(30.0, float(response.get("claim_wait_seconds", 0)))
         )
         self.lease_seconds = max(30.0, float(response.get("lease_seconds", 45)))
         _agent_log(
-            f"本地代理已连接：{user['display_name']} ({user['username']})，"
+            f"本地代理已连接：{response['user']['display_name']} ({response['user']['username']})，"
             f"设备 {self.hello['device_name']}"
         )
         _agent_log("发布任务将在这台电脑上启动 Microsoft Edge。按 Ctrl+C 停止代理。")
@@ -543,6 +558,7 @@ def run() -> None:
         client,
         data_root=args.data_dir,
         poll_seconds=args.poll_seconds,
+        paired_user_id=(stored.user.get("id") if stored else None),
     )
     if args.pair_code:
         try:
