@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import inspect
 import os
 from datetime import datetime
 from pathlib import Path
@@ -13,11 +12,6 @@ from patchright.async_api import Page
 
 from utils.config import DEBUG_MODE, LOCAL_EDGE_HEADLESS
 from uploader.base_video import BaseVideoUploader
-from utils.login_qrcode import build_login_qrcode_path
-from utils.login_qrcode import decode_qrcode_from_path
-from utils.login_qrcode import print_terminal_qrcode
-from utils.login_qrcode import remove_qrcode_file
-from utils.login_qrcode import save_data_url_image
 from utils.log import xiaohongshu_logger
 
 XHS_LOGIN_URL = "https://creator.xiaohongshu.com/login"
@@ -34,21 +28,11 @@ def _msg(emoji: str, text: str) -> str:
     return f"{emoji} {text}"
 
 
-async def _emit_qrcode_callback(qrcode_callback, payload: dict):
-    if not qrcode_callback:
-        return
-
-    callback_result = qrcode_callback(payload)
-    if inspect.isawaitable(callback_result):
-        await callback_result
-
-
 def _build_login_result(
     success: bool,
     status: str,
     message: str,
     account_file: str,
-    qrcode: dict | None = None,
     current_url: str = "",
 ) -> dict:
     return {
@@ -56,7 +40,6 @@ def _build_login_result(
         "status": status,
         "message": message,
         "account_file": str(account_file),
-        "qrcode": qrcode,
         "current_url": current_url,
     }
 
@@ -73,61 +56,6 @@ async def _open_xhs_qrcode_panel(page: Page) -> None:
     await switch_img.wait_for(state="visible", timeout=10000)
     await switch_img.click()
     await login_box.locator("div:has-text('扫一扫')").first.wait_for(state="visible", timeout=10000)
-
-
-async def _find_xhs_qrcode_locator(page: Page):
-    await _open_xhs_qrcode_panel(page)
-
-    qrcode_img = page.locator('.login-box-container').get_by_text("APP扫一扫登录").filter(visible=True).locator("xpath=..//following-sibling::div//img").nth(0)
-
-    if await qrcode_img.count():
-        return qrcode_img
-
-    raise RuntimeError("未在扫一扫登录区域找到小红书二维码图片")
-
-
-async def _extract_xhs_qrcode_src(page: Page) -> str:
-    qrcode_img = await _find_xhs_qrcode_locator(page)
-    await qrcode_img.wait_for(state="visible", timeout=30000)
-    qrcode_src = await qrcode_img.get_attribute("src")
-    if not qrcode_src:
-        raise RuntimeError("未获取到小红书登录二维码地址")
-    return qrcode_src
-
-
-async def _save_xhs_qrcode(
-    page: Page,
-    account_file: str,
-    previous_qrcode_path: Path | None = None,
-    qrcode_callback=None,
-) -> dict:
-    qrcode_src = await _extract_xhs_qrcode_src(page)
-    qrcode_path = build_login_qrcode_path(account_file, suffix="xhs_login_qrcode")
-    qrcode_img = await _find_xhs_qrcode_locator(page)
-
-    if qrcode_src.startswith("data:image/"):
-        save_data_url_image(qrcode_src, qrcode_path)
-    else:
-        qrcode_path.parent.mkdir(parents=True, exist_ok=True)
-        await qrcode_img.screenshot(path=str(qrcode_path))
-
-    if previous_qrcode_path and previous_qrcode_path != qrcode_path:
-        if remove_qrcode_file(previous_qrcode_path):
-            xiaohongshu_logger.info(_msg("🧹", f"临时二维码文件已清理: {previous_qrcode_path}"))
-
-    xiaohongshu_logger.info(_msg("🖼️", f"二维码已经准备好啦，已保存到: {qrcode_path}"))
-    qrcode_content = decode_qrcode_from_path(qrcode_path)
-    if qrcode_content:
-        print_terminal_qrcode(qrcode_content, qrcode_path, "小红书APP")
-    else:
-        xiaohongshu_logger.warning(_msg("😵", f"终端没法完整显示二维码，请打开 {qrcode_path} 扫码"))
-
-    qrcode_info = {
-        "image_path": str(qrcode_path),
-        "image_data_url": qrcode_src,
-    }
-    await _emit_qrcode_callback(qrcode_callback, qrcode_info)
-    return qrcode_info
 
 
 async def _is_xhs_login_completed(page: Page) -> bool:
@@ -192,8 +120,6 @@ async def xiaohongshu_setup(
     account_file,
     handle=False,
     return_detail=False,
-    qrcode_callback=None,
-    headless: bool = LOCAL_EDGE_HEADLESS,
     *,
     session,
     auth_cache_seconds: float = 0,
@@ -209,8 +135,6 @@ async def xiaohongshu_setup(
         xiaohongshu_logger.info(_msg("🥹", "cookie 失效了，准备打开浏览器重新登录"))
         result = await xiaohongshu_cookie_gen(
             account_file,
-            qrcode_callback=qrcode_callback,
-            headless=headless,
             session=session,
         )
         return result if return_detail else result["success"]
@@ -221,30 +145,22 @@ async def xiaohongshu_setup(
 
 async def xiaohongshu_cookie_gen(
     account_file,
-    qrcode_callback=None,
     poll_interval: int = 3,
     max_checks: int = 100,
-    headless: bool = LOCAL_EDGE_HEADLESS,
     *,
     session,
 ):
-    if headless:
-        xiaohongshu_logger.info(_msg("🖼️", "小红书登录将以无头模式运行，小人会输出终端二维码并保存本地二维码图片"))
-
     account_path = Path(account_file)
     account_path.parent.mkdir(parents=True, exist_ok=True)
 
     async def run_with_context(context: BrowserContext):
-        qrcode_path = None
-        qrcode_info = None
         result = _build_login_result(False, "failed", "小红书登录失败", account_file)
         page = None
         try:
             page = await context.new_page()
             await page.goto(XHS_LOGIN_URL)
-            qrcode_info = await _save_xhs_qrcode(page, account_file, qrcode_callback=qrcode_callback)
-            qrcode_path = Path(qrcode_info["image_path"])
-            xiaohongshu_logger.info(_msg("🧍", "请扫码，小人正在耐心等待登录完成"))
+            await _open_xhs_qrcode_panel(page)
+            xiaohongshu_logger.info(_msg("🧍", "请在打开的浏览器窗口中用小红书 APP 扫码登录"))
 
             for _ in range(max_checks):
                 if await _is_xhs_login_completed(page):
@@ -252,7 +168,7 @@ async def xiaohongshu_cookie_gen(
                     await context.storage_state(path=account_file)
                     if await cookie_auth(account_file, session=session):
                         xiaohongshu_logger.success(_msg("🥳", "小红书扫码登录成功，小人开心收工"))
-                        result = _build_login_result(True, "success", "小红书扫码登录成功", account_file, qrcode_info, page.url)
+                        result = _build_login_result(True, "success", "小红书扫码登录成功", account_file, page.url)
                         session.mark_authenticated(True)
                     else:
                         result = _build_login_result(
@@ -260,7 +176,6 @@ async def xiaohongshu_cookie_gen(
                             "cookie_invalid",
                             "小红书扫码流程结束，但 cookie 校验失败",
                             account_file,
-                            qrcode_info,
                             page.url,
                         )
                     return result
@@ -272,14 +187,11 @@ async def xiaohongshu_cookie_gen(
                 "timeout",
                 "等待小红书扫码登录超时",
                 account_file,
-                qrcode_info,
                 page.url,
             )
         except Exception as exc:
             result = _build_login_result(False, "failed", str(exc), account_file, current_url=page.url if page else "")
         finally:
-            if remove_qrcode_file(qrcode_path):
-                xiaohongshu_logger.info(_msg("🧹", f"临时二维码文件已清理: {qrcode_path}"))
             if not result["success"]:
                 xiaohongshu_logger.error(_msg("😢", f"登录失败: {result['message']}"))
             if page:

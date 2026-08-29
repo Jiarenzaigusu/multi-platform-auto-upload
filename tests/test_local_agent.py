@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import http.client
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -22,6 +25,7 @@ from local_agent.credentials import AgentConnectionStore
 from local_agent import desktop
 from local_agent.desktop import _connect_with_status_window
 from local_agent import autostart
+from local_agent.local_upload import LocalUploadServer
 from local_agent.main import LocalAgentApplication, _agent_log, _server_url
 from local_agent.runner import AgentJobRunner
 from uploader.errors import PublishResultUncertainError
@@ -1247,6 +1251,391 @@ class InstallerManifestTests(unittest.TestCase):
             manifest_path.unlink()
             self.assertIsNone(load_installer_manifest(installer))
             self.assertIsNone(load_installer_manifest(Path(temp_dir) / "missing.exe"))
+
+
+PREFLIGHT_HEADERS = {
+    "Access-Control-Request-Method": "POST",
+    "Access-Control-Request-Headers": "content-type",
+    "Access-Control-Request-Private-Network": "true",
+}
+
+UPLOAD_ORIGIN = "https://console.example"
+
+
+class _FakeUploadClient:
+    """Stand in for the cloud broker without any network access."""
+
+    def __init__(self, *, size: int = 5, filename: str = "demo.mp4") -> None:
+        self.size = size
+        self.filename = filename
+        self.authorize_error: Exception | None = None
+        self.authorize_calls: list[tuple[str, str, bool]] = []
+        self.complete_calls: list[dict] = []
+        self._assets = 0
+
+    def authorize_local_upload(self, ticket: str, origin: str, *, reserve: bool = True):
+        self.authorize_calls.append((ticket, origin, reserve))
+        if self.authorize_error is not None:
+            raise self.authorize_error
+        self._assets += 1
+        return {
+            "asset_id": f"{self._assets:032x}",
+            "filename": self.filename,
+            "size": self.size,
+        }
+
+    def complete_local_upload(
+        self, ticket: str, origin: str, *, asset_id: str, sha256: str, size: int
+    ):
+        self.complete_calls.append(
+            {
+                "ticket": ticket,
+                "origin": origin,
+                "asset_id": asset_id,
+                "sha256": sha256,
+                "size": size,
+            }
+        )
+        return {
+            "asset_id": asset_id,
+            "filename": self.filename,
+            "size": size,
+            "sha256": sha256,
+            "kind": "video",
+        }
+
+
+class LocalUploadCorsTests(unittest.TestCase):
+    """Verify the browser contract of the local upload endpoint.
+
+    The web UI posts from a public HTTPS origin to 127.0.0.1, so Chrome always
+    sends a private-network preflight first. Any answer without CORS headers -
+    errors included - makes the browser raise a TypeError and the UI reports an
+    unreachable agent while this server is in fact listening.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.asset_root = self.root / "assets"
+        self.client = _FakeUploadClient()
+        self.port = self._free_port()
+        self.server = LocalUploadServer(
+            self.client, self.asset_root, port=self.port
+        )
+        self.server.start()
+
+    def tearDown(self) -> None:
+        self.server.stop()
+        self.temporary.cleanup()
+
+    @staticmethod
+    def _free_port() -> int:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            return int(probe.getsockname()[1])
+
+    @staticmethod
+    def _header(headers, name: str) -> str | None:
+        for key, value in headers:
+            if key.lower() == name.lower():
+                return value
+        return None
+
+    def _send(
+        self,
+        method: str,
+        path: str,
+        *,
+        origin: str | None = UPLOAD_ORIGIN,
+        host: str | None = None,
+        body: bytes | None = None,
+        headers: dict[str, str] | None = None,
+    ):
+        request_headers = dict(headers or {})
+        if origin is not None:
+            request_headers["Origin"] = origin
+        if host is not None:
+            request_headers["Host"] = host
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            connection.request(method, path, body=body, headers=request_headers)
+            response = connection.getresponse()
+            payload = response.read()
+            return response.status, response.getheaders(), payload
+        finally:
+            connection.close()
+
+    def _send_incomplete(
+        self, origin: str, *, declared_length: int = 4096, sent: bytes = b"short"
+    ) -> None:
+        """Open a POST, promise more bytes than are delivered, then hang up.
+
+        Windows does not reliably deliver a response after shutdown(SHUT_WR),
+        and reading one blocks the test, so the client hangs up without
+        reading. Coping with the dead client is the server's job.
+        """
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        try:
+            connection.putrequest("POST", "/v1/upload?ticket=ticket-abort")
+            connection.putheader("Host", "127.0.0.1")
+            connection.putheader("Origin", origin)
+            connection.putheader("Content-Type", "text/plain;charset=UTF-8")
+            connection.putheader("Content-Length", str(declared_length))
+            connection.endheaders()
+            connection.send(sent)
+        finally:
+            connection.close()
+
+    def _wait_for_abort_cleanup(self, timeout: float = 5.0) -> None:
+        """Give the server time to notice the hang-up and clean up."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.client.authorize_calls:
+                return
+            time.sleep(0.05)
+
+    def assertCorsVisible(self, headers, origin: str = UPLOAD_ORIGIN) -> None:
+        """A response the browser is allowed to read must echo the origin."""
+        self.assertEqual(
+            self._header(headers, "Access-Control-Allow-Origin"), origin
+        )
+        self.assertEqual(self._header(headers, "Vary"), "Origin")
+        self.assertEqual(
+            self._header(headers, "Access-Control-Allow-Private-Network"), "true"
+        )
+        self.assertEqual(self._header(headers, "Cache-Control"), "no-store")
+
+    def test_preflight_answers_204_without_contacting_the_cloud(self):
+        self.client.authorize_error = AgentApiError("发布台暂时不可用", 502)
+
+        status, headers, body = self._send(
+            "OPTIONS", "/v1/upload?ticket=ticket-1", headers=PREFLIGHT_HEADERS
+        )
+
+        self.assertEqual(status, 204)
+        self.assertEqual(body, b"")
+        # The preflight must not depend on a reachable cloud: the ticket is
+        # fully validated by the POST that actually carries the file.
+        self.assertEqual(self.client.authorize_calls, [])
+        self.assertCorsVisible(headers)
+        self.assertEqual(
+            self._header(headers, "Access-Control-Allow-Methods"), "POST, OPTIONS"
+        )
+        self.assertEqual(
+            self._header(headers, "Access-Control-Allow-Headers"), "Content-Type"
+        )
+        self.assertEqual(self._header(headers, "Access-Control-Max-Age"), "300")
+
+    def test_preflight_survives_a_cloud_outage_even_without_a_status_code(self):
+        self.client.authorize_error = AgentApiError("连接被重置")
+
+        status, headers, _body = self._send(
+            "OPTIONS", "/v1/upload?ticket=ticket-1", headers=PREFLIGHT_HEADERS
+        )
+
+        self.assertEqual(status, 204)
+        self.assertCorsVisible(headers)
+
+    def test_preflight_without_a_ticket_is_rejected_but_stays_readable(self):
+        status, headers, body = self._send(
+            "OPTIONS", "/v1/upload", headers=PREFLIGHT_HEADERS
+        )
+
+        self.assertEqual(status, 403)
+        self.assertCorsVisible(headers)
+        self.assertIn("预检失败", json.loads(body)["detail"])
+
+    def test_preflight_rejects_other_paths_with_cors_headers(self):
+        status, headers, _body = self._send(
+            "OPTIONS", "/v1/anything?ticket=ticket-1", headers=PREFLIGHT_HEADERS
+        )
+
+        self.assertEqual(status, 403)
+        self.assertCorsVisible(headers)
+
+    def test_preflight_rejects_requests_addressed_to_a_public_host(self):
+        status, headers, _body = self._send(
+            "OPTIONS",
+            "/v1/upload?ticket=ticket-1",
+            host="console.example",
+            headers=PREFLIGHT_HEADERS,
+        )
+
+        self.assertEqual(status, 403)
+        self.assertCorsVisible(headers)
+
+    def test_preflight_never_reflects_a_non_web_origin(self):
+        for origin in (
+            None,
+            "",
+            "null",
+            "file://",
+            "evil.example",
+            "ftp://console.example",
+            "javascript:alert(1)",
+            "https://",
+        ):
+            with self.subTest(origin=origin):
+                status, headers, _body = self._send(
+                    "OPTIONS",
+                    "/v1/upload?ticket=ticket-1",
+                    origin=origin,
+                    headers=PREFLIGHT_HEADERS,
+                )
+
+                self.assertEqual(status, 403)
+                self.assertIsNone(
+                    self._header(headers, "Access-Control-Allow-Origin")
+                )
+                self.assertIsNone(
+                    self._header(headers, "Access-Control-Allow-Private-Network")
+                )
+
+    def test_preflight_accepts_loopback_and_lan_origins(self):
+        for origin in (
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://10.31.108.221:8788",
+            "https://publish.example.com",
+        ):
+            with self.subTest(origin=origin):
+                status, headers, _body = self._send(
+                    "OPTIONS",
+                    "/v1/upload?ticket=ticket-1",
+                    origin=origin,
+                    headers=PREFLIGHT_HEADERS,
+                )
+
+                self.assertEqual(status, 204)
+                self.assertCorsVisible(headers, origin)
+
+    def test_post_without_a_ticket_answers_403_with_cors_headers(self):
+        status, headers, body = self._send("POST", "/v1/upload", body=b"video")
+
+        self.assertEqual(status, 403)
+        self.assertCorsVisible(headers)
+        self.assertIn("请求无效", json.loads(body)["detail"])
+
+    def test_post_reports_a_cloud_rejection_with_cors_headers(self):
+        self.client.authorize_error = AgentApiError("票据已过期", 502)
+
+        status, headers, body = self._send(
+            "POST", "/v1/upload?ticket=ticket-1", body=b"video"
+        )
+
+        self.assertEqual(status, 502)
+        self.assertCorsVisible(headers)
+        self.assertEqual(json.loads(body)["detail"], "票据已过期")
+
+    def test_post_size_mismatch_answers_422_with_cors_headers(self):
+        status, headers, body = self._send(
+            "POST", "/v1/upload?ticket=ticket-1", body=b"vid"
+        )
+
+        self.assertEqual(status, 422)
+        self.assertCorsVisible(headers)
+        self.assertIn("大小与票据不一致", json.loads(body)["detail"])
+
+    def test_post_aborted_transfer_keeps_the_server_alive(self):
+        """A browser hanging up mid-upload must not break later uploads.
+
+        The aborted transfer itself cannot be answered: once the client has
+        stopped sending, writing a response raises ConnectionAbortedError on
+        Windows. What matters is that the worker thread survives the hang-up.
+        """
+        # The declared length must match the ticket, otherwise the size check
+        # short-circuits before the body is read and the abort never happens.
+        self.client.size = 4096
+        self._send_incomplete(UPLOAD_ORIGIN)
+        self._wait_for_abort_cleanup()
+
+        # Restore the ticket size: the next upload is a normal, complete one.
+        self.client.size = 5
+        status, headers, body = self._send(
+            "POST", "/v1/upload?ticket=ticket-2", body=b"video"
+        )
+        self.assertEqual(status, 201)
+        self.assertCorsVisible(headers)
+        self.assertEqual(json.loads(body)["asset"]["filename"], "demo.mp4")
+
+    def test_post_aborted_transfer_does_not_leave_a_partial_file(self):
+        self.client.size = 4096
+        self._send_incomplete(UPLOAD_ORIGIN)
+        self._wait_for_abort_cleanup()
+
+        self.assertEqual(len(self.client.authorize_calls), 1)
+        self.assertEqual(list(self.asset_root.iterdir()), [])
+
+    def test_post_stores_the_file_and_answers_201_with_cors_headers(self):
+        payload = b"video"
+
+        status, headers, body = self._send(
+            "POST", "/v1/upload?ticket=ticket-1", body=payload
+        )
+
+        self.assertEqual(status, 201)
+        self.assertCorsVisible(headers)
+        asset = json.loads(body)["asset"]
+        self.assertEqual(asset["size"], len(payload))
+
+        stored = list(self.asset_root.iterdir())
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0].read_bytes(), payload)
+        self.assertEqual(stored[0].suffix, ".mp4")
+        self.assertNotIn(".part", stored[0].name)
+
+        self.assertEqual(len(self.client.complete_calls), 1)
+        completed = self.client.complete_calls[0]
+        self.assertEqual(completed["ticket"], "ticket-1")
+        self.assertEqual(completed["origin"], UPLOAD_ORIGIN)
+        self.assertEqual(completed["sha256"], hashlib.sha256(payload).hexdigest())
+        self.assertEqual(completed["size"], len(payload))
+        # The authoritative check happens on the POST, with the reservation.
+        self.assertEqual(
+            self.client.authorize_calls, [("ticket-1", UPLOAD_ORIGIN, True)]
+        )
+
+    def test_browser_round_trip_preflight_then_upload(self):
+        preflight_status, preflight_headers, _body = self._send(
+            "OPTIONS", "/v1/upload?ticket=ticket-1", headers=PREFLIGHT_HEADERS
+        )
+        self.assertEqual(preflight_status, 204)
+        allowed = {
+            method.strip()
+            for method in self._header(
+                preflight_headers, "Access-Control-Allow-Methods"
+            ).split(",")
+        }
+        self.assertIn("POST", allowed)
+
+        status, headers, body = self._send(
+            "POST",
+            "/v1/upload?ticket=ticket-1",
+            body=b"video",
+            headers={"Content-Type": "text/plain;charset=UTF-8"},
+        )
+
+        self.assertEqual(status, 201)
+        self.assertCorsVisible(headers)
+        self.assertIn("asset", json.loads(body))
+
+    def test_every_rejection_path_is_readable_by_the_browser(self):
+        """Regression guard: a non-2xx answer without CORS is indistinguishable
+        from an agent that is not running."""
+        cases = {
+            "missing ticket": ("OPTIONS", "/v1/upload", {}),
+            "foreign path": ("OPTIONS", "/v1/other?ticket=t", {}),
+            "foreign host": ("OPTIONS", "/v1/upload?ticket=t", {"host": "x.example"}),
+            "post without ticket": ("POST", "/v1/upload", {}),
+        }
+        for name, (method, path, extra) in cases.items():
+            with self.subTest(case=name):
+                _status, headers, _body = self._send(method, path, **extra)
+                self.assertEqual(
+                    self._header(headers, "Access-Control-Allow-Origin"),
+                    UPLOAD_ORIGIN,
+                )
 
 
 if __name__ == "__main__":

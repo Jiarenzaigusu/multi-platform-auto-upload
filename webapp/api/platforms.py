@@ -503,7 +503,6 @@ async def login_xiaohongshu_account(
                 str(account_file),
                 handle=True,
                 return_detail=True,
-                headless=headless,
                 session=session,
             )
     finally:
@@ -611,7 +610,6 @@ async def login_douyin_account(
                 str(account_file),
                 handle=True,
                 return_detail=True,
-                headless=headless,
                 session=session,
             )
     finally:

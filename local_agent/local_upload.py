@@ -58,38 +58,63 @@ class LocalUploadServer:
                 host = (self.headers.get("Host") or "").split(":", 1)[0].lower()
                 return host in {"127.0.0.1", "localhost"}
 
+            @staticmethod
+            def _valid_origin(origin: str) -> bool:
+                """Only reflect origins that look like a real web page."""
+                if not origin:
+                    return False
+                parsed = urlsplit(origin)
+                return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+
             def _cors_headers(self, origin: str) -> None:
+                # Every response, errors included, must carry CORS headers.
+                # A preflight that answers with a non-2xx status *without* them
+                # makes the browser raise a TypeError, which the web UI reports
+                # as "助手未启动" even while this server is listening.
+                if not self._valid_origin(origin):
+                    return
                 self.send_header("Access-Control-Allow-Origin", origin)
                 self.send_header("Vary", "Origin")
                 self.send_header("Access-Control-Allow-Private-Network", "true")
                 self.send_header("Cache-Control", "no-store")
 
-            def _json(self, status: int, body: dict, *, origin: str = "") -> None:
+            def _json(self, status: int, body: dict) -> None:
                 encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(encoded)))
-                if origin:
-                    self._cors_headers(origin)
-                self.end_headers()
-                self.wfile.write(encoded)
+                try:
+                    # A browser that hung up mid-upload can leave the socket in a
+                    # state where writing blocks instead of failing. Bound the
+                    # write so one dead client cannot pin this worker forever.
+                    self.connection.settimeout(5)
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(encoded)))
+                    self._cors_headers(self._origin())
+                    self.end_headers()
+                    self.wfile.write(encoded)
+                except (
+                    BrokenPipeError,
+                    ConnectionAbortedError,
+                    ConnectionResetError,
+                    TimeoutError,
+                ):
+                    # Nobody is left to read an answer; drop it quietly instead
+                    # of letting the worker thread log a failure.
+                    self.close_connection = True
 
             def do_OPTIONS(self) -> None:
                 origin = self._origin()
-                ticket = self._ticket()
                 if (
                     urlsplit(self.path).path != "/v1/upload"
                     or not self._valid_local_host()
-                    or not origin
-                    or not ticket
+                    or not self._valid_origin(origin)
+                    or not self._ticket()
                 ):
                     self._json(403, {"detail": "本机上传预检失败"})
                     return
-                try:
-                    owner.client.authorize_local_upload(ticket, origin, reserve=False)
-                except AgentApiError as exc:
-                    self._json(exc.status or 502, {"detail": str(exc)})
-                    return
+                # Preflight must never depend on the cloud: a transient server
+                # error used to answer it with 5xx and no CORS headers, which
+                # browsers report as an unreachable agent. The ticket is fully
+                # validated by the POST that actually carries the file.
                 self.send_response(204)
                 self._cors_headers(origin)
                 self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -103,17 +128,17 @@ class LocalUploadServer:
                 if (
                     urlsplit(self.path).path != "/v1/upload"
                     or not self._valid_local_host()
-                    or not origin
+                    or not self._valid_origin(origin)
                     or not ticket
                 ):
-                    self._json(403, {"detail": "本机上传请求无效"}, origin=origin)
+                    self._json(403, {"detail": "本机上传请求无效"})
                     return
                 try:
                     authorization = owner.client.authorize_local_upload(
                         ticket, origin, reserve=True
                     )
                 except AgentApiError as exc:
-                    self._json(exc.status or 502, {"detail": str(exc)}, origin=origin)
+                    self._json(exc.status or 502, {"detail": str(exc)})
                     return
 
                 expected_size = int(authorization["size"])
@@ -122,7 +147,7 @@ class LocalUploadServer:
                 except ValueError:
                     content_length = -1
                 if content_length != expected_size:
-                    self._json(422, {"detail": "上传大小与票据不一致"}, origin=origin)
+                    self._json(422, {"detail": "上传大小与票据不一致"})
                     return
 
                 asset_id = str(authorization["asset_id"])
@@ -158,9 +183,9 @@ class LocalUploadServer:
                     temporary.unlink(missing_ok=True)
                     destination.unlink(missing_ok=True)
                     status = exc.status if isinstance(exc, AgentApiError) else 500
-                    self._json(status or 502, {"detail": str(exc)}, origin=origin)
+                    self._json(status or 502, {"detail": str(exc)})
                     return
-                self._json(201, {"asset": completed}, origin=origin)
+                self._json(201, {"asset": completed})
 
         self._server = ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
         self._server.daemon_threads = True

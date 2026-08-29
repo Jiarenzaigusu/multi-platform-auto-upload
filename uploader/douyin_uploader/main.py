@@ -3,7 +3,6 @@ from datetime import datetime
 
 import asyncio
 import contextlib
-import inspect
 import json
 import os
 import sys
@@ -12,15 +11,8 @@ from pathlib import Path
 from patchright.async_api import BrowserContext
 from patchright.async_api import Page
 
-
-
 from utils.config import DEBUG_MODE, LOCAL_EDGE_HEADLESS
 from uploader.base_video import BaseVideoUploader
-from utils.login_qrcode import build_login_qrcode_path
-from utils.login_qrcode import decode_qrcode_from_path
-from utils.login_qrcode import print_terminal_qrcode
-from utils.login_qrcode import remove_qrcode_file
-from utils.login_qrcode import save_data_url_image
 from utils.log import douyin_logger
 
 DOUYIN_PUBLISH_STRATEGY_IMMEDIATE = "immediate"
@@ -172,22 +164,12 @@ def _msg(emoji: str, text: str) -> str:
     return f"{emoji} {text}"
 
 
-async def _emit_qrcode_callback(qrcode_callback, payload: dict):
-    if not qrcode_callback:
-        return
-
-    callback_result = qrcode_callback(payload)
-    if inspect.isawaitable(callback_result):
-        await callback_result
-
-
-def _build_login_result(success: bool, status: str, message: str, account_file: str, qrcode: dict | None = None, current_url: str = "") -> dict:
+def _build_login_result(success: bool, status: str, message: str, account_file: str, current_url: str = "") -> dict:
     return {
         "success": success,
         "status": status,
         "message": message,
         "account_file": str(account_file),
-        "qrcode": qrcode,
         "current_url": current_url,
     }
 
@@ -229,8 +211,6 @@ async def douyin_setup(
     account_file,
     handle=False,
     return_detail=False,
-    qrcode_callback=None,
-    headless: bool = LOCAL_EDGE_HEADLESS,
     *,
     session,
     auth_cache_seconds: float = 0,
@@ -246,57 +226,12 @@ async def douyin_setup(
         douyin_logger.info(_msg("🥹", "cookie 失效了，准备打开浏览器重新登录"))
         result = await douyin_cookie_gen(
             account_file,
-            qrcode_callback=qrcode_callback,
-            headless=headless,
             session=session,
         )
         return result if return_detail else result["success"]
 
     result = _build_login_result(True, "cookie_valid", "cookie有效", account_file)
     return result if return_detail else True
-
-
-async def _extract_douyin_qrcode_src(page: Page) -> str:
-    scan_login_tab = page.get_by_text("扫码登录", exact=True).first
-    await scan_login_tab.wait_for(timeout=30000)
-
-    qrcode_img = (
-        scan_login_tab
-        .locator("..")
-        .locator("xpath=following-sibling::div[1]")
-        .locator('img[aria-label="二维码"]')
-        .first
-    )
-
-    if not await qrcode_img.count():
-        qrcode_img = page.get_by_role("img", name="二维码").first
-
-    await qrcode_img.wait_for(state="visible", timeout=30000)
-    src = await qrcode_img.get_attribute("src")
-    if not src:
-        raise RuntimeError("未获取到抖音登录二维码地址")
-
-    return src
-
-
-async def _save_douyin_qrcode(page: Page, account_file: str, previous_qrcode_path: Path | None = None, qrcode_callback=None) -> dict:
-    qrcode_src = await _extract_douyin_qrcode_src(page)
-    qrcode_path = save_data_url_image(qrcode_src, build_login_qrcode_path(account_file))
-    if previous_qrcode_path and previous_qrcode_path != qrcode_path:
-        if remove_qrcode_file(previous_qrcode_path):
-            douyin_logger.info(_msg("🧹", f"临时二维码文件已清理: {previous_qrcode_path}"))
-    douyin_logger.info(_msg("🖼️", f"二维码已经准备好啦，已保存到: {qrcode_path}"))
-    qrcode_content = decode_qrcode_from_path(qrcode_path)
-    if qrcode_content:
-        print_terminal_qrcode(qrcode_content, qrcode_path, "抖音APP")
-    else:
-        douyin_logger.warning(_msg("😵", f"终端没法完整显示二维码，请打开 {qrcode_path} 扫码"))
-    qrcode_info = {
-        "image_path": str(qrcode_path),
-        "image_data_url": qrcode_src,
-    }
-    await _emit_qrcode_callback(qrcode_callback, qrcode_info)
-    return qrcode_info
 
 
 async def _is_douyin_login_completed(page: Page) -> bool:
@@ -322,50 +257,41 @@ async def _is_douyin_login_completed(page: Page) -> bool:
     return True
 
 
-async def _wait_for_douyin_login(page: Page, account_file: str, qrcode_info: dict, qrcode_callback=None, poll_interval: int = 3, max_checks: int = 100) -> dict:
-    qrcode_path = Path(qrcode_info["image_path"])
+async def _wait_for_douyin_login(page: Page, account_file: str, poll_interval: int = 3, max_checks: int = 100) -> dict:
     for _ in range(max_checks):
         if await _is_douyin_login_completed(page):
             douyin_logger.info(_msg("🥳", f"扫码成功，已经跳转到登录后页面: {page.url}"))
-            return _build_login_result(True, "success", "抖音扫码登录成功", account_file, qrcode_info, page.url)
+            return _build_login_result(True, "success", "抖音扫码登录成功", account_file, page.url)
 
         expired_box = page.get_by_text("二维码失效", exact=True).locator("..").first
         if await expired_box.count() and await expired_box.is_visible():
             douyin_logger.warning(_msg("😵", "二维码失效了，小人马上去刷新"))
             await expired_box.click()
             await asyncio.sleep(1)
-            qrcode_info = await _save_douyin_qrcode(page, account_file, qrcode_path, qrcode_callback=qrcode_callback)
-            qrcode_path = Path(qrcode_info["image_path"])
 
         await asyncio.sleep(poll_interval)
 
-    return _build_login_result(False, "timeout", "等待抖音扫码登录超时", account_file, qrcode_info, page.url)
+    return _build_login_result(False, "timeout", "等待抖音扫码登录超时", account_file, page.url)
 
 
 async def douyin_cookie_gen(
     account_file,
-    qrcode_callback=None,
     poll_interval: int = 3,
     max_checks: int = 100,
-    headless: bool = LOCAL_EDGE_HEADLESS,
     *,
     session,
 ):
     async def run_with_context(context: BrowserContext):
-        qrcode_path = None
         result = _build_login_result(False, "failed", "抖音登录失败", account_file)
         page = None
         try:
             page = await context.new_page()
             await page.goto("https://creator.douyin.com/")
-            qrcode_info = await _save_douyin_qrcode(page, account_file, qrcode_callback=qrcode_callback)
-            qrcode_path = Path(qrcode_info["image_path"])
-            douyin_logger.info(_msg("🧍", "请扫码，小人正在耐心等待登录完成"))
+            await page.get_by_text("扫码登录", exact=True).first.wait_for(timeout=30000)
+            douyin_logger.info(_msg("🧍", "请在打开的浏览器窗口中用抖音 APP 扫码登录"))
             result = await _wait_for_douyin_login(
                 page,
                 account_file,
-                qrcode_info,
-                qrcode_callback=qrcode_callback,
                 poll_interval=poll_interval,
                 max_checks=max_checks,
             )
@@ -380,14 +306,11 @@ async def douyin_cookie_gen(
                         "cookie_invalid",
                         "抖音扫码流程结束，但 cookie 校验失败",
                         account_file,
-                        qrcode_info,
                         page.url,
                     )
         except Exception as exc:
             result = _build_login_result(False, "failed", str(exc), account_file, current_url=page.url if page else "")
         finally:
-            if remove_qrcode_file(qrcode_path):
-                douyin_logger.info(_msg("🧹", f"临时二维码文件已清理: {qrcode_path}"))
             if not result["success"]:
                 douyin_logger.error(_msg("😢", f"登录失败: {result['message']}"))
             if page:

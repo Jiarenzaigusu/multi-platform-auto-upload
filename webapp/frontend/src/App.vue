@@ -1194,16 +1194,21 @@ async function uploadFileToAgent(file, kind) {
         cache: 'no-store',
       })
       break
-    } catch (error) {
+    } catch {
+      // fetch only throws when the request never completed: the agent process
+      // is gone or the port is unreachable. Business failures arrive as an HTTP
+      // status below and must surface their own message instead of retrying.
       if (attempt >= 2) {
-        throw new Error('无法连接 Windows 助手本机上传服务，请更新并重启助手后重试')
+        throw new Error(
+          `无法连接 Windows 助手本机上传服务（${ticket.upload_url}）：请确认助手已启动并完成配对。`,
+        )
       }
       await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)))
     }
   }
   const body = await response.json().catch(() => ({}))
   if (!response.ok || !body.asset) {
-    throw new Error(body.detail || 'Windows 助手接收素材失败')
+    throw new Error(body.detail || `Windows 助手接收素材失败（HTTP ${response.status}）`)
   }
   return body.asset
 }

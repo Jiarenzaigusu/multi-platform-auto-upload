@@ -19,7 +19,6 @@ uploader.tmall_video_uploader.main 模块
 from __future__ import annotations
 
 import asyncio
-import inspect
 from io import BytesIO
 import os
 import re
@@ -390,16 +389,6 @@ async def _upload_picker_file(page: Page, picker_frame, cover_path: Path) -> Non
             raise RuntimeError("天猫图片库的“本地上传”控件未打开文件选择器") from nested_exc
 
 
-async def _emit_qrcode_callback(qrcode_callback, payload: dict):
-    """触发二维码/登录回调，支持同步与异步回调函数。"""
-    if not qrcode_callback:
-        return
-
-    callback_result = qrcode_callback(payload)
-    if inspect.isawaitable(callback_result):
-        await callback_result
-
-
 def _build_login_result(
     success: bool,
     status: str,
@@ -559,7 +548,6 @@ async def tmall_setup(
     account_file,
     handle=False,
     return_detail=False,
-    qrcode_callback=None,
     *,
     session: TmallBrowserSession,
     auth_cache_seconds: float = 0,
@@ -569,7 +557,6 @@ async def tmall_setup(
     :param account_file: 账号 Cookie 文件路径
     :param handle: True 时若 Cookie 失效则打开可见浏览器引导用户登录
     :param return_detail: True 返回完整结果 dict，False 返回布尔
-    :param qrcode_callback: 登录回调（保留参数，天猫为手动登录）
     :param session: 浏览器会话
     :param auth_cache_seconds: 鉴权缓存有效期
     :returns: 取决于 return_detail，返回 dict 或布尔
@@ -587,7 +574,6 @@ async def tmall_setup(
         tmall_logger.info(_msg("🥹", "cookie 失效了，准备打开浏览器让用户手动登录淘宝光合平台"))
         result = await tmall_cookie_gen(
             account_file,
-            qrcode_callback=qrcode_callback,
             session=session,
         )
         return result if return_detail else result["success"]
@@ -598,7 +584,6 @@ async def tmall_setup(
 
 async def tmall_cookie_gen(
     account_file,
-    qrcode_callback=None,
     poll_interval: int = 3,
     max_checks: int = 200,
     *,
@@ -610,7 +595,6 @@ async def tmall_cookie_gen(
     密码、短信或其它淘宝安全验证后，本函数保存 storage_state。
 
     :param account_file: 账号 Cookie 文件路径
-    :param qrcode_callback: 登录回调
     :param poll_interval: 轮询间隔秒数
     :param max_checks: 最大轮询次数（默认 200 次，约 10 分钟）
     :param session: 浏览器会话
@@ -625,15 +609,6 @@ async def tmall_cookie_gen(
             page = await context.new_page()
             await page.goto(TMALL_CREATOR_HOME_URL, wait_until="domcontentloaded")
             tmall_logger.info(_msg("🧍", "已打开淘宝光合平台入口，请在浏览器中完成登录和验证"))
-            await _emit_qrcode_callback(
-                qrcode_callback,
-                {
-                    "type": "manual_login",
-                    "login_url": page.url,
-                    "target_url": TMALL_CREATOR_HOME_URL,
-                    "account_file": str(account_file),
-                },
-            )
 
             # 轮询等待用户完成登录，最多 max_checks 次
             for _ in range(max_checks):
